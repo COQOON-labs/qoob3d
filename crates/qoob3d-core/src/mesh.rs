@@ -4,6 +4,13 @@
 
 use std::collections::HashMap;
 
+/// Tessellated B-rep: shaded faces plus the feature edges drawn on top.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ShapeMesh {
+    pub faces: TriMesh,
+    pub edges: Polylines,
+}
+
 /// An indexed triangle mesh with per-vertex normals.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TriMesh {
@@ -11,6 +18,43 @@ pub struct TriMesh {
     pub normals: Vec<[f32; 3]>,
     /// Three indices per triangle, counter-clockwise when seen from outside.
     pub indices: Vec<u32>,
+    /// B-rep face index per triangle (picking, highlighting). Empty if the
+    /// mesh does not come from the kernel. Only stable within one rebuild.
+    pub face_ids: Vec<u32>,
+}
+
+/// A set of polylines in one buffer: polyline `i` spans
+/// `points[starts[i]..starts[i + 1]]`; `starts` ends with a sentinel equal to
+/// `points.len()`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Polylines {
+    pub points: Vec<[f32; 3]>,
+    pub starts: Vec<u32>,
+}
+
+impl Default for Polylines {
+    fn default() -> Self {
+        Self { points: Vec::new(), starts: vec![0] }
+    }
+}
+
+impl Polylines {
+    pub fn len(&self) -> usize {
+        self.starts.len().saturating_sub(1)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &[[f32; 3]]> {
+        self.starts.windows(2).map(|w| &self.points[w[0] as usize..w[1] as usize])
+    }
+
+    /// Line-list vertex pairs (a, b) for all segments, for GPU upload.
+    pub fn segments(&self) -> impl Iterator<Item = [[f32; 3]; 2]> + '_ {
+        self.iter().flat_map(|line| line.windows(2).map(|w| [w[0], w[1]]))
+    }
 }
 
 impl TriMesh {
@@ -80,6 +124,63 @@ impl TriMesh {
         report.volume_mm3 = volume6 / 6.0;
         report
     }
+}
+
+impl TriMesh {
+    /// Closest intersection of a ray with the mesh (both triangle sides),
+    /// Möller–Trumbore. Linear in the triangle count; a BVH can come later.
+    pub fn raycast(&self, origin: [f32; 3], dir: [f32; 3]) -> Option<RayHit> {
+        const EPS: f32 = 1e-9;
+        let mut best: Option<RayHit> = None;
+        for (triangle, tri) in self.indices.as_chunks::<3>().0.iter().enumerate() {
+            let [a, b, c] = tri.map(|i| self.positions[i as usize]);
+            let (e1, e2) = (sub(b, a), sub(c, a));
+            let p = cross3(dir, e2);
+            let det = dot3(e1, p);
+            if det.abs() < EPS {
+                continue;
+            }
+            let inv = 1.0 / det;
+            let s = sub(origin, a);
+            let u = dot3(s, p) * inv;
+            if !(0.0..=1.0).contains(&u) {
+                continue;
+            }
+            let q = cross3(s, e1);
+            let v = dot3(dir, q) * inv;
+            if v < 0.0 || u + v > 1.0 {
+                continue;
+            }
+            let t = dot3(e2, q) * inv;
+            if t > 0.0 && best.is_none_or(|h| t < h.t) {
+                let point = std::array::from_fn(|k| origin[k] + dir[k] * t);
+                best = Some(RayHit { t, triangle, point });
+            }
+        }
+        best
+    }
+}
+
+/// Result of [`TriMesh::raycast`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RayHit {
+    /// Ray parameter: `point = origin + dir * t`.
+    pub t: f32,
+    /// Triangle index (see [`TriMesh::face_ids`] for the B-rep face).
+    pub triangle: usize,
+    pub point: [f32; 3],
+}
+
+fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 
 /// Distance below which two vertices are considered identical by [`TriMesh::analyze`].
@@ -159,6 +260,19 @@ mod tests {
         assert_eq!(b.center(), [1.5, 1.5, -1.5]);
     }
 
+    #[test]
+    fn polylines_iterate_lines_and_segments() {
+        let lines = Polylines {
+            points: vec![[0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [5.0; 3], [6.0; 3]],
+            starts: vec![0, 3, 5],
+        };
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.iter().map(<[_]>::len).collect::<Vec<_>>(), [3, 2]);
+        assert_eq!(lines.segments().count(), 3);
+        assert!(Polylines::default().is_empty());
+        assert_eq!(Polylines::default().segments().count(), 0);
+    }
+
     /// Cube `[0, s]^3` built like kernel output: 4 separate vertices per face.
     fn split_face_cube(s: f32) -> TriMesh {
         let faces: [[[f32; 3]; 4]; 6] = [
@@ -214,6 +328,19 @@ mod tests {
         let r = mesh.analyze();
         assert!(r.is_watertight(), "consistently inverted is still closed: {r:?}");
         assert!((r.volume_mm3 + 1000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn raycast_finds_closest_face() {
+        let mesh = split_face_cube(10.0);
+        let hit = mesh.raycast([5.0, 5.0, 30.0], [0.0, 0.0, -1.0]).unwrap();
+        assert!((hit.t - 20.0).abs() < 1e-5, "{hit:?}");
+        assert!((hit.point[2] - 10.0).abs() < 1e-5);
+        // From inside, the ray still reports the face it exits through.
+        let inside = mesh.raycast([5.0, 5.0, 5.0], [1.0, 0.0, 0.0]).unwrap();
+        assert!((inside.point[0] - 10.0).abs() < 1e-5);
+        assert!(mesh.raycast([50.0, 5.0, 30.0], [0.0, 0.0, -1.0]).is_none());
+        assert!(mesh.raycast([5.0, 5.0, 30.0], [0.0, 0.0, 1.0]).is_none(), "behind origin");
     }
 
     #[test]

@@ -21,6 +21,22 @@ pub struct Cli {
     #[arg(long, value_parser = parse_size, default_value = "1280x800")]
     pub size: [u32; 2],
 
+    /// Orthographic instead of perspective projection for --render.
+    #[arg(long)]
+    pub ortho: bool,
+
+    /// Camera distance factor for --render after fitting (>1 zooms out).
+    #[arg(long, default_value_t = 1.0)]
+    pub zoom: f32,
+
+    /// Printer whose build plate --render shows (id, e.g. bambu-lab-h2d).
+    #[arg(long)]
+    pub printer: Option<String>,
+
+    /// Show the build volume wireframe in --render.
+    #[arg(long)]
+    pub volume: bool,
+
     /// Start the real app, drive it with synthetic input, verify the effect
     /// and exit with code 0 (ok) or 1 (failure). A watchdog catches hangs.
     #[arg(long, conflicts_with = "render")]

@@ -3,7 +3,8 @@
 //! - every ADR has a complete, valid front matter and the required sections
 //! - the ADR id matches its file name, supersede links are mutual
 //! - `docs/adr/README.md` contains the generated index (`--fix` rewrites it)
-//! - every `ADR-NNNN` reference in code and docs points to an existing ADR
+//! - every `ADR-NNNN` reference in code and docs points to an existing ADR,
+//!   and outside `docs/adr/` never to a superseded or rejected one
 //! - every crate has its own CLAUDE.md
 
 use std::collections::BTreeMap;
@@ -236,10 +237,24 @@ fn check_references(root: &Path, by_id: &BTreeMap<String, &Adr>, problems: &mut 
         if rel.starts_with("docs/adr/0000-") {
             continue;
         }
+        let in_adr_dir = rel.starts_with("docs/adr/");
         for (line_no, line) in text.lines().enumerate() {
             for id in adr_refs(line) {
-                if id != "ADR-0000" && !by_id.contains_key(&id) {
+                if id == "ADR-0000" {
+                    continue;
+                }
+                let Some(adr) = by_id.get(&id) else {
                     problems.push(format!("{rel}:{}: Verweis auf unbekannte {id}", line_no + 1));
+                    continue;
+                };
+                // Code and guides must point to the decision that is in force.
+                if !in_adr_dir && matches!(adr.get("status"), "ersetzt" | "verworfen") {
+                    let newer = adr.get("superseded_by");
+                    problems.push(format!(
+                        "{rel}:{}: verweist auf {id} (Status {}), aktuell gültig: {newer}",
+                        line_no + 1,
+                        adr.get("status")
+                    ));
                 }
             }
         }

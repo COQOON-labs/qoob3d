@@ -12,8 +12,9 @@ use eframe::egui::{
     Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, RawInput, TouchPhase, Vec2, pos2,
     vec2,
 };
+use glam::Vec3;
 use qoob3d_core::Aabb;
-use qoob3d_render::Camera;
+use qoob3d_render::{Camera, ViewPreset};
 
 /// Abort if no frame was rendered for this long.
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -21,6 +22,8 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(15);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
 /// Give up waiting for the first kernel result after this many frames.
 const MAX_WAIT_FRAMES: u64 = 3000;
+/// Extra frames a step may wait for a camera animation to finish.
+const MAX_SETTLE_FRAMES: u32 = 600;
 
 pub type SmokeResult = Arc<Mutex<Option<Result<(), String>>>>;
 
@@ -30,6 +33,19 @@ pub struct Observation<'a> {
     pub mesh_bounds: Option<Aabb>,
     pub viewport_center: Pos2,
     pub viewport_aspect: f32,
+    /// Screen position of the ViewCube's "OBEN" face, if visible.
+    pub viewcube_top: Option<Pos2>,
+    pub home_button: Option<Pos2>,
+    pub last_orbit_pivot: Option<Vec3>,
+    pub animating: bool,
+}
+
+/// Screen positions the scripted input aims at (from the previous frame).
+#[derive(Debug, Clone, Copy)]
+struct Targets {
+    center: Pos2,
+    viewcube_top: Option<Pos2>,
+    home: Option<Pos2>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -38,7 +54,7 @@ pub enum Control {
     Close,
 }
 
-type Inject = fn(frame: u32, center: Pos2, raw: &mut RawInput);
+type Inject = fn(frame: u32, at: &Targets, raw: &mut RawInput);
 type Check = fn(before: &Camera, after: &Camera, obs: &Observation<'_>) -> Result<(), String>;
 
 struct Step {
@@ -55,7 +71,7 @@ pub struct SmokeTest {
     current: Option<usize>,
     frame_in_step: u32,
     before: Option<Camera>,
-    center: Pos2,
+    targets: Targets,
     finished: bool,
     frames: Arc<AtomicU64>,
     result: SmokeResult,
@@ -72,7 +88,7 @@ impl SmokeTest {
             current: None,
             frame_in_step: 0,
             before: None,
-            center: pos2(400.0, 300.0),
+            targets: Targets { center: pos2(400.0, 300.0), viewcube_top: None, home: None },
             finished: false,
             frames,
             result: result.clone(),
@@ -82,15 +98,23 @@ impl SmokeTest {
 
     /// Called from `App::raw_input_hook`, before egui processes the frame.
     pub fn inject(&mut self, raw: &mut RawInput) {
+        // Deterministic input only: real mouse/keyboard events (e.g. the user
+        // moving the pointer over the popped-up window) would race with the
+        // script and make the test flaky.
+        raw.events.clear();
         if let Some(step) = self.current.and_then(|i| self.steps.get(i)) {
-            (step.inject)(self.frame_in_step, self.center, raw);
+            (step.inject)(self.frame_in_step, &self.targets, raw);
         }
     }
 
     /// Called at the end of every frame.
     pub fn after_frame(&mut self, obs: &Observation<'_>) -> Control {
         let frame = self.frames.fetch_add(1, Ordering::Relaxed) + 1;
-        self.center = obs.viewport_center;
+        self.targets = Targets {
+            center: obs.viewport_center,
+            viewcube_top: obs.viewcube_top,
+            home: obs.home_button,
+        };
         if self.finished {
             // Waiting for the window to close.
             return Control::Close;
@@ -109,6 +133,11 @@ impl SmokeTest {
         self.frame_in_step += 1;
         let step = &self.steps[index];
         if self.frame_in_step < step.frames {
+            return Control::Continue;
+        }
+        // Animated steps: wait (bounded) until the camera has settled, so the
+        // test does not depend on the display refresh rate.
+        if obs.animating && self.frame_in_step < step.frames + MAX_SETTLE_FRAMES {
             return Control::Continue;
         }
 
@@ -177,19 +206,35 @@ fn spawn_watchdog(frames: Arc<AtomicU64>) {
 fn steps() -> Vec<Step> {
     vec![
         Step {
-            name: "Orbit (Shift + mittlere Maustaste)",
+            name: "Orbit um Cursor-Pivot (Shift + mittlere Maustaste)",
             frames: 7,
-            inject: |f, c, raw| middle_drag(f, c, raw, Modifiers::SHIFT),
-            check: |b, a, _| {
+            inject: |f, at, raw| middle_drag(f, at.center, raw, Modifiers::SHIFT),
+            check: |b, a, obs| {
                 expect_rotated(b, a, true)?;
                 expect_close(b.distance, a.distance, "Distanz")?;
-                expect_vec_close(b.target.into(), a.target.into(), "Target")
+                // Fusion behaviour: the pivot is the model point under the
+                // cursor and stays fixed on screen while orbiting.
+                let pivot = obs.last_orbit_pivot.ok_or("kein Orbit-Pivot gesetzt")?;
+                let bounds = obs.mesh_bounds.ok_or("kein Modell")?;
+                if (0..3)
+                    .any(|k| pivot[k] < bounds.min[k] - 0.01 || pivot[k] > bounds.max[k] + 0.01)
+                {
+                    return Err(format!("Pivot {pivot} liegt nicht auf dem Modell"));
+                }
+                let before = b.project(pivot, obs.viewport_aspect).ok_or("Pivot hinter Kamera")?;
+                let after = a.project(pivot, obs.viewport_aspect).ok_or("Pivot hinter Kamera")?;
+                let moved = (before.truncate() - after.truncate()).length();
+                if moved > 1e-3 {
+                    Err(format!("Pivot hat sich auf dem Bildschirm bewegt ({moved})"))
+                } else {
+                    Ok(())
+                }
             },
         },
         Step {
             name: "Pan (mittlere Maustaste)",
             frames: 7,
-            inject: |f, c, raw| middle_drag(f, c, raw, Modifiers::NONE),
+            inject: |f, at, raw| middle_drag(f, at.center, raw, Modifiers::NONE),
             check: |b, a, _| {
                 expect_rotated(b, a, false)?;
                 expect_moved(b, a)
@@ -198,9 +243,9 @@ fn steps() -> Vec<Step> {
         Step {
             name: "Zoom (Mausrad, 2 Raststufen)",
             frames: 2,
-            inject: |f, c, raw| {
+            inject: |f, at, raw| {
                 if f == 0 {
-                    raw.events.push(Event::PointerMoved(c));
+                    raw.events.push(Event::PointerMoved(at.center));
                     raw.events.push(wheel(MouseWheelUnit::Line, vec2(0.0, 2.0), Modifiers::NONE));
                 }
             },
@@ -209,9 +254,9 @@ fn steps() -> Vec<Step> {
         Step {
             name: "Zoom (Trackpad-Pinch)",
             frames: 2,
-            inject: |f, c, raw| {
+            inject: |f, at, raw| {
                 if f == 0 {
-                    raw.events.push(Event::PointerMoved(c));
+                    raw.events.push(Event::PointerMoved(at.center));
                     raw.events.push(Event::Zoom(1.25));
                 }
             },
@@ -220,9 +265,9 @@ fn steps() -> Vec<Step> {
         Step {
             name: "Pan (Trackpad, zwei Finger)",
             frames: 2,
-            inject: |f, c, raw| {
+            inject: |f, at, raw| {
                 if f == 0 {
-                    raw.events.push(Event::PointerMoved(c));
+                    raw.events.push(Event::PointerMoved(at.center));
                     raw.events.push(wheel(
                         MouseWheelUnit::Point,
                         vec2(40.0, -20.0),
@@ -238,10 +283,10 @@ fn steps() -> Vec<Step> {
         Step {
             name: "Orbit (Trackpad, Shift + zwei Finger)",
             frames: 2,
-            inject: |f, c, raw| {
+            inject: |f, at, raw| {
                 if f == 0 {
                     raw.events.push(Event::ModifiersChanged(Modifiers::SHIFT));
-                    raw.events.push(Event::PointerMoved(c));
+                    raw.events.push(Event::PointerMoved(at.center));
                     raw.events.push(wheel(
                         MouseWheelUnit::Point,
                         vec2(30.0, 10.0),
@@ -254,17 +299,18 @@ fn steps() -> Vec<Step> {
             check: |b, a, _| expect_rotated(b, a, true),
         },
         Step {
-            name: "Einpassen (F6)",
-            frames: 3,
-            inject: |f, c, raw| match f {
+            name: "Einpassen (F6, animiert)",
+            frames: 4,
+            inject: |f, at, raw| match f {
                 0 => {
-                    raw.events.push(Event::PointerMoved(c));
+                    raw.events.push(Event::PointerMoved(at.center));
                     raw.events.push(key(Key::F6, true));
                 }
                 1 => raw.events.push(key(Key::F6, false)),
                 _ => {}
             },
             check: |_, a, obs| {
+                expect_settled(obs)?;
                 let bounds = obs.mesh_bounds.ok_or("kein Modell")?;
                 let mut expected = *a;
                 expected.fit(bounds, obs.viewport_aspect);
@@ -272,7 +318,63 @@ fn steps() -> Vec<Step> {
                 expect_vec_close(expected.target.into(), a.target.into(), "Target")
             },
         },
+        Step {
+            name: "ViewCube: OBEN anklicken",
+            frames: 4,
+            inject: |f, at, raw| {
+                if let Some(p) = at.viewcube_top {
+                    left_click(f, p, raw);
+                }
+            },
+            check: |_, a, obs| {
+                expect_settled(obs)?;
+                let down = a.forward().dot(Vec3::NEG_Z);
+                if down > 0.999 {
+                    Ok(())
+                } else {
+                    Err(format!("Blickrichtung {} statt −Z", a.forward()))
+                }
+            },
+        },
+        Step {
+            name: "Startansicht (Home)",
+            frames: 4,
+            inject: |f, at, raw| {
+                if let Some(p) = at.home {
+                    left_click(f, p, raw);
+                }
+            },
+            check: |_, a, obs| {
+                expect_settled(obs)?;
+                let want = ViewPreset::Iso.eye_direction().normalize();
+                let got = (a.eye() - a.target).normalize();
+                if got.dot(want) > 0.999 {
+                    Ok(())
+                } else {
+                    Err(format!("Blick von {got} statt {want}"))
+                }
+            },
+        },
     ]
+}
+
+fn left_click(f: u32, p: Pos2, raw: &mut RawInput) {
+    let button = |pressed| Event::PointerButton {
+        pos: p,
+        button: PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    match f {
+        0 => raw.events.push(Event::PointerMoved(p)),
+        1 => raw.events.push(button(true)),
+        2 => raw.events.push(button(false)),
+        _ => {}
+    }
+}
+
+fn expect_settled(obs: &Observation<'_>) -> Result<(), String> {
+    if obs.animating { Err("Kamera-Animation läuft noch".into()) } else { Ok(()) }
 }
 
 /// Press middle button, move in four steps of (25, 10) pt, release.

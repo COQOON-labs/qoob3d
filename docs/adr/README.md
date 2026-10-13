@@ -16,11 +16,21 @@ Akzeptierte ADRs werden nicht umgeschrieben, sondern durch eine neue ADR ersetzt
 | [ADR-0004](0004-opencascade-ueber-opencascade-rs.md) | OpenCascade über opencascade-rs von crates.io mit statisch gebautem OCCT 7.8 | akzeptiert | 2026-10-13 | qoob3d-kernel |
 | [ADR-0005](0005-kernel-im-worker-thread.md) | OCCT-Objekte leben ausschließlich in einem eigenen Kernel-Worker-Thread | akzeptiert | 2026-10-13 | qoob3d-kernel, qoob3d-app |
 | [ADR-0006](0006-koordinatensystem-z-oben-mm.md) | Weltkoordinaten sind rechtshändig mit +Z oben, Einheit Millimeter | akzeptiert | 2026-10-13 | qoob3d-core, qoob3d-kernel, qoob3d-render |
-| [ADR-0007](0007-offscreen-rendering-reverse-z.md) | Der Viewport rendert offscreen mit 4× MSAA und Reverse-Z und wird als egui-Textur angezeigt | akzeptiert | 2026-10-13 | qoob3d-render, qoob3d-app |
+| [ADR-0007](0007-offscreen-rendering-reverse-z.md) | Der Viewport rendert offscreen mit 4× MSAA und Reverse-Z und wird als egui-Textur angezeigt | ersetzt | 2026-10-13 | qoob3d-render, qoob3d-app |
 | [ADR-0008](0008-kamera-und-navigation-wie-fusion.md) | Kamera als Orbit-Kamera mit Quaternion, Navigation 1:1 wie Fusion 360 | akzeptiert | 2026-10-13 | qoob3d-render, qoob3d-app |
 | [ADR-0009](0009-projektformat-qoob3d-json.md) | Projektdateien .qoob3d sind versioniertes JSON und enthalten nur die Feature-Liste | akzeptiert | 2026-10-13 | qoob3d-core |
 | [ADR-0010](0010-skizzen-grundformen-ohne-solver.md) | Skizzen bestehen im MVP aus Grundformen mit eigenen Maßen, ohne Constraint-Solver | akzeptiert | 2026-10-13 | qoob3d-core |
 | [ADR-0011](0011-profilreferenzen-ueber-entity-ids.md) | Profile werden über die Menge ihrer begrenzenden Entity-IDs referenziert | akzeptiert | 2026-10-13 | qoob3d-core, qoob3d-kernel |
 | [ADR-0012](0012-inkrementeller-rebuild-hash-kette.md) | Der Rebuild ist inkrementell über eine Hash-Kette pro Feature | akzeptiert | 2026-10-13 | qoob3d-kernel |
 | [ADR-0013](0013-qualitaets-harness.md) | Ein Befehl definiert „fertig“ – cargo xtask check mit Smoke-Test, Render-CLI und Geometrie-Prüfungen | akzeptiert | 2026-10-13 | xtask, qoob3d-app, qoob3d-core, qoob3d-render |
+| [ADR-0014](0014-eigene-occt-wrapper-und-fork.md) | Eigene exception-sichere OCCT-Wrapper im Kernel-Crate, opencascade als minimaler Fork | akzeptiert | 2026-10-13 | qoob3d-kernel |
+| [ADR-0015](0015-overlays-mit-egui.md) | ViewCube und Viewport-Overlays werden mit egui gezeichnet, nur die Szene mit wgpu | akzeptiert | 2026-10-13 | qoob3d-app |
+| [ADR-0016](0016-druckbett-und-druckerprofile.md) | Druckbett aus Druckerprofilen, zentriert um den Ursprung, im Raster-Shader gezeichnet | ersetzt | 2026-10-13 | qoob3d-core, qoob3d-render, qoob3d-app |
+| [ADR-0017](0017-picking-per-cpu-raycast.md) | Picking vorerst per CPU-Raycast gegen das Dreiecksnetz | akzeptiert | 2026-10-13 | qoob3d-core, qoob3d-render, qoob3d-app |
+| [ADR-0018](0018-ui-tests-und-screenshots-mit-kittest.md) | UI-Tests und Screenshots der echten App headless mit egui_kittest und wgpu | akzeptiert | 2026-10-13 | qoob3d-app, xtask |
+| [ADR-0019](0019-viewport-textur-farbraum.md) | Viewport offscreen in sRGB rendern, egui eine Unorm-View derselben Textur geben | akzeptiert | 2026-10-13 | qoob3d-render, qoob3d-app |
+| [ADR-0020](0020-englisch-als-basissprache-mit-sprachpaketen.md) | Englisch ist die Basissprache der UI, weitere Sprachen kommen als Fluent-Sprachpakete | akzeptiert | 2026-10-13 | qoob3d-app, xtask |
+| [ADR-0021](0021-druckerdatenbank-aus-orcaslicer.md) | Druckerdatenbank aus OrcaSlicer-Profilen generiert, mit Sperrzonen und Düsenbereichen | akzeptiert | 2026-10-13 | qoob3d-core, qoob3d-render, qoob3d-app, xtask |
+| [ADR-0022](0022-linksziehen-orbit-fuer-drei-finger.md) | Ziehen mit linker Maustaste (macOS Drei-Finger-Ziehen) dreht die Ansicht, abschaltbar | akzeptiert | 2026-10-13 | qoob3d-app |
+| [ADR-0023](0023-meine-drucker.md) | „Meine Drucker“ als Favoriten oben in der Liste, andere optional ausblendbar | akzeptiert | 2026-10-13 | qoob3d-app |
 <!-- adr-index:end -->

@@ -1,12 +1,7 @@
 //! QOOB3D – parametric CAD for FDM printing.
 
-mod app;
-mod cli;
-mod headless_render;
-mod navigation;
-mod smoke;
-
 use clap::Parser as _;
+use qoob3d_app::{app, cli, headless_render, smoke};
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -19,7 +14,14 @@ fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
 
     if let Some(out) = &cli.render {
-        return headless_render::run(out, cli.view.into(), cli.size);
+        let view = headless_render::RenderView {
+            preset: cli.view.into(),
+            orthographic: cli.ortho,
+            zoom: cli.zoom,
+            printer: cli.printer.clone(),
+            build_volume: cli.volume,
+        };
+        return headless_render::run(out, view, cli.size);
     }
 
     let (smoke, smoke_result) = if cli.smoke_test {

@@ -3,9 +3,9 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 
-use qoob3d_core::TriMesh;
+use qoob3d_core::ShapeMesh;
 
-use crate::tessellate::{demo_cube, tessellate};
+use crate::tessellate::{demo_part, tessellate};
 use crate::{KernelError, VIEW_TESSELLATION_TOLERANCE_MM};
 
 /// Monotonically increasing id of a submitted request. Responses carry the id
@@ -15,14 +15,15 @@ pub type RequestId = u64;
 /// Work the kernel can be asked to do.
 #[derive(Debug, Clone)]
 pub enum Request {
-    /// Milestone-1 smoke test: build a cube and tessellate it.
-    DemoCube { size_mm: f64 },
+    /// Placeholder until the document model exists (M3): build the demo part
+    /// and tessellate it.
+    DemoPart,
 }
 
 /// Results sent back from the worker thread.
 #[derive(Debug, Clone)]
 pub enum Response {
-    Mesh { id: RequestId, result: Result<TriMesh, KernelError> },
+    Mesh { id: RequestId, result: Result<ShapeMesh, KernelError> },
 }
 
 /// Handle to the kernel worker thread. Dropping it shuts the worker down.
@@ -94,9 +95,8 @@ impl Drop for Kernel {
 
 fn handle(id: RequestId, request: Request) -> Response {
     match request {
-        Request::DemoCube { size_mm } => {
-            let shape = demo_cube(size_mm);
-            Response::Mesh { id, result: tessellate(&shape, VIEW_TESSELLATION_TOLERANCE_MM) }
+        Request::DemoPart => {
+            Response::Mesh { id, result: tessellate(&demo_part(), VIEW_TESSELLATION_TOLERANCE_MM) }
         }
     }
 }
@@ -111,12 +111,12 @@ mod tests {
         let mut kernel = Kernel::spawn(move || {
             let _ = tx.send(());
         });
-        let id = kernel.submit(Request::DemoCube { size_mm: 10.0 }).unwrap();
+        let id = kernel.submit(Request::DemoPart).unwrap();
         rx.recv_timeout(std::time::Duration::from_secs(30)).expect("no notification");
         let Some(Response::Mesh { id: got, result }) = kernel.try_recv() else {
             panic!("no response");
         };
         assert_eq!(got, id);
-        assert_eq!(result.unwrap().triangle_count(), 12);
+        assert!(result.unwrap().faces.analyze().is_watertight());
     }
 }

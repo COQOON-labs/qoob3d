@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "xtask"]
+# Vendored third-party code: built as dependency, not linted/formatted as ours.
+exclude = ["third_party"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,10 +15,11 @@ qoob3d-core = { path = "crates/qoob3d-core" }
 qoob3d-kernel = { path = "crates/qoob3d-kernel" }
 qoob3d-render = { path = "crates/qoob3d-render" }
 
-opencascade = "0.3.0"
+# QOOB3D fork of opencascade 0.3.0, see third_party/opencascade/README.md (ADR-0014).
+opencascade = { path = "third_party/opencascade" }
 eframe = "0.36.2"
 glam = { version = "0.34.1", features = ["bytemuck"] }
-bytemuck = { version = "1", features = ["derive"] }
+bytemuck = { version = "1", features = ["derive", "min_const_generics"] }
 thiserror = "2"
 anyhow = "1"
 tracing = "0.1"

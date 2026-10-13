@@ -3,5 +3,7 @@
 //! GPU API, so it stays fast to compile and easy to unit-test.
 
 pub mod mesh;
+pub mod printer;
 
-pub use mesh::{Aabb, MeshReport, TriMesh};
+pub use mesh::{Aabb, MeshReport, Polylines, RayHit, ShapeMesh, TriMesh};
+pub use printer::{BedGeometry, PRINTERS, PrinterProfile};

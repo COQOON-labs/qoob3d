@@ -1,12 +1,12 @@
 ---
 id: ADR-0007
 title: Der Viewport rendert offscreen mit 4× MSAA und Reverse-Z und wird als egui-Textur angezeigt
-status: akzeptiert
+status: ersetzt
 date: 2026-10-13
 crates: [qoob3d-render, qoob3d-app]
 tags: [rendering, wgpu]
 supersedes: []
-superseded_by: null
+superseded_by: ADR-0019
 ---
 
 ## Kontext

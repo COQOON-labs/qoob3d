@@ -1,103 +1,162 @@
-//! Viewport navigation, mapped 1:1 to Autodesk Fusion's default scheme:
+//! Viewport navigation, mapped 1:1 to Autodesk Fusion's default scheme
+//! (ADR-0008, docs/design/bedienung.md):
 //!
-//! | Input                           | Action                      |
-//! |---------------------------------|-----------------------------|
-//! | Middle mouse drag               | Pan                         |
-//! | Shift + middle mouse drag       | Orbit                       |
-//! | Mouse wheel                     | Zoom towards the cursor     |
-//! | Double-click middle mouse / F6  | Fit all                     |
-//! | Trackpad: two-finger swipe      | Pan                         |
-//! | Trackpad: Shift + two fingers   | Orbit                       |
-//! | Trackpad: pinch                 | Zoom towards the cursor     |
+//! | Input                           | Action                                   |
+//! |---------------------------------|------------------------------------------|
+//! | Middle mouse drag               | Pan                                      |
+//! | Shift + middle mouse drag       | Orbit around the point under the cursor  |
+//! | Mouse wheel                     | Zoom towards the cursor                  |
+//! | Double-click middle mouse / F6  | Fit all                                  |
+//! | Trackpad: two-finger swipe      | Pan                                      |
+//! | Trackpad: Shift + two fingers   | Orbit around the point under the cursor  |
+//! | Trackpad: pinch                 | Zoom towards the cursor                  |
+//! | Left drag / three-finger drag   | Orbit (setting, default on; ADR-0022)    |
 
-use eframe::egui::{self, Event, MouseWheelUnit, PointerButton, Pos2, Rect, Response};
-use glam::Vec2;
-use qoob3d_render::Camera;
+use eframe::egui::{self, CursorIcon, Event, MouseWheelUnit, PointerButton, Pos2, Rect, Response};
+use glam::{Vec2, Vec3};
+use qoob3d_render::{Camera, Ray};
 
 /// Radians of orbit per point of pointer movement.
 const ORBIT_SPEED: f32 = 0.006;
 /// Distance factor per mouse-wheel line (one notch).
 const WHEEL_ZOOM_STEP: f32 = 0.88;
+/// A trackpad orbit gesture ends after this pause (seconds).
+const TRACKPAD_GESTURE_GAP: f64 = 0.25;
+
+/// Navigation state that lives across frames.
+#[derive(Debug, Default)]
+pub struct NavState {
+    /// Pivot of the orbit in progress (mouse or trackpad).
+    pub orbit_pivot: Option<Vec3>,
+    last_trackpad_orbit: f64,
+}
 
 #[derive(Debug, Default)]
 pub struct NavOutcome {
     pub fit_requested: bool,
+    /// The user moved the camera this frame (cancels camera animations).
+    pub interacted: bool,
 }
 
-/// Applies this frame's viewport input to `camera`.
+/// Applies this frame's viewport input to `camera`. `pick` returns the
+/// surface point hit by a ray, used as orbit pivot (Fusion behaviour).
+/// `left_drag_orbit`: a left-button drag (macOS three-finger drag) orbits.
 pub fn handle_input(
     ui: &egui::Ui,
     response: &Response,
     rect: Rect,
     camera: &mut Camera,
+    state: &mut NavState,
+    pick: &dyn Fn(Ray) -> Option<Vec3>,
+    left_drag_orbit: bool,
 ) -> NavOutcome {
-    let mut outcome = NavOutcome::default();
+    let mut out = NavOutcome::default();
     let aspect = rect.width() / rect.height().max(1.0);
     let height = rect.height();
 
     // Query the response *before* `ui.input`: both lock the egui context, and
     // calling a `Response` method inside the input closure deadlocks.
     let middle_dragged = response.dragged_by(PointerButton::Middle);
+    let left_orbit = left_drag_orbit && response.dragged_by(PointerButton::Primary);
     let middle_double_clicked = response.double_clicked_by(PointerButton::Middle);
     let hovered = response.hovered();
 
-    ui.input(|i| {
-        // --- mouse drags -----------------------------------------------------
-        if middle_dragged {
-            let d = i.pointer.delta();
-            if i.modifiers.shift {
-                camera.orbit(d.x * ORBIT_SPEED, d.y * ORBIT_SPEED);
-            } else {
-                camera.pan(Vec2::new(d.x, d.y), height);
-            }
-        }
-        if middle_double_clicked {
-            outcome.fit_requested = true;
-        }
-
-        if hovered {
-            if i.key_pressed(egui::Key::F6) {
-                outcome.fit_requested = true;
-            }
-
-            let cursor_ndc = i.pointer.hover_pos().map_or(Vec2::ZERO, |p| to_ndc(p, rect));
-
-            for event in &i.events {
-                match event {
-                    // Physical mouse wheel: zoom.
-                    Event::MouseWheel {
-                        unit: MouseWheelUnit::Line | MouseWheelUnit::Page,
-                        delta,
-                        ..
-                    } => {
-                        // macOS turns Shift+wheel into horizontal scrolling.
-                        let steps = if delta.y != 0.0 { delta.y } else { delta.x };
-                        camera.zoom_at(WHEEL_ZOOM_STEP.powf(steps), cursor_ndc, aspect);
-                    }
-                    // Trackpad swipe: pan, or orbit with Shift.
-                    Event::MouseWheel { unit: MouseWheelUnit::Point, delta, modifiers, .. } => {
-                        if modifiers.shift {
-                            camera.orbit(-delta.x * ORBIT_SPEED, -delta.y * ORBIT_SPEED);
-                        } else {
-                            camera.pan(Vec2::new(delta.x, delta.y), height);
-                        }
-                    }
-                    // Trackpad pinch (factor > 1 = fingers spread = zoom in).
-                    Event::Zoom(factor) if *factor > 0.0 => {
-                        camera.zoom_at(1.0 / factor, cursor_ndc, aspect);
-                    }
-                    _ => {}
-                }
-            }
-        }
+    let (delta, shift, pointer, now, f6, events) = ui.input(|i| {
+        (
+            i.pointer.delta(),
+            i.modifiers.shift,
+            i.pointer.latest_pos(),
+            i.time,
+            i.key_pressed(egui::Key::F6),
+            if hovered { i.events.clone() } else { Vec::new() },
+        )
     });
+    let cursor_ndc = pointer.map_or(Vec2::ZERO, |p| to_ndc(p, rect));
+    let pivot_under_cursor =
+        |camera: &Camera| pick(camera.ray(cursor_ndc, aspect)).unwrap_or(camera.target);
 
-    outcome
+    // --- mouse drags --------------------------------------------------------
+    if middle_dragged || left_orbit {
+        out.interacted = true;
+        ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+        if shift || left_orbit {
+            let pivot = *state.orbit_pivot.get_or_insert_with(|| pivot_under_cursor(camera));
+            camera.orbit_around(pivot, delta.x * ORBIT_SPEED, delta.y * ORBIT_SPEED);
+        } else {
+            camera.pan(Vec2::new(delta.x, delta.y), height);
+        }
+    } else if now - state.last_trackpad_orbit > TRACKPAD_GESTURE_GAP {
+        state.orbit_pivot = None;
+    }
+    if middle_double_clicked || (hovered && f6) {
+        out.fit_requested = true;
+    }
+
+    // --- wheel, trackpad, pinch ---------------------------------------------
+    for event in &events {
+        match event {
+            // Physical mouse wheel: zoom.
+            Event::MouseWheel {
+                unit: MouseWheelUnit::Line | MouseWheelUnit::Page, delta, ..
+            } => {
+                // macOS turns Shift+wheel into horizontal scrolling.
+                let steps = if delta.y != 0.0 { delta.y } else { delta.x };
+                camera.zoom_at(WHEEL_ZOOM_STEP.powf(steps), cursor_ndc, aspect);
+                out.interacted = true;
+            }
+            // Trackpad swipe: pan, or orbit with Shift.
+            Event::MouseWheel { unit: MouseWheelUnit::Point, delta, modifiers, .. } => {
+                if modifiers.shift {
+                    if now - state.last_trackpad_orbit > TRACKPAD_GESTURE_GAP {
+                        state.orbit_pivot = Some(pivot_under_cursor(camera));
+                    }
+                    state.last_trackpad_orbit = now;
+                    let pivot = state.orbit_pivot.unwrap_or(camera.target);
+                    camera.orbit_around(pivot, -delta.x * ORBIT_SPEED, -delta.y * ORBIT_SPEED);
+                } else {
+                    camera.pan(Vec2::new(delta.x, delta.y), height);
+                }
+                out.interacted = true;
+            }
+            // Trackpad pinch (factor > 1 = fingers spread = zoom in).
+            Event::Zoom(factor) if *factor > 0.0 => {
+                camera.zoom_at(1.0 / factor, cursor_ndc, aspect);
+                out.interacted = true;
+            }
+            _ => {}
+        }
+    }
+
+    out
 }
 
 /// Converts a screen position into normalised device coordinates of `rect`.
-fn to_ndc(p: Pos2, rect: Rect) -> Vec2 {
+pub fn to_ndc(p: Pos2, rect: Rect) -> Vec2 {
     let x = (p.x - rect.left()) / rect.width().max(1.0) * 2.0 - 1.0;
     let y = 1.0 - (p.y - rect.top()) / rect.height().max(1.0) * 2.0;
     Vec2::new(x, y)
+}
+
+/// Inverse of [`to_ndc`].
+pub fn from_ndc(ndc: Vec2, rect: Rect) -> Pos2 {
+    Pos2::new(
+        rect.left() + (ndc.x + 1.0) * 0.5 * rect.width(),
+        rect.top() + (1.0 - ndc.y) * 0.5 * rect.height(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ndc_round_trip() {
+        let rect = Rect::from_min_size(Pos2::new(10.0, 20.0), egui::vec2(400.0, 300.0));
+        for p in [Pos2::new(10.0, 20.0), Pos2::new(410.0, 320.0), Pos2::new(123.0, 77.0)] {
+            let back = from_ndc(to_ndc(p, rect), rect);
+            assert!((back - p).length() < 1e-3, "{p:?} -> {back:?}");
+        }
+        assert_eq!(to_ndc(rect.center(), rect), Vec2::ZERO);
+        assert_eq!(to_ndc(rect.left_top(), rect), Vec2::new(-1.0, 1.0));
+    }
 }

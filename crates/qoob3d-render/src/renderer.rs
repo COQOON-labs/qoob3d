@@ -1,31 +1,120 @@
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec4};
-use qoob3d_core::TriMesh;
+use glam::Vec3;
+use qoob3d_core::{BedGeometry, ShapeMesh};
 
-use crate::camera::Camera;
+use crate::camera::{Camera, Projection};
 use crate::wgpu::{self, util::DeviceExt};
 
-/// Format of the texture handed to the UI. sRGB so egui samples it exactly
-/// like its own (sRGB) textures.
+/// Render target format: sRGB, so shading, blending and the MSAA resolve
+/// happen in linear space (ADR-0019).
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+/// Format of the view handed to egui. egui treats texture samples as
+/// gamma-encoded (its own textures are `Rgba8Unorm`), so it must read the
+/// stored sRGB bytes *without* decoding them (ADR-0019).
+pub const DISPLAY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SAMPLE_COUNT: u32 = 4;
 
-/// Linear-space colours of the calm dark theme.
+/// Linear-space colours of the calm dark theme (docs/design/theme.md).
 mod palette {
     pub const BG_TOP: [f32; 4] = [0.032, 0.036, 0.042, 1.0];
     pub const BG_BOTTOM: [f32; 4] = [0.010, 0.011, 0.013, 1.0];
     pub const BODY: [f32; 4] = [0.50, 0.53, 0.57, 1.0];
+    pub const EDGE: [f32; 4] = [0.006, 0.007, 0.008, 1.0];
+    pub const GRID_MINOR: [f32; 4] = [0.09, 0.10, 0.11, 0.35];
+    pub const GRID_MAJOR: [f32; 4] = [0.14, 0.15, 0.17, 0.6];
+    pub const PLATE_FILL: [f32; 4] = [0.035, 0.040, 0.046, 0.65];
+    pub const PLATE_BORDER: [f32; 4] = [0.20, 0.22, 0.24, 0.9];
+    pub const AXIS_X: [f32; 4] = [0.55, 0.06, 0.05, 0.9];
+    pub const AXIS_Y: [f32; 4] = [0.08, 0.40, 0.10, 0.9];
+    pub const AXIS_Z: [f32; 4] = [0.08, 0.20, 0.65, 0.9];
+    /// Warning amber (#F5A623) for non-printable / single-nozzle zones.
+    pub const RESTRICTED: [f32; 4] = [0.91, 0.38, 0.02, 1.0];
+    pub const BUILD_VOLUME: [f32; 4] = [0.30, 0.33, 0.37, 0.55];
+}
+
+/// Capacity of the bed polygon uniform; must match `bed.points` in the
+/// shader and `MAX_POINTS` in `xtask printers`.
+pub const MAX_BED_POINTS: usize = 192;
+
+/// Width (points) and depth offset (fraction of camera distance) of lines.
+const EDGE_STYLE: [f32; 2] = [1.3, 0.0015];
+const AXIS_STYLE: [f32; 2] = [1.6, 0.0];
+const VOLUME_STYLE: [f32; 2] = [1.0, 0.0];
+
+/// What to draw besides the geometry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneOptions<'a> {
+    pub show_grid: bool,
+    /// Build plate in world coordinates, centred on the origin (ADR-0021).
+    pub bed: Option<&'a BedGeometry>,
+    /// Wireframe of the build volume up to the printer's max height.
+    pub show_build_volume: bool,
+    /// UI scale: line widths are specified in points.
+    pub pixels_per_point: f32,
+}
+
+impl<'a> SceneOptions<'a> {
+    pub fn new(bed: Option<&'a BedGeometry>) -> Self {
+        Self { show_grid: true, bed, show_build_volume: false, pixels_per_point: 1.0 }
+    }
+}
+
+/// Bed polygons for the grid shader: printable area, exclude zone and up to
+/// two nozzle areas, stored back to back (`counts` gives the lengths).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct BedUniform {
+    counts: [u32; 4],
+    points: [[f32; 4]; MAX_BED_POINTS],
+}
+
+impl BedUniform {
+    fn new(bed: Option<&BedGeometry>) -> Self {
+        let mut u = Self { counts: [0; 4], points: [[0.0; 4]; MAX_BED_POINTS] };
+        let Some(bed) = bed else { return u };
+        let empty = Vec::new();
+        let polys = [
+            &bed.printable,
+            &bed.exclude,
+            bed.extruder_areas.first().unwrap_or(&empty),
+            bed.extruder_areas.get(1).unwrap_or(&empty),
+        ];
+        let mut next = 0;
+        for (slot, poly) in polys.iter().enumerate() {
+            let n = poly.len().min(MAX_BED_POINTS - next);
+            for (k, p) in poly.iter().take(n).enumerate() {
+                u.points[next + k] = [p[0], p[1], 0.0, 0.0];
+            }
+            u.counts[slot] = n as u32;
+            next += n;
+        }
+        u
+    }
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Globals {
     view_proj: [[f32; 4]; 4],
+    inv_view_proj: [[f32; 4]; 4],
     eye: [f32; 4],
+    cam_right: [f32; 4],
+    cam_up: [f32; 4],
+    cam_forward: [f32; 4],
+    orbit_target: [f32; 4],
     bg_top: [f32; 4],
     bg_bottom: [f32; 4],
     body_color: [f32; 4],
+    grid: [f32; 4],
+    viewport: [f32; 4],
+    grid_minor: [f32; 4],
+    grid_major: [f32; 4],
+    plate_fill: [f32; 4],
+    plate_border: [f32; 4],
+    axis_x: [f32; 4],
+    axis_y: [f32; 4],
+    restricted: [f32; 4],
 }
 
 #[repr(C)]
@@ -35,26 +124,53 @@ struct Vertex {
     normal: [f32; 3],
 }
 
+/// One line segment, expanded to a screen-space quad in the vertex shader.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct LineInstance {
+    a: [f32; 3],
+    b: [f32; 3],
+    color: [f32; 4],
+    style: [f32; 2],
+}
+
 struct GpuMesh {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     index_count: u32,
 }
 
+struct GpuLines {
+    instances: wgpu::Buffer,
+    count: u32,
+}
+
 struct Targets {
     size: [u32; 2],
     msaa_color: wgpu::TextureView,
     depth: wgpu::TextureView,
+    /// sRGB view, MSAA resolve target.
     resolved: wgpu::TextureView,
+    /// Unorm view of the same texture for egui (ADR-0019).
+    display: wgpu::TextureView,
 }
 
-/// Draws the viewport scene into its own texture.
+/// Draws the viewport scene into its own texture (ADR-0019).
 pub struct ViewportRenderer {
     globals: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     background_pipeline: wgpu::RenderPipeline,
     mesh_pipeline: wgpu::RenderPipeline,
+    line_pipeline: wgpu::RenderPipeline,
+    grid_pipeline: wgpu::RenderPipeline,
     mesh: Option<GpuMesh>,
+    edges: Option<GpuLines>,
+    /// Z axis; rewritten every frame because its length follows the plate.
+    axis_z: GpuLines,
+    bed_buffer: wgpu::Buffer,
+    /// Bed and volume flag the GPU data was built for.
+    bed_state: Option<(BedGeometry, bool)>,
+    build_volume: Option<GpuLines>,
     targets: Option<Targets>,
 }
 
@@ -68,10 +184,16 @@ impl ViewportRenderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let bed_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("qoob3d bed"),
+            size: std::mem::size_of::<BedUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("qoob3d globals"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
+            entries: &[0, 1].map(|binding| wgpu::BindGroupLayoutEntry {
+                binding,
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
@@ -79,12 +201,15 @@ impl ViewportRenderer {
                     min_binding_size: None,
                 },
                 count: None,
-            }],
+            }),
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("qoob3d globals"),
             layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: bed_buffer.as_entire_binding() },
+            ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("qoob3d scene"),
@@ -92,114 +217,175 @@ impl ViewportRenderer {
             immediate_size: 0,
         });
 
-        let multisample = wgpu::MultisampleState { count: SAMPLE_COUNT, ..Default::default() };
-        let color_target = [Some(wgpu::ColorTargetState::from(COLOR_FORMAT))];
+        let pipeline = |label: &str,
+                        vs: &str,
+                        fs: &str,
+                        buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+                        depth_write: bool,
+                        depth_compare: wgpu::CompareFunction,
+                        blend: Option<wgpu::BlendState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some(vs),
+                    compilation_options: Default::default(),
+                    buffers,
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    // No culling: open shells and section views must stay visible,
+                    // and line quads may wind either way.
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(depth_write),
+                    depth_compare: Some(depth_compare),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState { count: SAMPLE_COUNT, ..Default::default() },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(fs),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: COLOR_FORMAT,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
 
-        let background_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("qoob3d background"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_background"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample,
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_background"),
-                compilation_options: Default::default(),
-                targets: &color_target,
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        use wgpu::CompareFunction::{Always, Greater, GreaterEqual};
+        let alpha = Some(wgpu::BlendState::ALPHA_BLENDING);
+        let background_pipeline = pipeline(
+            "qoob3d background",
+            "vs_background",
+            "fs_background",
+            &[],
+            false,
+            Always,
+            None,
+        );
+        let mesh_pipeline = pipeline(
+            "qoob3d mesh",
+            "vs_mesh",
+            "fs_mesh",
+            &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+            })],
+            true,
+            Greater, // reverse-Z
+            None,
+        );
+        let line_pipeline = pipeline(
+            "qoob3d lines",
+            "vs_line",
+            "fs_line",
+            &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<LineInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x2
+                ],
+            })],
+            true,
+            GreaterEqual,
+            alpha,
+        );
+        // The grid is transparent: tested against bodies, never occludes them.
+        let grid_pipeline =
+            pipeline("qoob3d grid", "vs_grid", "fs_grid", &[], false, GreaterEqual, alpha);
 
-        let mesh_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("qoob3d mesh"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_mesh"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
-                })],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                // No culling: open shells and section views must stay visible.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Greater), // reverse-Z
-                stencil: Default::default(),
-                bias: Default::default(),
+        let axis_z = GpuLines {
+            instances: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("qoob3d z axis"),
+                size: std::mem::size_of::<LineInstance>() as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             }),
-            multisample,
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_mesh"),
-                compilation_options: Default::default(),
-                targets: &color_target,
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+            count: 1,
+        };
 
-        Self { globals, bind_group, background_pipeline, mesh_pipeline, mesh: None, targets: None }
+        Self {
+            globals,
+            bind_group,
+            background_pipeline,
+            mesh_pipeline,
+            line_pipeline,
+            grid_pipeline,
+            mesh: None,
+            edges: None,
+            axis_z,
+            bed_buffer,
+            bed_state: None,
+            build_volume: None,
+            targets: None,
+        }
     }
 
-    /// Replaces the displayed geometry.
-    pub fn set_mesh(&mut self, device: &wgpu::Device, mesh: &TriMesh) {
-        if mesh.is_empty() {
-            self.mesh = None;
-            return;
-        }
-        let vertices: Vec<Vertex> = mesh
-            .positions
-            .iter()
-            .zip(&mesh.normals)
-            .map(|(&position, &normal)| Vertex { position, normal })
+    /// Replaces the displayed geometry (faces and feature edges).
+    pub fn set_scene(&mut self, device: &wgpu::Device, scene: &ShapeMesh) {
+        let faces = &scene.faces;
+        self.mesh = (!faces.is_empty()).then(|| {
+            let vertices: Vec<Vertex> = faces
+                .positions
+                .iter()
+                .zip(&faces.normals)
+                .map(|(&position, &normal)| Vertex { position, normal })
+                .collect();
+            GpuMesh {
+                vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("qoob3d mesh vertices"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                }),
+                indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("qoob3d mesh indices"),
+                    contents: bytemuck::cast_slice(&faces.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                }),
+                index_count: faces.indices.len() as u32,
+            }
+        });
+
+        let segments: Vec<LineInstance> = scene
+            .edges
+            .segments()
+            .map(|[a, b]| LineInstance { a, b, color: palette::EDGE, style: EDGE_STYLE })
             .collect();
-        self.mesh = Some(GpuMesh {
-            vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("qoob3d mesh vertices"),
-                contents: bytemuck::cast_slice(&vertices),
+        self.edges = (!segments.is_empty()).then(|| GpuLines {
+            instances: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("qoob3d edges"),
+                contents: bytemuck::cast_slice(&segments),
                 usage: wgpu::BufferUsages::VERTEX,
             }),
-            indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("qoob3d mesh indices"),
-                contents: bytemuck::cast_slice(&mesh.indices),
-                usage: wgpu::BufferUsages::INDEX,
-            }),
-            index_count: mesh.indices.len() as u32,
+            count: segments.len() as u32,
         });
     }
 
-    /// Renders the scene at `size` physical pixels and returns the resolved
-    /// colour texture plus whether it was (re)created this call, in which
-    /// case the caller must re-register it with the UI.
+    /// Renders the scene at `size` physical pixels and returns the view to
+    /// display in egui (gamma-encoded, see [`DISPLAY_FORMAT`]) plus whether
+    /// it was (re)created this call, in which case the caller must
+    /// re-register it with the UI. `view.texture()` gives the sRGB bytes for
+    /// readback.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         size: [u32; 2],
         camera: &Camera,
+        options: &SceneOptions<'_>,
     ) -> (&wgpu::TextureView, bool) {
         let size = [size[0].max(1), size[1].max(1)];
         let recreated = self.targets.as_ref().is_none_or(|t| t.size != size);
@@ -208,15 +394,50 @@ impl ViewportRenderer {
         }
 
         let aspect = size[0] as f32 / size[1] as f32;
-        let view_proj: Mat4 = camera.projection(aspect) * camera.view();
+        let view_proj = camera.view_projection(aspect);
+        self.update_bed(device, queue, options);
+        let plate_size = options.bed.map_or([0.0, 0.0], |b| bed_size(&b.printable));
+        let v4 = |v: Vec3, w: f32| v.extend(w).to_array();
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
-            eye: Vec4::from((camera.eye(), 1.0)).to_array(),
+            inv_view_proj: view_proj.inverse().to_cols_array_2d(),
+            eye: v4(
+                camera.eye(),
+                if camera.projection == Projection::Perspective { 1.0 } else { 0.0 },
+            ),
+            cam_right: v4(camera.right(), 0.0),
+            cam_up: v4(camera.up(), 0.0),
+            cam_forward: v4(camera.forward(), 0.0),
+            orbit_target: v4(camera.target, camera.distance),
             bg_top: palette::BG_TOP,
             bg_bottom: palette::BG_BOTTOM,
             body_color: palette::BODY,
+            grid: [
+                plate_size[0],
+                plate_size[1],
+                f32::from(u8::from(options.show_grid)),
+                f32::from(u8::from(options.bed.is_some())),
+            ],
+            viewport: [size[0] as f32, size[1] as f32, options.pixels_per_point.max(0.5), 0.0],
+            grid_minor: palette::GRID_MINOR,
+            grid_major: palette::GRID_MAJOR,
+            plate_fill: palette::PLATE_FILL,
+            plate_border: palette::PLATE_BORDER,
+            axis_x: palette::AXIS_X,
+            axis_y: palette::AXIS_Y,
+            restricted: palette::RESTRICTED,
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+
+        let z_len =
+            if options.bed.is_some() { 0.25 * plate_size[0].max(plate_size[1]) } else { 50.0 };
+        let axis = LineInstance {
+            a: [0.0; 3],
+            b: [0.0, 0.0, z_len],
+            color: palette::AXIS_Z,
+            style: AXIS_STYLE,
+        };
+        queue.write_buffer(&self.axis_z.instances, 0, bytemuck::bytes_of(&axis));
 
         let targets = self.targets.as_ref().expect("targets created above");
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -257,11 +478,104 @@ impl ViewportRenderer {
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
+
+            pass.set_pipeline(&self.line_pipeline);
+            let axis = options.show_grid.then_some(&self.axis_z);
+            for lines in self.edges.iter().chain(axis).chain(self.build_volume.as_ref()) {
+                pass.set_vertex_buffer(0, lines.instances.slice(..));
+                pass.draw(0..6, 0..lines.count);
+            }
+
+            if options.show_grid || options.bed.is_some() {
+                pass.set_pipeline(&self.grid_pipeline);
+                pass.draw(0..3, 0..1);
+            }
         }
         queue.submit([encoder.finish()]);
 
-        (&targets.resolved, recreated)
+        (&targets.display, recreated)
     }
+}
+
+impl ViewportRenderer {
+    /// Uploads bed polygons and rebuilds the build-volume wireframe when the
+    /// printer or the volume toggle changed.
+    fn update_bed(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        options: &SceneOptions<'_>,
+    ) {
+        let wanted = options.bed.map(|b| (b.clone(), options.show_build_volume));
+        if self.bed_state == wanted {
+            return;
+        }
+        queue.write_buffer(&self.bed_buffer, 0, bytemuck::bytes_of(&BedUniform::new(options.bed)));
+        let segments = match options.bed {
+            Some(bed) if options.show_build_volume => build_volume_segments(bed),
+            _ => Vec::new(),
+        };
+        self.build_volume = (!segments.is_empty()).then(|| GpuLines {
+            instances: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("qoob3d build volume"),
+                contents: bytemuck::cast_slice(&segments),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            count: segments.len() as u32,
+        });
+        self.bed_state = wanted;
+    }
+}
+
+fn bed_size(poly: &[[f32; 2]]) -> [f32; 2] {
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for p in poly {
+        for k in 0..2 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    if poly.is_empty() { [0.0; 2] } else { [hi[0] - lo[0], hi[1] - lo[1]] }
+}
+
+/// Top outline of the printable area at max height plus vertical edges (at
+/// every corner of simple shapes, at four extremes of round ones).
+fn build_volume_segments(bed: &BedGeometry) -> Vec<LineInstance> {
+    let line = |a: [f32; 3], b: [f32; 3]| LineInstance {
+        a,
+        b,
+        color: palette::BUILD_VOLUME,
+        style: VOLUME_STYLE,
+    };
+    let h = bed.max_height;
+    let pts = &bed.printable;
+    let n = pts.len();
+    let mut out: Vec<LineInstance> = (0..n)
+        .map(|i| {
+            let (p, q) = (pts[i], pts[(i + 1) % n]);
+            line([p[0], p[1], h], [q[0], q[1], h])
+        })
+        .collect();
+    let corners: Vec<[f32; 2]> = if n <= 16 {
+        pts.clone()
+    } else {
+        let pick = |key: fn(&[f32; 2]) -> f32, max: bool| {
+            *pts.iter()
+                .max_by(|a, b| {
+                    let o = key(a).total_cmp(&key(b));
+                    if max { o } else { o.reverse() }
+                })
+                .expect("non-empty")
+        };
+        vec![
+            pick(|p| p[0], true),
+            pick(|p| p[0], false),
+            pick(|p| p[1], true),
+            pick(|p| p[1], false),
+        ]
+    };
+    out.extend(corners.iter().map(|p| line([p[0], p[1], 0.0], [p[0], p[1], h])));
+    out
 }
 
 fn create_targets(device: &wgpu::Device, size: [u32; 2]) -> Targets {
@@ -280,6 +594,24 @@ fn create_targets(device: &wgpu::Device, size: [u32; 2]) -> Targets {
             })
             .create_view(&Default::default())
     };
+    let resolved_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("qoob3d resolved color"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: COLOR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC, // readback in tests and --render
+        view_formats: &[DISPLAY_FORMAT],
+    });
+    let resolved = resolved_texture.create_view(&Default::default());
+    let display = resolved_texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("qoob3d display view"),
+        format: Some(DISPLAY_FORMAT),
+        ..Default::default()
+    });
     Targets {
         size,
         msaa_color: make(
@@ -294,13 +626,7 @@ fn create_targets(device: &wgpu::Device, size: [u32; 2]) -> Targets {
             SAMPLE_COUNT,
             wgpu::TextureUsages::RENDER_ATTACHMENT,
         ),
-        resolved: make(
-            "qoob3d resolved color",
-            COLOR_FORMAT,
-            1,
-            wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC, // readback in tests, screenshots later
-        ),
+        resolved,
+        display,
     }
 }

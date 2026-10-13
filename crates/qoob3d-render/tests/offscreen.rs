@@ -2,9 +2,9 @@
 //! Skipped when no GPU adapter is available, unless QOOB3D_REQUIRE_GPU is set.
 //! Set `QOOB3D_TEST_IMAGE_DIR` to also write the frame as PNG.
 
-use qoob3d_core::TriMesh;
+use qoob3d_core::{ShapeMesh, TriMesh};
 use qoob3d_render::headless::{HeadlessGpu, read_rgba8};
-use qoob3d_render::{COLOR_FORMAT, Camera, ViewportRenderer, wgpu};
+use qoob3d_render::{COLOR_FORMAT, Camera, SceneOptions, ViewportRenderer, wgpu};
 
 const W: u32 = 320;
 const H: u32 = 200;
@@ -29,11 +29,22 @@ fn cube_is_drawn_over_background() {
 
     let mesh = cube(20.0);
     let mut renderer = ViewportRenderer::new(device);
-    renderer.set_mesh(device, &mesh);
+    renderer.set_scene(device, &ShapeMesh { faces: mesh.clone(), ..Default::default() });
     let mut camera = Camera::default();
     camera.fit(mesh.bounds().unwrap(), W as f32 / H as f32);
 
-    let (view, recreated) = renderer.render(device, queue, [W, H], &camera);
+    let (view, recreated) = renderer.render(
+        device,
+        queue,
+        [W, H],
+        &camera,
+        &SceneOptions {
+            show_grid: false,
+            bed: None,
+            show_build_volume: false,
+            pixels_per_point: 1.0,
+        },
+    );
     assert!(recreated);
     let pixels = read_rgba8(device, queue, view.texture());
 

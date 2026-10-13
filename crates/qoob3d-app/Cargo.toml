@@ -15,7 +15,10 @@ path = "src/main.rs"
 qoob3d-core.workspace = true
 qoob3d-kernel.workspace = true
 qoob3d-render.workspace = true
-eframe.workspace = true
+eframe = { workspace = true, features = ["persistence"] }
+serde = { version = "1", features = ["derive"] }
+fluent-bundle = "0.16"
+unic-langid = "0.9"
 glam.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
@@ -25,3 +28,7 @@ png = "0.18"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# Headless UI tests and screenshots of the real app (ADR-0018).
+egui_kittest = { version = "0.36.2", features = ["eframe", "wgpu", "snapshot"] }

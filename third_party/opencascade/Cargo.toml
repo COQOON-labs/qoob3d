@@ -1,0 +1,21 @@
+# QOOB3D fork of opencascade 0.3.0 (https://github.com/bschwind/opencascade-rs,
+# commit 32758df). See README.md for the list of modifications (ADR-0014).
+[package]
+name = "opencascade"
+version = "0.3.0"
+edition = "2021"
+authors = ["Brian Schwind <brianmschwind@gmail.com>"]
+description = "A high level Rust wrapper to build 3D models in code, using the OpenCascade CAD kernel (QOOB3D fork)"
+license = "LGPL-2.1"
+repository = "https://github.com/bschwind/opencascade-rs"
+publish = false
+
+[features]
+builtin = ["opencascade-sys/builtin"]
+default = ["builtin"]
+
+[dependencies]
+cxx = "1"
+glam = { version = "0.24", features = ["bytemuck"] }
+opencascade-sys = "0.3"
+thiserror = "1"

@@ -1,38 +1,81 @@
 use anyhow::Context as _;
-use eframe::egui::{self, Color32, FontId, Sense, TextureId, pos2, vec2};
-use eframe::egui_wgpu::{self, wgpu};
-use qoob3d_core::TriMesh;
+use eframe::egui;
+use eframe::egui_wgpu;
+use qoob3d_core::ShapeMesh;
 use qoob3d_kernel::{Kernel, Request, RequestId, Response};
-use qoob3d_render::{Camera, ViewportRenderer};
 
-use crate::navigation;
+use crate::i18n::{self, decimal, tr, tr_args};
+use crate::panels::{self, BrowserInfo};
+use crate::settings::Settings;
 use crate::smoke::{Control, Observation, SmokeTest};
+use crate::theme;
+use crate::viewcube::CubeFace;
+use crate::viewport::Viewport;
 
-/// Mint accent colour of the QOOB3D theme (docs/design/theme.md).
-pub const ACCENT: Color32 = Color32::from_rgb(0x3d, 0xe0, 0xb0);
+/// The kernel request issued at startup (shared with `--render`).
+pub fn initial_request() -> Request {
+    Request::DemoPart
+}
 
 pub struct QoobApp {
     render_state: egui_wgpu::RenderState,
-    renderer: ViewportRenderer,
-    viewport_texture: Option<TextureId>,
-    camera: Camera,
+    viewport: Viewport,
     kernel: Kernel,
     pending: Option<RequestId>,
-    mesh: Option<TriMesh>,
-    status: String,
+    mesh: Option<ShapeMesh>,
+    needs_fit: bool,
+    status: Status,
+    settings: Settings,
     smoke: Option<SmokeTest>,
 }
 
-/// The kernel request issued at startup (shared with `--render`).
-pub(crate) fn initial_request() -> Request {
-    Request::DemoCube { size_mm: 20.0 }
+/// What the status line shows; translated every frame so a language
+/// switch takes effect immediately.
+enum Status {
+    Computing,
+    Model { triangles: usize, edges: usize, watertight: bool, volume_mm3: f64 },
+    KernelError(String),
+}
+
+impl Status {
+    fn text(&self) -> String {
+        match self {
+            Status::Computing => tr("status-computing"),
+            Status::Model { triangles, edges, watertight, volume_mm3 } => tr_args(
+                "status-model",
+                &[
+                    ("name", tr("body-demo").into()),
+                    ("triangles", (*triangles).into()),
+                    ("edges", (*edges).into()),
+                    (
+                        "tight",
+                        tr(if *watertight { "status-watertight" } else { "status-not-watertight" })
+                            .into(),
+                    ),
+                    ("volume", decimal(volume_mm3 / 1000.0, 2).into()),
+                ],
+            ),
+            Status::KernelError(err) => {
+                tr_args("status-kernel-error", &[("error", err.clone().into())])
+            }
+        }
+    }
 }
 
 impl QoobApp {
     pub fn new(cc: &eframe::CreationContext<'_>, smoke: Option<SmokeTest>) -> anyhow::Result<Self> {
+        theme::apply(&cc.egui_ctx);
+        // The smoke test must not depend on (or change) the user's settings.
+        let settings = match (&smoke, cc.storage) {
+            (None, Some(storage)) => {
+                eframe::get_value::<Settings>(storage, Settings::STORAGE_KEY).unwrap_or_default()
+            }
+            _ => Settings::default(),
+        };
+        i18n::set_language(settings.language);
         let render_state =
             cc.wgpu_render_state.clone().context("QOOB3D requires the wgpu renderer")?;
-        let renderer = ViewportRenderer::new(&render_state.device);
+        let viewport = Viewport::new(&render_state.device);
 
         let ctx = cc.egui_ctx.clone();
         let mut kernel = Kernel::spawn(move || ctx.request_repaint());
@@ -40,129 +83,133 @@ impl QoobApp {
 
         Ok(Self {
             render_state,
-            renderer,
-            viewport_texture: None,
-            camera: Camera::default(),
+            viewport,
             kernel,
             pending,
             mesh: None,
-            status: "Berechne Würfel …".into(),
+            needs_fit: false,
+            status: Status::Computing,
+            settings,
             smoke,
         })
     }
 
-    fn poll_kernel(&mut self, aspect: f32) {
+    /// True once the kernel has delivered the model (tests wait for this).
+    pub fn has_model(&self) -> bool {
+        self.mesh.is_some()
+    }
+
+    pub fn viewport(&self) -> &Viewport {
+        &self.viewport
+    }
+
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    pub fn model_bounds(&self) -> Option<qoob3d_core::Aabb> {
+        self.mesh.as_ref().and_then(|m| m.faces.bounds())
+    }
+
+    fn poll_kernel(&mut self) {
         while let Some(response) = self.kernel.try_recv() {
             match response {
                 Response::Mesh { id, result } => {
                     if self.pending != Some(id) {
-                        continue; // stale
+                        continue; // stale (ADR-0005)
                     }
                     self.pending = None;
                     match result {
                         Ok(mesh) => {
-                            self.status = format!("{} Dreiecke", mesh.triangle_count());
-                            self.renderer.set_mesh(&self.render_state.device, &mesh);
-                            if let Some(bounds) = mesh.bounds() {
-                                self.camera.fit(bounds, aspect);
-                            }
+                            let report = mesh.faces.analyze();
+                            self.status = Status::Model {
+                                triangles: report.triangles,
+                                edges: mesh.edges.len(),
+                                watertight: report.is_watertight(),
+                                volume_mm3: report.volume_mm3,
+                            };
+                            self.viewport.set_scene(&self.render_state.device, &mesh);
                             self.mesh = Some(mesh);
+                            self.needs_fit = true;
                         }
                         Err(err) => {
                             tracing::error!(%err, "kernel request failed");
-                            self.status = format!("Kernel-Fehler: {err}");
+                            self.status = Status::KernelError(err.to_string());
                         }
                     }
                 }
             }
         }
-    }
-
-    /// Draws the viewport and returns its screen rectangle.
-    fn viewport(&mut self, ui: &mut egui::Ui) -> egui::Rect {
-        let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
-        let aspect = rect.width() / rect.height().max(1.0);
-
-        self.poll_kernel(aspect);
-
-        let nav = navigation::handle_input(ui, &response, rect, &mut self.camera);
-        if nav.fit_requested
-            && let Some(bounds) = self.mesh.as_ref().and_then(TriMesh::bounds)
-        {
-            self.camera.fit(bounds, aspect);
-        }
-
-        // Render offscreen at physical resolution and show it as an image (ADR-0007).
-        let ppp = ui.ctx().pixels_per_point();
-        let size_px = [(rect.width() * ppp).round() as u32, (rect.height() * ppp).round() as u32];
-        let rs = &self.render_state;
-        let (view, recreated) = self.renderer.render(&rs.device, &rs.queue, size_px, &self.camera);
-        if recreated || self.viewport_texture.is_none() {
-            let mut egui_renderer = rs.renderer.write();
-            match self.viewport_texture {
-                Some(id) => egui_renderer.update_egui_texture_from_wgpu_texture(
-                    &rs.device,
-                    view,
-                    wgpu::FilterMode::Linear,
-                    id,
-                ),
-                None => {
-                    self.viewport_texture = Some(egui_renderer.register_native_texture(
-                        &rs.device,
-                        view,
-                        wgpu::FilterMode::Linear,
-                    ));
-                }
-            }
-        }
-        if let Some(id) = self.viewport_texture {
-            ui.painter().image(
-                id,
-                rect,
-                egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
-        }
-
-        // Minimal overlay: brand, status and navigation hint.
-        let painter = ui.painter_at(rect);
-        let margin = vec2(14.0, 12.0);
-        painter.text(
-            rect.left_top() + margin,
-            egui::Align2::LEFT_TOP,
-            "QOOB3D",
-            FontId::proportional(18.0),
-            ACCENT,
-        );
-        painter.text(
-            rect.left_bottom() + vec2(margin.x, -margin.y),
-            egui::Align2::LEFT_BOTTOM,
-            format!(
-                "{}   ·   Mitte: Pan   Shift+Mitte: Orbit   Rad: Zoom   Doppelklick Mitte / F6: Einpassen",
-                self.status
-            ),
-            FontId::proportional(12.0),
-            Color32::from_gray(140),
-        );
-        rect
     }
 }
 
 impl eframe::App for QoobApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let rect = self.viewport(ui);
+        self.poll_kernel();
 
-        if let Some(smoke) = &mut self.smoke {
+        egui::Panel::top("qoob3d-toolbar")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::PANEL_BG)
+                    .inner_margin(egui::Margin::symmetric(10, 6)),
+            )
+            .show(ui, |ui| panels::toolbar(ui, &mut self.settings));
+        egui::Panel::bottom("qoob3d-timeline")
+            .exact_size(40.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::PANEL_BG_DARK)
+                    .inner_margin(egui::Margin::symmetric(10, 4)),
+            )
+            .show(ui, panels::timeline);
+        let has_body = self.mesh.is_some();
+        egui::Panel::left("qoob3d-browser")
+            .default_size(230.0)
+            .resizable(true)
+            .frame(egui::Frame::new().fill(theme::PANEL_BG).inner_margin(egui::Margin::same(8)))
+            .show(ui, |ui| panels::browser(ui, &BrowserInfo { has_body }));
+
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            if self.needs_fit
+                && self.viewport.layout().is_some()
+                && let Some(bounds) = self.mesh.as_ref().and_then(|m| m.faces.bounds())
+            {
+                self.viewport.fit_now(bounds);
+                self.needs_fit = false;
+            }
+            let status = self.status.text();
+            self.viewport.show(
+                ui,
+                &self.render_state,
+                self.mesh.as_ref(),
+                &status,
+                &mut self.settings,
+            );
+        });
+
+        if let Some(smoke) = &mut self.smoke
+            && let Some(layout) = self.viewport.layout()
+        {
             let obs = Observation {
-                camera: &self.camera,
-                mesh_bounds: self.mesh.as_ref().and_then(TriMesh::bounds),
-                viewport_center: rect.center(),
-                viewport_aspect: rect.width() / rect.height().max(1.0),
+                camera: &self.viewport.camera,
+                mesh_bounds: self.mesh.as_ref().and_then(|m| m.faces.bounds()),
+                viewport_center: layout.rect.center(),
+                viewport_aspect: layout.rect.width() / layout.rect.height().max(1.0),
+                viewcube_top: self.viewport.viewcube_face(CubeFace::Top),
+                home_button: self.viewport.home_button(),
+                last_orbit_pivot: self.viewport.last_orbit_pivot(),
+                animating: self.viewport.is_animating(),
             };
             if smoke.after_frame(&obs) == Control::Close {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
             ui.ctx().request_repaint();
+        }
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if self.smoke.is_none() {
+            eframe::set_value(storage, Settings::STORAGE_KEY, &self.settings);
         }
     }
 

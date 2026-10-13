@@ -9,10 +9,18 @@ publish.workspace = true
 [dependencies]
 qoob3d-core.workspace = true
 opencascade.workspace = true
+# Same crate opencascade uses; needed to name OCCT types in our own bridge.
+opencascade-sys = "0.3"
+cxx = "1"
 # Must match the glam version used in opencascade's public API.
 occt-glam = { package = "glam", version = "0.24" }
 thiserror.workspace = true
 tracing.workspace = true
+
+[build-dependencies]
+cxx-build = "1"
+# Same version opencascade-sys builds; only used to locate the OCCT headers.
+occt-sys = "7.8.1"
 
 [lints]
 workspace = true

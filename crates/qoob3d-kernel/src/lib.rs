@@ -5,6 +5,7 @@
 //! [`Kernel`] using plain-data requests and responses, so the UI never blocks
 //! on geometry work and no OCCT type ever crosses this crate's API.
 
+mod occt;
 mod tessellate;
 mod worker;
 
@@ -16,6 +17,9 @@ pub use worker::{Kernel, Request, RequestId, Response};
 pub enum KernelError {
     #[error("tessellation failed: {0}")]
     Tessellation(String),
+    /// An OCCT exception, caught in our C++ wrappers (ADR-0004).
+    #[error("OpenCascade: {0}")]
+    Occt(String),
     #[error("kernel worker thread is not running")]
     WorkerGone,
 }
