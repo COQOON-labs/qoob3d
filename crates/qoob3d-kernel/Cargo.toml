@@ -1,0 +1,18 @@
+[package]
+name = "qoob3d-kernel"
+description = "QOOB3D geometry kernel: OpenCascade on a dedicated worker thread"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+qoob3d-core.workspace = true
+opencascade.workspace = true
+# Must match the glam version used in opencascade's public API.
+occt-glam = { package = "glam", version = "0.24" }
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

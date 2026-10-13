@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[workspace.dependencies]
+qoob3d-core = { path = "crates/qoob3d-core" }
+qoob3d-kernel = { path = "crates/qoob3d-kernel" }
+qoob3d-render = { path = "crates/qoob3d-render" }
+
+opencascade = "0.3.0"
+eframe = "0.36.2"
+glam = { version = "0.34.1", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Optimise all dependencies in dev builds: tessellation, OCCT and wgpu are
+# unusably slow at opt-level 0. Our own crates stay at 0 for fast compiles.
+# NOTE: changing this triggers a full OCCT rebuild (~10 min).
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"

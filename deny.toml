@@ -1,0 +1,49 @@
+# Supply-chain policy (ADR-0013). Run: cargo deny check
+
+[graph]
+all-features = false
+
+[advisories]
+# Known vulnerabilities are errors; unmaintained crates only in our direct deps.
+unmaintained = "workspace"
+yanked = "deny"
+
+[licenses]
+confidence-threshold = 0.9
+# Permissive licences only. Copyleft is allowed per crate below, never globally.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "BSL-1.0",
+]
+# OpenCascade is LGPL-2.1 and linked statically – see ADR-0004 and the open
+# licensing question in CLAUDE.md before distributing binaries.
+exceptions = [
+    { name = "occt-sys", allow = ["LGPL-2.1"] },
+    { name = "opencascade-sys", allow = ["LGPL-2.1"] },
+    { name = "opencascade", allow = ["LGPL-2.1"] },
+    { name = "opencascade-kicad-parser", allow = ["LGPL-2.1"] },
+    # egui's bundled default fonts (font licences, unproblematic for embedding).
+    { name = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+]
+
+[licenses.private]
+# Our own crates are `publish = false` and carry no licence field.
+ignore = true
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

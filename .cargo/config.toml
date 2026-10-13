@@ -1,0 +1,7 @@
+[alias]
+# Developer tooling, see ADR-0013. `cargo xtask check` is the definition of done.
+xtask = "run --package xtask --quiet --"
+
+[env]
+# OCCT 7.8's CMakeLists declare a minimum CMake version that CMake >= 4 rejects.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

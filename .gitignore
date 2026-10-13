@@ -1,0 +1,6 @@
+/target
+.DS_Store
+*.stl
+*.step
+!/examples/**/*.step
+.claude/settings.local.json
