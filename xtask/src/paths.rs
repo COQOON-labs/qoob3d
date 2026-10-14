@@ -34,7 +34,7 @@ pub(crate) const HARNESS: &[&str] = &[
 /// Format fixtures may be added, never modified or deleted (ADR-0030).
 pub(crate) const FIXTURES: &str = "crates/qoob3d-core/tests/fixtures/";
 
-const CODE_EXTENSIONS: &[&str] = &[".rs", ".wgsl", ".cpp", ".hpp", ".h"];
+const CODE_EXTENSIONS: &[&str] = &[".rs", ".wgsl", ".cpp", ".hpp", ".hxx", ".h"];
 
 /// Ignores case: macOS file systems do (ADR-0043).
 pub(crate) fn is_harness(path: &str) -> bool {
