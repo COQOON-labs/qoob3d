@@ -34,6 +34,7 @@ pub(crate) const HARNESS: &[&str] = &[
 /// Format fixtures may be added, never modified or deleted (ADR-0030).
 pub(crate) const FIXTURES: &str = "crates/qoob3d-core/tests/fixtures/";
 
+const SOURCE_TREES: &[&str] = &["crates/", "xtask/", "third_party/"];
 const CODE_EXTENSIONS: &[&str] = &[".rs", ".wgsl", ".cpp", ".hpp", ".hxx", ".h"];
 
 /// Ignores case: macOS file systems do (ADR-0043).
@@ -45,8 +46,10 @@ pub(crate) fn is_harness(path: &str) -> bool {
         .any(|h| if h.ends_with(['/', '-']) { path.starts_with(&h) } else { path == h })
 }
 
+/// Source trees are `crates/`, `xtask/` and the vendored forks in
+/// `third_party/`, which are compiled into the product (ADR-0014, ADR-0047).
 pub(crate) fn kind(path: &str) -> Kind {
-    let in_source_tree = path.starts_with("crates/") || path.starts_with("xtask/");
+    let in_source_tree = SOURCE_TREES.iter().any(|t| path.starts_with(t));
     let file = path.rsplit('/').next().unwrap_or(path);
     let test_dir = path.split('/').any(|c| c == "tests" || c == "proptest-regressions");
     if (in_source_tree && (test_dir || file == "tests.rs"))
