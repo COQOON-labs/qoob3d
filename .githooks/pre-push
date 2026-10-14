@@ -6,8 +6,8 @@
 #   2. secret scan of the pushed commits (gitleaks)
 #   3. a critic review of the pushed state, if it changes production code
 #      (ADR-0041); a human skips it with QOOB3D_SKIP_REVIEW=1
-#   4. the full definition of done for each pushed commit, in a temporary
-#      worktree of exactly that commit: `cargo xtask check-rev` (ADR-0048)
+#   4. the full definition of done for the tip of each pushed ref, in a
+#      temporary worktree of exactly that commit: `cargo xtask check-rev` (ADR-0048)
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 cd "$(git rev-parse --show-toplevel)"

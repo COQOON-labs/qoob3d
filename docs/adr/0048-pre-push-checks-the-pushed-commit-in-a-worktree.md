@@ -1,6 +1,6 @@
 ---
 id: ADR-0048
-title: The pre-push hook checks every pushed commit in a temporary worktree
+title: The pre-push hook checks the tip of every pushed ref in a temporary worktree
 status: accepted
 date: 2026-10-14
 crates: []
@@ -33,9 +33,11 @@ pushed commits; only the definition of done did not.
 
 ## Consequences
 
-- What is checked is exactly what is pushed, independent of the working tree.
+- What is checked is exactly what is pushed, independent of the working tree. Intermediate
+  commits are not checked (a tests-first commit is red by design, ADR-0039); CI checks the head
+  of a pull request the same way.
 - The check of the pushed commit runs with that commit's harness, as in CI.
-- The first `check-rev` builds OCCT once in `target/check-rev/` (about 10 minutes, ~1.3 GB);
+- The first `check-rev` builds OCCT once in `target/check-rev/` (about 10 minutes, a few GB);
   later ones reuse it. Workspace crates are compiled again for every worktree, because its files
   are newer. Pushing several refs checks each of them.
 - Commits from before this ADR cannot be checked with `check-rev` (their xtask looks for
