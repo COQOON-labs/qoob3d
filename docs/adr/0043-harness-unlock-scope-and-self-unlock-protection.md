@@ -42,8 +42,9 @@ ADR-0037 lets the human unlock harness work by starting Claude Code with
    such as `cat`, `grep`, `head`); a name counts wherever it is not part of a longer file name, so
    globs and brace expansion (`~/{.zshrc,.bashrc}`) are caught, glob classes (`.zsh[r]c`) are not.
    A shell command that mentions `.git` (also as `git rev-parse --git-dir`/`--git-path`) is
-   denied only together with a write operation or a cargo target dir, so `du`, `find -prune`
-   and `--exclude=.git` keep working. Commands that run `launchctl setenv`, that name `QOOB3D_HARNESS_UNLOCK` or
+   denied unless it is a pure read or names `.git` only to exclude it (`--exclude=.git`,
+   `find -path ./.git -prune`); an allowlist, because a list of writing programs is never
+   complete (`install`, `rsync`, `curl -o`, `cargo --config build.target-dir=…`). Commands that run `launchctl setenv`, that name `QOOB3D_HARNESS_UNLOCK` or
    `QOOB3D_SKIP_REVIEW`, or that bypass the git hooks (`--no-verify`, `git commit -n`,
    `core.hooksPath` in any case, abbreviations such as `--no-veri`) are denied. Matching removes
    shell quotes first and ignores case, because git keys and the macOS file system do, so

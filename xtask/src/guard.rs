@@ -4,7 +4,7 @@
 //!   `QOOB3D_HARNESS_UNLOCK=1` ([`Session::unlocked`]); the unlock lifts nothing else,
 //! - files that can set the environment of the hooks, and `.git/`, are never
 //!   written, so that no agent can unlock itself; a shell command naming `.git`
-//!   is denied only together with a write operation or a cargo target dir,
+//!   is denied unless it only reads or names `.git` only to exclude it,
 //! - format fixtures are never modified,
 //! - one agent context writes either tests or production code, never both,
 //! - shell commands must not bypass the git hooks or write harness files.
@@ -31,8 +31,8 @@ const BYPASSES: &[&str] =
 /// The shortest abbreviation of `--no-verify` git accepts (`--no-ver` is
 /// ambiguous with `--no-verbose`).
 const NO_VERIFY_MIN: &str = "--no-veri";
-/// Shell fragments that (may) write files; also `dd` as a word and `perl`
-/// with an in-place flag ([`writes`]).
+/// Shell fragments that (may) write files; also `dd` and `install` as words
+/// and the programs with an output option in [`writes`] and [`edits_in_place`].
 const WRITES: &[&str] = &[
     ">",
     "sed -i",
@@ -51,6 +51,9 @@ const WRITES: &[&str] = &[
     "patch ",
     "python",
     "<<",
+    "rsync",
+    "ditto",
+    "wget",
 ];
 /// Path fragments of the harness as they appear in shell commands.
 const HARNESS_IN_SHELL: &[&str] = &[
@@ -97,16 +100,22 @@ const HOOK_ENVIRONMENT_IN_SHELL: &[&str] = &[
 /// The git directory holds the hooks path, the hooks and the guard binary
 /// (`.git/qoob3d/guard-target`).
 const GIT_DIR: &str = ".git";
-/// Lower-case shell fragments that substitute the git directory.
-const GIT_DIR_QUERIES: &[&str] =
-    &["rev-parse --git-dir", "--absolute-git-dir", "--git-common-dir", "--git-path"];
-/// Lower-case shell fragments that point cargo's build output, and so the
-/// guard binary, somewhere else.
-const TARGET_DIRS: &[&str] = &["cargo_target_dir", "--target-dir"];
+/// Options of `git rev-parse` that print the git directory.
+const GIT_DIR_OPTIONS: &[&str] =
+    &["--git-dir", "--absolute-git-dir", "--git-common-dir", "--git-path"];
+/// What directly precedes a `.git` that is excluded, not used. Not `-E `: it
+/// excludes only in `fd` ([`only_excludes_git_dir`]); `sed -E` and `rsync -E`
+/// take a file after it.
+const GIT_DIR_EXCLUSIONS: &[&str] = &["--exclude=", "--exclude-dir=", "--exclude ", "!"];
 /// Programs that only read; a command made of them may name a hook-environment
-/// file. Not `less`/`more`: their `-o`/`--log-file` writes a file.
-const READ_ONLY: &[&str] =
-    &["cat", "head", "tail", "grep", "rg", "ls", "stat", "wc", "diff", "file", "test", "["];
+/// file or `.git`. Not `less`/`more`: their `-o`/`--log-file` writes a file.
+/// `sort`, `uniq`, `find` and `git rev-parse` in [`reads_only`].
+const READ_ONLY: &[&str] = &[
+    "cat", "head", "tail", "grep", "rg", "ls", "stat", "wc", "diff", "file", "test", "[", "du",
+    "cut", "tr", "nl", "basename", "dirname", "realpath", "md5", "shasum",
+];
+/// Prefixes of the `find` primaries that write or run something.
+const FIND_ACTIONS: &[&str] = &["-exec", "-ok", "-delete", "-fprint", "-fls"];
 
 /// What the guard knows besides the hook input.
 pub(crate) struct Session {
@@ -150,13 +159,15 @@ pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Resu
     let normalised: String = command.chars().filter(|c| !matches!(c, '\'' | '"' | '\\')).collect();
     let forms = [command.to_lowercase(), normalised.to_lowercase()];
     check_bypasses(&forms[1])?;
+    let read = is_pure_read(&normalised);
     if let Some(file) = hook_environment_in_shell(session, &forms)
-        && !is_pure_read(&normalised)
+        && !read
     {
         return Err(self_unlock_message(&file));
     }
-    let writes = forms.iter().any(|form| writes(form));
-    check_git_dir_in_shell(&forms, writes)?;
+    check_git_dir_in_shell(&forms, &normalised, read)?;
+    let writes = forms.iter().any(|form| writes(form))
+        || [command, normalised.as_str()].into_iter().any(edits_in_place);
     if session.unlocked || !writes {
         return Ok(());
     }
@@ -185,36 +196,83 @@ fn hook_environment_in_shell(session: &Session, forms: &[String; 2]) -> Option<S
     fragment.or_else(name).map(str::to_owned)
 }
 
-/// `.git` named in the lower-cased `forms` of a command, by name or by a git-dir
-/// query, together with a write operation or a cargo target dir (ADR-0043).
-fn check_git_dir_in_shell(forms: &[String; 2], writes: bool) -> Result<(), String> {
-    let names_git_dir = forms.iter().any(|form| names_file(form, GIT_DIR))
-        || GIT_DIR_QUERIES.iter().any(|q| forms[1].contains(q));
-    if names_git_dir && (writes || TARGET_DIRS.iter().any(|t| forms[1].contains(t))) {
+/// A command naming the git dir in its lower-cased `forms` (as given,
+/// normalised) — `.git` by name or a `git rev-parse` query — that is no pure
+/// `read` and names `.git` not only to exclude it (ADR-0043).
+fn check_git_dir_in_shell(forms: &[String; 2], normalised: &str, read: bool) -> Result<(), String> {
+    let query = segments(&forms[1]).any(queries_git_dir);
+    let named = forms.iter().any(|form| names_file(form, GIT_DIR));
+    if !read && (query || (named && !only_excludes_git_dir(normalised))) {
         return Err(git_dir_message(GIT_DIR));
     }
     Ok(())
 }
 
-/// `name` stands in `command` as a whole file name: no file-name character
-/// directly before or after it. Globs and brace expansion therefore end a
-/// name (`~/.zshrc*`); a glob class inside it (`~/.zsh[r]c`) is not caught.
-fn names_file(command: &str, name: &str) -> bool {
-    let is_name_char = |c: char| c.is_ascii_alphanumeric() || "._-".contains(c);
-    command.match_indices(name).any(|(i, _)| {
-        let before = command[..i].chars().next_back();
-        let after = command[i + name.len()..].chars().next();
-        !before.is_some_and(is_name_char) && !after.is_some_and(is_name_char)
+/// A segment with the word `rev-parse` and an option printing the git dir.
+fn queries_git_dir(segment: &str) -> bool {
+    let words = || segment.split(|c: char| !(c.is_alphanumeric() || c == '-'));
+    words().any(|w| w == "rev-parse") && words().any(|w| GIT_DIR_OPTIONS.contains(&w))
+}
+
+/// Every `.git` in a normalised command directly follows an exclusion
+/// prefix, or `-E ` in an `fd` segment.
+fn only_excludes_git_dir(command: &str) -> bool {
+    file_name_positions(command, GIT_DIR).all(|i| {
+        let before = &command[..i];
+        let segment = before.rsplit(['|', ';', '&', '\n']).next().unwrap_or_default();
+        GIT_DIR_EXCLUSIONS.iter().any(|e| before.ends_with(e))
+            || (before.ends_with("-E ") && segment.trim_start().starts_with("fd "))
     })
 }
 
-/// A lower-cased command that (may) write files.
+/// `name` stands in `command` as a whole file name.
+fn names_file(command: &str, name: &str) -> bool {
+    file_name_positions(command, name).next().is_some()
+}
+
+/// Where `name` stands in `command` as a whole file name, ignoring ASCII
+/// case: no file-name character directly before or after it. Globs and brace
+/// expansion therefore end a name (`~/.zshrc*`); a glob class inside it
+/// (`~/.zsh[r]c`) is not caught.
+fn file_name_positions<'a>(command: &'a str, name: &'a str) -> impl Iterator<Item = usize> + 'a {
+    let is_name_char = |c: char| c.is_ascii_alphanumeric() || "._-".contains(c);
+    command.char_indices().map(|(i, _)| i).filter(move |&i| {
+        command[i..].get(..name.len()).is_some_and(|s| s.eq_ignore_ascii_case(name))
+            && !command[..i].chars().next_back().is_some_and(is_name_char)
+            && !command[i + name.len()..].chars().next().is_some_and(is_name_char)
+    })
+}
+
+/// A lower-cased command that (may) write files; `perl -i` in
+/// [`edits_in_place`] needs the case.
 fn writes(command: &str) -> bool {
     WRITES.iter().any(|w| command.contains(w))
         || command
             .split(|c: char| !(c.is_ascii_alphanumeric() || "_-".contains(c)))
-            .any(|w| w == "dd")
-        || runs_with_short_flag(command, &["perl"], 'i')
+            .any(|w| w == "dd" || w == "install")
+        || runs_with_option(command, &["curl"], 'o', &["--output", "--remote-name"])
+        || runs_with_option(command, &["tar"], 'x', &["--extract"])
+        || runs_with_option(command, &["git", "config"], 'f', &["--file"])
+        || segments(command).any(|segment| {
+            // `tar xzf`: the first word bundles the flags without a dash.
+            let mut words = segment.split_whitespace();
+            words.any(|w| w == "tar")
+                && words.next().is_some_and(|w| !w.starts_with('-') && w.contains('x'))
+        })
+}
+
+/// `perl`, also by path, followed by a short-flag group with a lower-case `i`
+/// before any `-I<dir>`/`-M<module>` argument (`-pi`, `-i.bak`).
+fn edits_in_place(command: &str) -> bool {
+    segments(command).any(|segment| {
+        let mut words = segment.split_whitespace();
+        words.any(|w| w.rsplit('/').next().is_some_and(|name| name.eq_ignore_ascii_case("perl")))
+            && words.any(|word| {
+                short_flags(word).is_some_and(|flags| {
+                    flags.chars().take_while(|c| !"IMm".contains(*c)).any(|c| c == 'i')
+                })
+            })
+    })
 }
 
 /// Gate bypasses in a normalised, lower-cased command.
@@ -252,34 +310,75 @@ fn abbreviates_no_verify(command: &str) -> bool {
 /// `git … commit` followed by a short-flag group containing `n`, the short
 /// form of `--no-verify`.
 fn commits_without_verify(command: &str) -> bool {
-    runs_with_short_flag(command, &["git", "commit"], 'n')
+    runs_with_option(command, &["git", "commit"], 'n', &[])
 }
 
 /// A segment with the words of `program` in this order, followed by a
-/// short-flag group containing `flag`.
-fn runs_with_short_flag(command: &str, program: &[&str], flag: char) -> bool {
+/// short-flag group containing `flag` or by one of the `long` options, also
+/// abbreviated (`--out`) or extended (`--output-dir`).
+fn runs_with_option(command: &str, program: &[&str], flag: char, long: &[&str]) -> bool {
     segments(command).any(|segment| {
         let mut words = segment.split_whitespace();
         program.iter().all(|p| words.any(|w| w == *p))
             && words.any(|word| {
-                word.strip_prefix('-').is_some_and(|flags| {
-                    !flags.starts_with('-')
-                        && flags
-                            .split_once('=')
-                            .map_or(flags, |(letters, _)| letters)
-                            .contains(flag)
-                })
+                let name = word.split_once('=').map_or(word, |(name, _)| name);
+                short_flags(name).is_some_and(|flags| flags.contains(flag))
+                    || (name.len() > 2
+                        && long.iter().any(|o| name.starts_with(o) || o.starts_with(name)))
             })
     })
 }
 
-/// No redirection or substitution, and every segment starts with a read-only
-/// program (a leading `VAR=value` is not one).
+/// The letters of a short-flag group (`-pi` → `pi`).
+fn short_flags(word: &str) -> Option<&str> {
+    word.strip_prefix('-').filter(|flags| !flags.starts_with('-'))
+}
+
+/// No redirection besides those in [`without_null_redirections`], no
+/// substitution, and every segment [`reads_only`].
 fn is_pure_read(command: &str) -> bool {
-    !command.contains(['>', '`', '('])
-        && segments(command).all(|s| {
-            s.split_whitespace().next().is_some_and(|program| READ_ONLY.contains(&program))
-        })
+    let command = without_null_redirections(command);
+    !command.contains(['>', '`', '(']) && segments(&command).all(reads_only)
+}
+
+/// A simple command that starts with a read-only program (a leading
+/// `VAR=value` is not one): `sort` without an output file, `uniq` without an
+/// output operand, `find` without actions, `git rev-parse`.
+fn reads_only(segment: &str) -> bool {
+    let mut words = segment.split_whitespace();
+    match words.next() {
+        Some("sort") => !runs_with_option(segment, &["sort"], 'o', &["--output"]),
+        Some("uniq") => words.filter(|w| !w.starts_with('-')).count() <= 1,
+        Some("find") => !words.any(|w| FIND_ACTIONS.iter().any(|a| w.starts_with(a))),
+        Some("git") => words.next() == Some("rev-parse"),
+        Some(program) => READ_ONLY.contains(&program),
+        None => false,
+    }
+}
+
+/// `command` without the redirections that write no file: `2>/dev/null`,
+/// `>/dev/null`, `&>/dev/null` and `2>&1`, also with whitespace after `>`.
+fn without_null_redirections(command: &str) -> String {
+    let mut out = String::with_capacity(command.len());
+    let mut rest = command;
+    while let Some(i) = rest.find('>') {
+        let (before, target) = (&rest[..i], rest[i + 1..].trim_start());
+        let word = |w: &str| {
+            target.strip_prefix(w).filter(|after| {
+                after.chars().next().is_none_or(|c| c.is_whitespace() || ";|&)".contains(c))
+            })
+        };
+        let after = word("/dev/null").or_else(|| word("&1").filter(|_| before.ends_with('2')));
+        if let Some(after) = after {
+            out.push_str(before.strip_suffix(['2', '&']).unwrap_or(before));
+            rest = after;
+        } else {
+            out.push_str(&rest[..=i]);
+            rest = &rest[i + 1..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The simple commands of a shell command line.
