@@ -3182,3 +3182,108 @@ fn data_heredocs_and_cargo_in_interpreter_bodies_pass() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Comments and heredoc pipelines as the shell reads them (critic findings on
+// 86ad794, existing spec): a comment starts only at an unquoted, unescaped
+// `#` that starts a word; an interpreter behind a pipe from the heredoc's
+// command counts also when the pipeline continues over lines (a `|` at the
+// end of the `<<` line continues after the terminator; backslash-newline
+// joins lines before the body starts).
+// ---------------------------------------------------------------------------
+
+/// A `#` that is part of a word, so bash/zsh run what follows it, with the
+/// directory the denial must name. Must be denied in a locked session.
+const HASH_INSIDE_A_WORD: &[(&str, &str)] = &[
+    // The finding's examples: after a command substitution, after an
+    // escaped space (with and without a word before it).
+    ("echo $(true)#; rm -rf xtask", "xtask"),
+    ("echo \\ #; rm -rf xtask", "xtask"),
+    ("echo a\\ #; rm -rf xtask", "xtask"),
+    // Derived: after a parameter expansion, an arithmetic expansion, a
+    // closing quote, a `=` inside a word, all followed by more of the word.
+    ("echo ${x}#; rm -rf xtask", "xtask"),
+    ("echo $((1))#; rm -rf xtask", "xtask"),
+    ("echo \"a\"#; rm -rf xtask", "xtask"),
+    ("echo 'a'#; rm -rf xtask", "xtask"),
+    ("echo a=#; rm -rf xtask", "xtask"),
+    ("echo $(true)#\nrm -rf harness", "harness"),
+];
+
+/// Heredocs that a shell or interpreter reads through a pipeline spread over
+/// several lines, with the directory the denial must name. Must be denied in
+/// a locked session.
+const MULTI_LINE_PIPES_INTO_INTERPRETERS: &[(&str, &str)] = &[
+    // The finding's examples: the pipeline continues after the terminator
+    // line; a backslash-newline before the `|`.
+    ("cat <<EOF |\nrm -rf xtask\nEOF\nbash", "xtask"),
+    ("cat <<EOF |\nrm -rf xtask\nEOF\nsh", "xtask"),
+    ("cat <<EOF \\\n| bash\nrm -rf xtask\nEOF", "xtask"),
+    // Derived: the interpreter by path, indented, another interpreter of the
+    // list, a quoted marker, `<<-` with a tab terminator.
+    ("cat <<EOF |\nrm -rf harness\nEOF\n/bin/bash", "harness"),
+    ("cat <<EOF |\nrm -rf .claude\nEOF\n  zsh", ".claude"),
+    ("cat <<EOF |\nimport shutil; shutil.rmtree('xtask')\nEOF\npython3", "xtask"),
+    ("cat <<'EOF' \\\n  | sh\nrm -rf harness\nEOF", "harness"),
+    ("cat <<-EOF |\n\trm -rf .github\n\tEOF\nbash", ".github"),
+];
+
+/// Data heredocs whose pipeline continues over lines into a program that is
+/// no shell or interpreter, and a commit message after a backslash-newline.
+/// Must pass in a locked session.
+const MULTI_LINE_DATA_HEREDOCS: &[&str] = &[
+    // The task's example.
+    "cat <<EOF |\nharness notes\nEOF\ntee /tmp/x",
+    // Derived: backslash-newline before the pipe, a reader as pipe target,
+    // `bash` only as an argument of the pipe target, a commit message whose
+    // command is continued with a backslash.
+    "cat <<EOF \\\n| tee /tmp/x\nthe harness\nEOF",
+    "cat <<EOF |\nxtask\nharness\nEOF\nwc -l",
+    "cat <<EOF |\nrm -rf xtask\nEOF\ngrep -c bash",
+    "git commit \\\n  -F - <<'EOF'\nxtask: fix the guard\n\nThe harness denies writes.\nEOF",
+];
+
+// ADR-0037/ADR-0043 (critic finding on 86ad794): a `#` inside a word starts
+// no comment, so the command after it is checked. Locked denied naming the
+// directory, unlocked allowed; spec root and a temp repo.
+#[test]
+fn hash_inside_a_word_starts_no_comment() {
+    let root = repo("hash_inside_a_word");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in HASH_INSIDE_A_WORD {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037/ADR-0043 (critic finding on 86ad794): a heredoc piped into a
+// shell or interpreter over several lines is checked like inline code.
+// Locked denied naming the directory, unlocked allowed; spec root and a temp
+// repo.
+#[test]
+fn heredoc_pipelines_over_several_lines_feed_the_interpreter() {
+    let root = repo("multi_line_heredoc_pipes");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in MULTI_LINE_PIPES_INTO_INTERPRETERS {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (critic finding on 86ad794): data heredocs stay prose also when
+// their pipeline continues over lines. Locked, spec root and a temp repo.
+#[test]
+fn multi_line_data_heredocs_pass() {
+    let root = repo("multi_line_data_heredocs");
+    for command in MULTI_LINE_DATA_HEREDOCS {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
