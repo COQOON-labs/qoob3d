@@ -1,0 +1,8 @@
+# Agent feeds a heredoc to bash through a pipeline continued after the
+# terminator, with a comment line before the interpreter: bash skips the
+# comment and runs the body; a heredoc line ending in `|` makes the guard keep
+# every word (fail closed; ADR-0037, ADR-0043, ADR-0049; critic finding on
+# c82dc67)
+command: cargo xtask guard
+expect: could modify the harness file `xtask
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "cat <<EOF |\nrm -rf xtask\nEOF\n# note\nbash"}, "hook_event_name": "PreToolUse"}

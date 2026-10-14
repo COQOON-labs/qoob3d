@@ -3241,24 +3241,16 @@ const MULTI_LINE_PIPES_INTO_INTERPRETERS: &[(&str, &str)] = &[
     ("cat <<EOF |\nrm -rf harness\nEOF\nsort |\ntee /tmp/y |\n/bin/sh", "harness"),
 ];
 
-/// Data heredocs whose pipeline continues over lines into a program that is
-/// no shell or interpreter, and a commit message after a backslash-newline.
-/// Must pass in a locked session.
-const MULTI_LINE_DATA_HEREDOCS: &[&str] = &[
-    // The task's example.
-    "cat <<EOF |\nharness notes\nEOF\ntee /tmp/x",
-    // Derived: backslash-newline before the pipe, a reader as pipe target, a
-    // commit message whose command is continued with a backslash, a pipeline
-    // continued over several stages without an interpreter.
-    // (`…EOF\ngrep -c bash` is no longer asserted: the continued pipeline
-    // counts any word naming an interpreter, as the heredoc line does, so
-    // denying it is the conservative reading; critic finding on c96ce58.)
-    "cat <<EOF \\\n| tee /tmp/x\nthe harness\nEOF",
-    "cat <<EOF |\nxtask\nharness\nEOF\nwc -l",
-    "git commit \\\n  -F - <<'EOF'\nxtask: fix the guard\n\nThe harness denies writes.\nEOF",
-    "cat <<EOF |\nharness notes\nEOF\nsort |\ntee /tmp/x",
-    "cat <<EOF |\nharness notes\nEOF\nsort \\\n| wc -l > /tmp/x",
-];
+/// A data heredoc in a command continued with a backslash before the `<<`
+/// line (the heredoc line itself ends in its marker, so the guard models it).
+/// Must pass in a locked session. The multi-line data pipelines that stood
+/// here (a heredoc line ending in `|` or `\`) moved to
+/// FAIL_CLOSED_PROSE: since the fail-closed decision they are denied
+/// conservatively. (`…EOF\ngrep -c bash` stays unasserted: the continued
+/// pipeline counts any word naming an interpreter; critic finding on
+/// c96ce58.)
+const MULTI_LINE_DATA_HEREDOCS: &[&str] =
+    &["git commit \\\n  -F - <<'EOF'\nxtask: fix the guard\n\nThe harness denies writes.\nEOF"];
 
 // ADR-0037/ADR-0043 (critic finding on 86ad794): a `#` inside a word starts
 // no comment, so the command after it is checked. Locked denied naming the
@@ -3293,14 +3285,113 @@ fn heredoc_pipelines_over_several_lines_feed_the_interpreter() {
     fs::remove_dir_all(&root).unwrap();
 }
 
-// ADR-0037 (critic finding on 86ad794): data heredocs stay prose also when
-// their pipeline continues over lines. Locked, spec root and a temp repo.
+// ADR-0037 (critic finding on 86ad794): a data heredoc in a command
+// continued before its `<<` line stays prose. Locked, spec root and a temp
+// repo.
 #[test]
 fn multi_line_data_heredocs_pass() {
     let root = repo("multi_line_data_heredocs");
     for command in MULTI_LINE_DATA_HEREDOCS {
         assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
         assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Fail closed (decided by the user after the critic findings on c82dc67):
+// heredoc bodies and comments are removed as prose only when the guard fully
+// models the command. Backticks, ANSI-C quoting `$'`, the operators `|&`,
+// `>&`, `&>`, `<&` (also `2>&1`, `>&2`) anywhere in the command, or a heredoc
+// line ending in `|` or `\`, make it keep everything: every word is checked.
+// The word rules (`:`/`,` after a name, the cargo exceptions) still apply,
+// so `cargo test -p xtask 2>&1 | tee /tmp/log` keeps passing
+// (CARGO_PACKAGE_AND_SUBCOMMAND).
+// ---------------------------------------------------------------------------
+
+/// The confirmed findings on c82dc67, with the directory the denial must
+/// name: a "comment" bash/zsh do not see (inside backticks, after an escaped
+/// quote in `$'…'`), an interpreter behind `|&`/`2>&1`/`>&2` on the heredoc
+/// line, and a continued pipeline whose interpreter follows a comment line, a
+/// blank line or a trailing comment. bash and zsh run the harness write in
+/// every one (checked with a harmless equivalent), except `>&2 | bash`,
+/// whose body goes to stderr; it is denied conservatively. Must be denied in
+/// a locked session.
+const UNMODELLED_CONSTRUCTS: &[(&str, &str)] = &[
+    // Comments.
+    ("echo `echo #`; rm -rf xtask", "xtask"),
+    ("echo $'a\\' #'; rm -rf xtask", "xtask"),
+    ("x=`true #`; rm -rf xtask", "xtask"),
+    ("echo $(echo `echo #`); rm -rf xtask", "xtask"),
+    // Redirections with `&` on the heredoc line.
+    ("cat <<EOF |& bash\nrm -rf xtask\nEOF", "xtask"),
+    ("cat <<EOF 2>&1 | bash\nrm -rf xtask\nEOF", "xtask"),
+    ("cat <<EOF >&2 | bash\nrm -rf xtask\nEOF", "xtask"),
+    ("cat <<EOF |& python3\nimport shutil; shutil.rmtree('xtask')\nEOF", "xtask"),
+    // Comment and blank lines in a continued pipeline.
+    ("cat <<EOF |\nrm -rf xtask\nEOF\n# note\nbash", "xtask"),
+    ("cat <<EOF |\nrm -rf xtask\nEOF\ntee /tmp/y |\n# note\nbash", "xtask"),
+    ("cat <<EOF |\nrm -rf xtask\nEOF\ntee /tmp/y |\n\nbash", "xtask"),
+    ("cat <<EOF |\nrm -rf xtask\nEOF\n\n# x\n\nbash", "xtask"),
+    ("cat <<EOF |\nrm -rf xtask\nEOF\ntee /tmp/y | # c\nbash", "xtask"),
+];
+
+/// Prose that would pass on its own (a data heredoc, a comment) next to an
+/// unmodelled construct, so nothing is removed and the bare harness word in
+/// it is denied, with the directory the denial must name. Includes the
+/// multi-line data pipelines that were in MULTI_LINE_DATA_HEREDOCS: their
+/// heredoc line ends in `|` or `\`, so they are denied conservatively (the
+/// user accepted that rare spellings are denied). Must be denied in a locked
+/// session.
+const FAIL_CLOSED_PROSE: &[(&str, &str)] = &[
+    // The task's probes (the commit subject has no `:` after the name, which
+    // would exempt it as a word).
+    ("git commit -F - <<'EOF'\nfix the xtask guard\nEOF\necho `date`", "xtask"),
+    ("cat > /tmp/n <<EOF |& cat\nharness\nEOF", "harness"),
+    // Derived: one probe per remaining construct.
+    ("cat > /tmp/n <<EOF\nharness\nEOF\necho $'a'", "harness"),
+    ("cat <<EOF >&2\nharness\nEOF", "harness"),
+    ("cat <<EOF &> /tmp/n\nharness\nEOF", "harness"),
+    ("cat <<EOF <&0 > /tmp/n\nharness\nEOF", "harness"),
+    ("echo done 2>&1 > /tmp/x # harness", "harness"),
+    ("echo `date` > /tmp/x # xtask", "xtask"),
+    // Moved from MULTI_LINE_DATA_HEREDOCS (were must-pass).
+    ("cat <<EOF |\nharness notes\nEOF\ntee /tmp/x", "harness"),
+    ("cat <<EOF \\\n| tee /tmp/x\nthe harness\nEOF", "harness"),
+    ("cat <<EOF |\nxtask\nharness\nEOF\nwc -l", "xtask"),
+    ("cat <<EOF |\nharness notes\nEOF\nsort |\ntee /tmp/x", "harness"),
+    ("cat <<EOF |\nharness notes\nEOF\nsort \\\n| wc -l > /tmp/x", "harness"),
+];
+
+// ADR-0037/ADR-0043 (critic findings on c82dc67): constructs the guard does
+// not model do not hide a harness write. Locked denied naming the directory,
+// unlocked allowed; spec root and a temp repo.
+#[test]
+fn unmodelled_constructs_do_not_hide_harness_paths() {
+    let root = repo("unmodelled_constructs");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in UNMODELLED_CONSTRUCTS {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037/ADR-0043 (fail closed, decided by the user): with an unmodelled
+// construct anywhere in the command, heredoc bodies and comments are kept and
+// checked word by word. Locked denied naming the directory, unlocked allowed;
+// spec root and a temp repo.
+#[test]
+fn prose_is_kept_when_the_command_has_an_unmodelled_construct() {
+    let root = repo("fail_closed_prose");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in FAIL_CLOSED_PROSE {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
     }
     fs::remove_dir_all(&root).unwrap();
 }
