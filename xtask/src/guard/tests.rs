@@ -2681,3 +2681,185 @@ fn harness_list_drift_every_entry_is_guarded_in_shell() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+/// Harness directories named as a whole word, without a trailing slash
+/// (critic finding on ef1aa48, ADR-0037/ADR-0043), with the directory each
+/// one names. `rm -rf xtask` removes the whole directory just like `rm -rf
+/// xtask/`; a missing `/` must not hide the harness path. Quotes, a leading
+/// `./` and a following shell separator do not change what is named. Upper
+/// case (review D1) is covered by
+/// `harness_list_drift_every_directory_is_guarded_without_slash`.
+const BARE_HARNESS_DIRS: &[(&str, &str)] = &[
+    // The finding's examples.
+    ("rm -rf xtask", "xtask"),
+    ("rm -rf harness", "harness"),
+    ("rm -r .github", ".github"),
+    ("rm -rf .claude", ".claude"),
+    ("mv .cargo /tmp/x", ".cargo"),
+    ("mv .claude /tmp/c", ".claude"),
+    ("mv harness /tmp", "harness"),
+    ("rm -rf ./xtask", "xtask"),
+    // Derived: `.githooks` (already without slash in the shell list), other
+    // writers, a separator or quote right after the name.
+    ("rm -rf .githooks", ".githooks"),
+    ("cp -r /tmp/evil xtask", "xtask"),
+    ("rm -rf xtask; ls", "xtask"),
+    ("rm -rf harness && echo done", "harness"),
+    ("rm -rf \"xtask\"", "xtask"),
+    ("rm -rf 'harness'", "harness"),
+    ("(rm -rf .claude)", ".claude"),
+];
+
+/// Commands that name a harness directory only as part of a longer word, as
+/// `cargo`'s subcommand, or outside this repository; each one writes
+/// something, so only the harness detection decides. Must pass in a locked
+/// session (critic finding on ef1aa48).
+const NOT_BARE_HARNESS_DIRS: &[&str] = &[
+    // `xtask` directly after `cargo` is the subcommand, not a path.
+    "cargo xtask check > /tmp/log",
+    "cargo xtask check --fast 2>&1 | tail",
+    "cargo xtask models --write | tee /tmp/models.txt",
+    "cd /tmp && cargo xtask check > /tmp/log",
+    // Longer words that merely contain the directory name.
+    "rm -rf /tmp/xtask-old",
+    "rm myharness.txt",
+    "mv harnessing.md /tmp",
+    "rm -rf xtask-old",
+    "rm xtask.bak",
+    "rm harness_notes.md",
+    "mv .claude-backup /tmp/c",
+    "rm -rf .github2",
+    "rm -rf .cargo_home",
+    // Outside the repository.
+    "rm -rf /tmp/qoob3d/.github/workflows",
+    "rm -rf /tmp/xtask",
+    "mv /tmp/harness /tmp/y",
+    "rm -rf ../xtask",
+];
+
+// ADR-0037/ADR-0043 (critic finding on ef1aa48): a harness directory named as
+// a whole word without a trailing slash is a harness path. A locked session
+// denies the write with the harness message naming the directory (the
+// fragment may be reported with or without its `/`, so the needle ends after
+// the name); spec root and a temp repo.
+#[test]
+fn bare_harness_directories_are_denied_in_a_locked_session() {
+    let root = repo("bare_harness_dirs");
+    for (command, dir) in BARE_HARNESS_DIRS {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], command);
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], command);
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0043 (critic finding on ef1aa48): a bare harness directory right after
+// the repository root counts like `<root>/xtask/…` does in
+// `absolute_harness_paths_into_this_repo_are_denied`: the root as passed, its
+// canonical form, quoted, and via $CLAUDE_PROJECT_DIR / $PWD / $(pwd); also
+// the spec's literal root.
+#[test]
+fn bare_harness_directories_after_the_root_are_denied() {
+    let root = repo("bare_harness_dirs_absolute");
+    let root_str = root.to_str().unwrap().to_owned();
+    let canonical = fs::canonicalize(&root).unwrap().to_str().unwrap().to_owned();
+    let mut prefixes = vec![
+        root_str.clone(),
+        canonical.clone(),
+        format!("\"{root_str}\""),
+        format!("'{root_str}'"),
+        format!("\"{canonical}\""),
+    ];
+    for var in ["$CLAUDE_PROJECT_DIR", "${CLAUDE_PROJECT_DIR}", "$PWD", "${PWD}", "$(pwd)"] {
+        prefixes.push(var.to_owned());
+        prefixes.push(format!("\"{var}\""));
+    }
+    for prefix in &prefixes {
+        for (command, dir) in [
+            (format!("rm -rf {prefix}/xtask"), "xtask"),
+            (format!("rm -rf {prefix}/harness"), "harness"),
+            (format!("rm -r {prefix}/.github"), ".github"),
+            (format!("rm -rf {prefix}/.claude"), ".claude"),
+            (format!("mv {prefix}/.cargo /tmp/x"), ".cargo"),
+        ] {
+            let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+            assert_denied(check_shell(&root, &locked(), &command), &[&needle], &command);
+        }
+    }
+    // A quote that opens before the root and closes after the directory.
+    let quoted = format!("rm -rf \"{root_str}/xtask\"");
+    assert_denied(check_shell(&root, &locked(), &quoted), &[MSG_HARNESS_SHELL], &quoted);
+    for command in [
+        "rm -rf /Users/ben/Development/coqoon/qoob3d/xtask",
+        "mv /Users/ben/Development/coqoon/qoob3d/.claude /tmp/c",
+        "rm -rf \"$CLAUDE_PROJECT_DIR\"/harness",
+    ] {
+        assert_denied(spec_shell(false, command), &[MSG_HARNESS_SHELL], command);
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (critic finding on ef1aa48): `cargo xtask …` with a write, longer
+// words containing a harness directory name and paths outside the repository
+// pass in a locked session; spec root and a temp repo, also with a sibling
+// directory that shares the root as prefix.
+#[test]
+fn harness_directory_names_inside_other_words_pass() {
+    let root = repo("bare_harness_dirs_pass");
+    let root_str = root.to_str().unwrap().to_owned();
+    let mut commands: Vec<String> = NOT_BARE_HARNESS_DIRS.iter().map(|c| (*c).to_owned()).collect();
+    commands.push(format!("rm -rf {root_str}-old/xtask"));
+    commands.push(format!("rm -rf {root_str}x/harness"));
+    for command in &commands {
+        if !command.contains(&root_str) {
+            assert_eq!(spec_shell(false, command), Ok(()), "{command}");
+        }
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0043 (critic finding on ef1aa48): an unlocked session is unaffected;
+// every bare-directory write passes, also after the root.
+#[test]
+fn unlocked_session_allows_bare_harness_directory_writes() {
+    let root = repo("bare_harness_dirs_unlocked");
+    let root_str = root.to_str().unwrap().to_owned();
+    let unlocked = session(true, &unused_home());
+    for (command, _) in BARE_HARNESS_DIRS {
+        assert_eq!(spec_shell(true, command), Ok(()), "{command}");
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command}");
+    }
+    for command in [format!("rm -rf {root_str}/xtask"), format!("mv {root_str}/.cargo /tmp/x")] {
+        assert_eq!(check_shell(&root, &unlocked, &command), Ok(()), "{command}");
+    }
+    for command in NOT_BARE_HARNESS_DIRS {
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037, one source of truth for harness paths (critic finding on
+// ef1aa48): every directory entry of `paths::HARNESS` (ending in `/`) is also
+// detected without its slash, as `rm -rf <dir>` and `rm -rf ./<dir>`, also
+// upper-cased. Fails as soon as HARNESS gains a directory the shell detection
+// only knows with a trailing slash.
+#[test]
+fn harness_list_drift_every_directory_is_guarded_without_slash() {
+    let root = repo("harness_list_drift_bare");
+    let dirs: Vec<&str> = paths::HARNESS.iter().filter_map(|e| e.strip_suffix('/')).collect();
+    assert!(dirs.contains(&"xtask") && dirs.contains(&".claude"), "{dirs:?}");
+    for dir in dirs {
+        for name in [dir.to_owned(), dir.to_uppercase()] {
+            for command in [format!("rm -rf {name}"), format!("rm -rf ./{name}")] {
+                assert_denied(spec_shell(false, &command), &[MSG_HARNESS_SHELL], &command);
+                assert_denied(
+                    check_shell(&root, &locked(), &command),
+                    &[MSG_HARNESS_SHELL],
+                    &command,
+                );
+            }
+        }
+    }
+    fs::remove_dir_all(&root).unwrap();
+}

@@ -130,3 +130,28 @@ fn worktree_uses_the_shared_git_helper() {
         "worktree.rs does not use `crate::git`"
     );
 }
+
+// One git helper (critic K-01 on ef1aa48): selftest.rs spawns no git process
+// of its own. Its production part (before `#[cfg(test)] mod tests;`) builds
+// no `Command::new("git")` and passes the program name `"git"` to no runner
+// of its own (`sh(work, "git", …)` inherits GIT_DIR, GIT_WORK_TREE and
+// GIT_INDEX_FILE from a hook); it calls `crate::git` / `crate::git_command`.
+#[test]
+fn selftest_uses_the_shared_git_helper() {
+    let source =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/selftest.rs")).unwrap();
+    let production = source.split("#[cfg(test)]\nmod tests;").next().unwrap();
+    assert!(!production.contains("fn git("), "selftest.rs defines its own `git`");
+    assert!(
+        !production.contains("Command::new(\"git\")"),
+        "selftest.rs builds its own git command"
+    );
+    assert!(
+        !production.contains("\"git\""),
+        "selftest.rs passes the program `\"git\"` to a runner of its own"
+    );
+    assert!(
+        production.contains("crate::git") || production.contains("use crate::{git"),
+        "selftest.rs does not use `crate::git` / `crate::git_command`"
+    );
+}

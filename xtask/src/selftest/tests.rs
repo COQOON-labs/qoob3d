@@ -1,5 +1,21 @@
 use super::*;
 
+/// Set for the child process of
+/// `prepare_and_run_case_mean_the_work_copy_even_with_hook_git_variables`:
+/// the directory holding the source repository `root/` and the work copy.
+const CHILD_BASE: &str = "QOOB3D_XTASK_TEST_SELFTEST_CHILD_BASE";
+
+/// The variables a git hook exports; they point git at another repository,
+/// work tree or index than the one the command runs in.
+const HOOK_GIT_ENV: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
+
+/// Author and committer of the commits in the work copy.
+const IDENTITY: &str = "Selftest Author <selftest@example.com>";
+
+/// A patch creating `b.txt` with the line `b`.
+const NEW_FILE_PATCH: &str = "diff --git a/b.txt b/b.txt\nnew file mode 100644\n\
+                              --- /dev/null\n+++ b/b.txt\n@@ -0,0 +1 @@\n+b\n";
+
 // ADR-0042: a full case: comments and blank lines ignored, `\n` in `message`
 // becomes a newline, everything after `--- patch` (without that line) is the
 // patch, verbatim, including lines that look like header lines.
@@ -97,4 +113,89 @@ fn env_without_equals_fails() {
         let text = format!("command: cargo xtask guard\nexpect: x\n{line}\n");
         assert!(parse(&text).is_err(), "{line:?}");
     }
+}
+
+// One git helper (critic K-01 on ef1aa48): the selftest's git calls mean the
+// work copy even when the process inherited the variables a git hook exports
+// (`cargo xtask check` runs inside the pre-push hook), pointing at a
+// repository `elsewhere/` that does not exist. The test runs itself as a
+// child with those variables set (the process environment cannot be changed
+// safely in-process); the child runs `prepare` and one `run_case` and checks
+// the result (see `child_prepares_and_runs_a_case_in_the_work_copy`). With
+// the inherited GIT_DIR, `git ls-files` in `copy_tree` fails ("not a git
+// repository") and `git init` would create the git dir under `elsewhere/`.
+#[test]
+fn prepare_and_run_case_mean_the_work_copy_even_with_hook_git_variables() {
+    let base =
+        std::env::temp_dir().join(format!("qoob3d-selftest-hook-env-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    let root = base.join("root");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("a.txt"), "a\n").unwrap();
+    for args in [&["init", "-q"][..], &["add", "a.txt"]] {
+        let mut command = Command::new("git");
+        command
+            .args(args)
+            .current_dir(&root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1");
+        for key in HOOK_GIT_ENV {
+            command.env_remove(key);
+        }
+        assert!(command.status().unwrap().success(), "git {args:?}");
+    }
+    let elsewhere = base.join("elsewhere");
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "selftest::tests::child_prepares_and_runs_a_case_in_the_work_copy",
+            "--nocapture",
+        ])
+        .env(CHILD_BASE, &base)
+        // No user configuration (signing, hooks path) in the work copy.
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_DIR", elsewhere.join(".git"))
+        .env("GIT_WORK_TREE", &elsewhere)
+        .env("GIT_INDEX_FILE", elsewhere.join("index"))
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("1 passed"), "the child test did not run:\n{text}");
+    fs::remove_dir_all(&base).unwrap();
+}
+
+/// The child half of the test above; does nothing unless started by it.
+/// `prepare` copies the staged `a.txt` into `work/` and commits it as
+/// `baseline` (tagged); `run_case` resets to it, applies the patch creating
+/// `b.txt`, commits it as `sabotage` and runs `ls no-such-file`, which fails
+/// naming the file (the expected text), so the case counts as rejected.
+#[test]
+fn child_prepares_and_runs_a_case_in_the_work_copy() {
+    let Some(base) = std::env::var_os(CHILD_BASE) else { return };
+    let base = PathBuf::from(base);
+    let (root, work, target) = (base.join("root"), base.join("work"), base.join("target"));
+    assert_eq!(prepare(&root, &work, IDENTITY), Ok(()));
+    let case = Case {
+        command: "ls no-such-file".to_owned(),
+        expect: "no-such-file".to_owned(),
+        message: "sabotage".to_owned(),
+        patch: Some(NEW_FILE_PATCH.to_owned()),
+        ..Case::default()
+    };
+    assert_eq!(run_case(&work, &target, &case, IDENTITY), Ok(()));
+    assert_eq!(crate::git(&work, &["ls-files"]), Ok("a.txt\nb.txt\n".to_owned()));
+    assert_eq!(crate::git(&work, &["log", "--format=%s"]), Ok("sabotage\nbaseline\n".to_owned()));
+    assert_eq!(
+        crate::git(&work, &["log", "-1", "--format=%an <%ae>", "baseline"]),
+        Ok(format!("{IDENTITY}\n"))
+    );
+    let top = crate::git(&work, &["rev-parse", "--show-toplevel"]).unwrap();
+    assert_eq!(fs::canonicalize(top.trim()).unwrap(), fs::canonicalize(&work).unwrap());
+    assert!(!base.join("elsewhere").exists(), "git wrote the repository named by GIT_DIR");
 }
