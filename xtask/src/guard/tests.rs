@@ -3093,3 +3093,92 @@ fn long_option_abbreviations_match_alike_for_every_program() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// A heredoc body that a shell or interpreter reads is code, not prose (critic
+// K-10 on 2f94396, spec amendment by the user): sh/bash/zsh, python*
+// (python, python3, python3.12 …), perl, ruby, node, deno as the program of
+// the segment with the `<<`, or behind a pipe from that segment (`cat <<EOF |
+// bash`). Then the body is checked like inline code: a harness path in it,
+// with or without trailing slash, is denied in a locked session; the cargo
+// exceptions apply inside it as elsewhere. `<<` makes every such command a
+// writer (WRITES), so the harness check always runs.
+// ---------------------------------------------------------------------------
+
+/// Heredocs fed to a shell or interpreter whose body names a harness path,
+/// with the directory or file the denial must name. Must be denied in a
+/// locked session (critic K-10 on 2f94396).
+const INTERPRETER_FED_HEREDOCS: &[(&str, &str)] = &[
+    // The finding's examples.
+    ("bash <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("cat <<EOF | bash\nrm -rf xtask\nEOF", "xtask"),
+    ("python3 <<EOF\nimport shutil; shutil.rmtree('xtask')\nEOF", "xtask"),
+    ("bash <<EOF\nmv .githooks /tmp/c\nEOF", ".githooks"),
+    ("sh <<'X'\nrm -rf harness\nX", "harness"),
+    // Derived: every heredoc spelling, the interpreter by path and with
+    // options, every interpreter of the amendment (python by version too), a
+    // pipe target by path, a slash path in the body.
+    ("bash <<\"EOF\"\nrm -rf xtask\nEOF", "xtask"),
+    ("zsh <<-EOF\n\trm -rf .github\n\tEOF", ".github"),
+    ("/bin/bash <<EOF\nrm -rf .claude\nEOF", ".claude"),
+    ("bash -s <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("cat <<EOF | /bin/sh\nrm -rf harness\nEOF", "harness"),
+    ("python <<EOF\nimport shutil; shutil.rmtree('harness')\nEOF", "harness"),
+    ("python3.12 <<EOF\nimport os; os.rmdir('.github')\nEOF", ".github"),
+    ("perl <<EOF\nuse File::Path; rmtree('harness');\nEOF", "harness"),
+    ("ruby <<EOF\nrequire 'fileutils'; FileUtils.rm_rf 'xtask'\nEOF", "xtask"),
+    ("node <<EOF\nrequire('fs').rmSync('.cargo')\nEOF", ".cargo"),
+    ("deno run - <<EOF\nDeno.removeSync('xtask')\nEOF", "xtask"),
+    ("bash <<EOF\necho x > xtask/src/main.rs\nEOF", "xtask"),
+    ("cat <<EOF | python3\nopen('harness/rules.md', 'w')\nEOF", "harness"),
+];
+
+/// Heredocs that must still pass in a locked session (critic K-10 on
+/// 2f94396): the cargo exceptions inside an interpreter-fed body, an
+/// interpreter-fed body without a path into the repository, and data
+/// heredocs (to a file, to git, to a non-interpreter behind a pipe).
+const HEREDOCS_THAT_STAY_ALLOWED: &[&str] = &[
+    // The amendment's examples.
+    "bash <<EOF\ncargo xtask check\nEOF",
+    "bash <<EOF\ncargo test -p xtask 2>&1 | tail\nEOF",
+    "cat <<EOF | tee /tmp/x\nthe harness notes\nEOF",
+    "git commit -F - <<'EOF'\nxtask: fix the guard\n\nThe harness denies writes.\nEOF",
+    "cat > /tmp/note <<EOF\nupdate the harness docs\nEOF",
+    // Derived: the cargo exceptions behind a pipe and by path, a path
+    // outside the repository, a data heredoc piped into a reader.
+    "cat <<EOF | bash\ncargo test --package xtask > /tmp/log\nEOF",
+    "bash <<EOF\n~/.cargo/bin/cargo xtask check > /tmp/log\nEOF",
+    "bash <<EOF\nrm -rf /tmp/xtask\nEOF",
+    "python3 <<EOF\nprint(1)\nEOF",
+    "cat <<EOF | wc -l\nxtask\nharness\nEOF",
+];
+
+// ADR-0037/ADR-0043 (critic K-10 on 2f94396): a heredoc body read by a shell
+// or interpreter is checked like inline code. A locked session denies with
+// the harness message naming the path in the body; an unlocked one allows.
+// Spec root and a temp repo.
+#[test]
+fn interpreter_fed_heredoc_bodies_are_checked() {
+    let root = repo("interpreter_fed_heredocs");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in INTERPRETER_FED_HEREDOCS {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (critic K-10 on 2f94396): the cargo exceptions hold inside an
+// interpreter-fed body; data heredocs stay prose. Locked, spec root and a
+// temp repo.
+#[test]
+fn data_heredocs_and_cargo_in_interpreter_bodies_pass() {
+    let root = repo("heredocs_that_stay_allowed");
+    for command in HEREDOCS_THAT_STAY_ALLOWED {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
