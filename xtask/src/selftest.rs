@@ -22,6 +22,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::{git, git_command};
+
 pub(crate) const CASES: &str = "harness/sabotage";
 
 #[derive(Debug, Default, PartialEq)]
@@ -106,27 +108,26 @@ fn prepare(root: &Path, work: &Path, identity: &str) -> Result<(), String> {
         fs::remove_dir_all(work).map_err(|e| format!("{}: {e}", work.display()))?;
     }
     copy_tree(root, work)?;
-    sh(work, "git", &["init", "-q"], None)?;
-    sh(work, "git", &["add", "-A"], None)?;
+    git(work, &["init", "-q"])?;
+    git(work, &["add", "-A"])?;
     let author = as_identity(identity);
     let mut commit: Vec<&str> = author.iter().map(String::as_str).collect();
     commit.extend(["commit", "-q", "--no-verify", "-m", "baseline"]);
-    sh(work, "git", &commit, None)?;
-    sh(work, "git", &["tag", "baseline"], None).map(|_| ())
+    git(work, &commit)?;
+    git(work, &["tag", "baseline"]).map(|_| ())
 }
 
 fn run_case(work: &Path, target: &Path, case: &Case, identity: &str) -> Result<(), String> {
-    sh(work, "git", &["reset", "-q", "--hard", "baseline"], None)?;
-    sh(work, "git", &["clean", "-qfd"], None)?;
+    git(work, &["reset", "-q", "--hard", "baseline"])?;
+    git(work, &["clean", "-qfd"])?;
     if let Some(patch) = &case.patch {
-        sh(work, "git", &["apply", "-"], Some(patch))
-            .map_err(|e| format!("patch no longer applies: {e}"))?;
+        apply(work, patch).map_err(|e| format!("patch no longer applies: {e}"))?;
     }
-    sh(work, "git", &["add", "-A"], None)?;
+    git(work, &["add", "-A"])?;
     let author = as_identity(case.identity.as_deref().unwrap_or(identity));
     let mut commit: Vec<&str> = author.iter().map(String::as_str).collect();
     commit.extend(["commit", "-q", "--allow-empty", "--no-verify", "-m", &case.message]);
-    sh(work, "git", &commit, None)?;
+    git(work, &commit)?;
 
     let mut parts = case.command.split_whitespace();
     let program = parts.next().unwrap_or_default();
@@ -170,7 +171,7 @@ fn run_case(work: &Path, target: &Path, case: &Case, identity: &str) -> Result<(
 
 /// Copies tracked and untracked-but-not-ignored files (the state under test).
 fn copy_tree(root: &Path, to: &Path) -> Result<(), String> {
-    let listing = sh(root, "git", &["ls-files", "-co", "--exclude-standard", "-z"], None)?;
+    let listing = git(root, &["ls-files", "-co", "--exclude-standard", "-z"])?;
     for rel in listing.split('\0').filter(|r| !r.is_empty()) {
         let from = root.join(rel);
         if !from.is_file() {
@@ -185,27 +186,22 @@ fn copy_tree(root: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn sh(dir: &Path, program: &str, args: &[&str], stdin: Option<&str>) -> Result<String, String> {
-    let mut child = Command::new(program)
-        .args(args)
-        .current_dir(dir)
+/// `git apply` with `patch` on stdin.
+fn apply(work: &Path, patch: &str) -> Result<(), String> {
+    let mut child = git_command(work, &["apply", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("{program}: {e}"))?;
-    if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        pipe.write_all(input.as_bytes()).map_err(|e| format!("{program}: {e}"))?;
+        .map_err(|e| format!("git apply: {e}"))?;
+    if let Some(mut pipe) = child.stdin.take() {
+        pipe.write_all(patch.as_bytes()).map_err(|e| format!("git apply: {e}"))?;
     }
-    let out = child.wait_with_output().map_err(|e| format!("{program}: {e}"))?;
+    let out = child.wait_with_output().map_err(|e| format!("git apply: {e}"))?;
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        Ok(())
     } else {
-        Err(format!(
-            "{program} {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
+        Err(format!("git apply: {}", String::from_utf8_lossy(&out.stderr).trim()))
     }
 }
 

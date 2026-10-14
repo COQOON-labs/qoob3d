@@ -7,7 +7,8 @@
 //!   is denied unless it only reads or names `.git` only to exclude it,
 //! - format fixtures are never modified,
 //! - one agent context writes either tests or production code, never both,
-//! - shell commands must not bypass the git hooks or write harness files.
+//! - shell commands must not bypass the git hooks or write harness files; a
+//!   harness directory counts also when named without its trailing slash.
 //!
 //! Paths are collapsed (`.`, `..`) before any check. Shell commands are also
 //! matched with quotes and backslashes removed, which split words without
@@ -78,7 +79,8 @@ const INLINE_CODE: &[(&[&str], &str, &str, &[&str])] = &[
     (&["deno"], "", "", &["eval"]),
     (&["sh", "bash", "zsh"], "c", "", &[]),
 ];
-/// Path fragments of the harness as they appear in shell commands.
+/// Path fragments of the harness as they appear in shell commands; a directory
+/// (ending in `/`) also as a whole name without its slash ([`harness_in_shell`]).
 const HARNESS_IN_SHELL: &[&str] = &[
     ".claude/",
     ".githooks",
@@ -461,7 +463,9 @@ fn sets_hook_environment(root: &Path, home: &Path, file: &str) -> bool {
 
 /// The first harness fragment that refers to this repository: at the start of
 /// a token, after a `./` that starts a token, or right after the root (ADR-0043).
-/// `command` is lower-cased.
+/// A directory also counts as a whole name without its slash (`rm -rf xtask`),
+/// except as `cargo`'s subcommand (`cargo xtask check`). `command` is
+/// lower-cased.
 fn harness_in_shell(root: &Path, command: &str) -> Option<&'static str> {
     let mut roots: Vec<String> = [root.to_path_buf(), canonical(root)]
         .iter()
@@ -470,10 +474,26 @@ fn harness_in_shell(root: &Path, command: &str) -> Option<&'static str> {
         .collect();
     roots.extend(ROOT_VARIABLES.iter().map(|v| v.to_lowercase()));
     HARNESS_IN_SHELL.iter().copied().find(|fragment| {
+        let fragment = fragment.to_lowercase();
+        let bare = fragment
+            .strip_suffix('/')
+            .into_iter()
+            .flat_map(|dir| file_name_positions(command, dir))
+            .filter(|&i| !is_cargo_subcommand(&command[..i]));
         command
-            .match_indices(&fragment.to_lowercase())
-            .any(|(i, _)| refers_to_repo(&command[..i], &roots))
+            .match_indices(&fragment)
+            .map(|(i, _)| i)
+            .chain(bare)
+            .any(|i| refers_to_repo(&command[..i], &roots))
     })
+}
+
+/// A word after `before` is `cargo`'s subcommand: the token directly before it
+/// is `cargo` (also `'cargo` in `bash -c 'cargo xtask check'`).
+fn is_cargo_subcommand(before: &str) -> bool {
+    let separates = |c: char| c.is_whitespace() || TOKEN_SEPARATORS.contains(c);
+    before.ends_with(char::is_whitespace)
+        && before.trim_end().rsplit(separates).next() == Some("cargo")
 }
 
 /// Whether a path that follows `before` is inside the repository.
