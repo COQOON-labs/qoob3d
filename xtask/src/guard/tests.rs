@@ -3226,6 +3226,19 @@ const MULTI_LINE_PIPES_INTO_INTERPRETERS: &[(&str, &str)] = &[
     ("cat <<EOF |\nimport shutil; shutil.rmtree('xtask')\nEOF\npython3", "xtask"),
     ("cat <<'EOF' \\\n  | sh\nrm -rf harness\nEOF", "harness"),
     ("cat <<-EOF |\n\trm -rf .github\n\tEOF\nbash", ".github"),
+    // Critic finding on c96ce58: the pipeline continued after the terminator
+    // is read like the heredoc line itself, so any word naming an
+    // interpreter counts (`env bash`, `exec bash`, `command bash`, an
+    // assignment before it), and lines keep joining while a stage ends in
+    // `|` or `\`.
+    ("cat <<EOF |\nrm -rf xtask\nEOF\nenv bash", "xtask"),
+    ("cat <<EOF |\nrm -rf xtask\nEOF\nexec bash", "xtask"),
+    ("cat <<EOF |\nrm -rf xtask\nEOF\ncommand bash", "xtask"),
+    ("cat <<EOF |\nrm -rf xtask\nEOF\nFOO=1 bash", "xtask"),
+    ("cat <<EOF |\nrm -rf xtask\nEOF\ntee /tmp/y |\nbash", "xtask"),
+    ("cat <<EOF |\nrm -rf xtask\nEOF\ntee /tmp/y \\\n| bash", "xtask"),
+    // Derived: more stages, the interpreter by path at the end.
+    ("cat <<EOF |\nrm -rf harness\nEOF\nsort |\ntee /tmp/y |\n/bin/sh", "harness"),
 ];
 
 /// Data heredocs whose pipeline continues over lines into a program that is
@@ -3234,13 +3247,17 @@ const MULTI_LINE_PIPES_INTO_INTERPRETERS: &[(&str, &str)] = &[
 const MULTI_LINE_DATA_HEREDOCS: &[&str] = &[
     // The task's example.
     "cat <<EOF |\nharness notes\nEOF\ntee /tmp/x",
-    // Derived: backslash-newline before the pipe, a reader as pipe target,
-    // `bash` only as an argument of the pipe target, a commit message whose
-    // command is continued with a backslash.
+    // Derived: backslash-newline before the pipe, a reader as pipe target, a
+    // commit message whose command is continued with a backslash, a pipeline
+    // continued over several stages without an interpreter.
+    // (`…EOF\ngrep -c bash` is no longer asserted: the continued pipeline
+    // counts any word naming an interpreter, as the heredoc line does, so
+    // denying it is the conservative reading; critic finding on c96ce58.)
     "cat <<EOF \\\n| tee /tmp/x\nthe harness\nEOF",
     "cat <<EOF |\nxtask\nharness\nEOF\nwc -l",
-    "cat <<EOF |\nrm -rf xtask\nEOF\ngrep -c bash",
     "git commit \\\n  -F - <<'EOF'\nxtask: fix the guard\n\nThe harness denies writes.\nEOF",
+    "cat <<EOF |\nharness notes\nEOF\nsort |\ntee /tmp/x",
+    "cat <<EOF |\nharness notes\nEOF\nsort \\\n| wc -l > /tmp/x",
 ];
 
 // ADR-0037/ADR-0043 (critic finding on 86ad794): a `#` inside a word starts
