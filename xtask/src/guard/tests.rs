@@ -1174,3 +1174,401 @@ fn f3_paths_leaving_the_root_pass() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Fixes from the branch review (review spec G2, G3, D1, F6).
+// ---------------------------------------------------------------------------
+
+/// Message of an abbreviated `--no-verify` (review G2).
+const MSG_NO_VERIFY: &str = "`--no-verify` bypasses the quality gates";
+/// Every denial that protects against self-unlock names this decision.
+const ADR_0043: &str = "ADR-0043";
+
+/// Runs `f` for a locked and an unlocked session.
+fn both_sessions(mut f: impl FnMut(bool)) {
+    for unlocked in [false, true] {
+        f(unlocked);
+    }
+}
+
+// ADR-0037 (review G2): git accepts unambiguous abbreviations of long
+// options, so every prefix of `--no-verify` that is at least as long as
+// `--no-veri` is the same bypass. Matched lower-cased and with quotes
+// removed; locked and unlocked; the message names `--no-verify`.
+#[test]
+fn g2_abbreviated_no_verify_is_denied() {
+    both_sessions(|unlocked| {
+        for command in [
+            // The spec's examples.
+            "git push --no-veri",
+            "git commit --no-verif -m x",
+            "git push origin HEAD --NO-VERI",
+            // Mixed case, quoted, in a later segment.
+            "git commit -m x --No-Verif",
+            "git push '--no-veri'",
+            "cargo test && git push --no-veri origin",
+        ] {
+            assert_denied(
+                spec_shell(unlocked, command),
+                &[MSG_NO_VERIFY],
+                &format!("{command} (unlocked: {unlocked})"),
+            );
+        }
+    });
+}
+
+// ADR-0037 (review G2): other `--no-…` options pass. `--no-ver` is shorter
+// than `--no-veri` (ambiguous with `--no-verbose`, git rejects it), and
+// `--no-verbose` is no prefix of `--no-verify`.
+#[test]
+fn g2_other_no_options_pass() {
+    both_sessions(|unlocked| {
+        for command in [
+            "git commit --no-verbose -m x",
+            "git log --no-merges",
+            "git commit --no-ver -m x",
+            "git commit --no-edit --amend",
+            "git push --no-thin origin",
+        ] {
+            assert_eq!(spec_shell(unlocked, command), Ok(()), "{command} (unlocked: {unlocked})");
+        }
+    });
+}
+
+// ADR-0043 (review G3): the guard binary lives in `.git/qoob3d/guard-target`,
+// so every `.git/` path in a shell command is protected like the
+// hook-environment files: denied unless the command is a pure read, locked
+// and unlocked, relative, absolute or via $CLAUDE_PROJECT_DIR.
+#[test]
+fn g3_shell_writes_under_git_dir_are_denied() {
+    let root = repo("g3_git_shell");
+    let root_str = root.to_str().unwrap().to_owned();
+    let commands = [
+        "cp /tmp/fake .git/qoob3d/guard-target/debug/xtask".to_owned(),
+        "rm -rf .git/qoob3d/guard-target".to_owned(),
+        "echo x > .git/info/exclude".to_owned(),
+        "touch .git/qoob3d/roles/s--main".to_owned(),
+        "mv /tmp/x .git/HEAD".to_owned(),
+        // No WRITES fragment, but not a pure read either.
+        "CARGO_TARGET_DIR=.git/qoob3d/guard-target cargo build --package xtask".to_owned(),
+        "cargo build --target-dir .git/qoob3d/guard-target -p xtask".to_owned(),
+        "dd if=/tmp/fake of=.git/qoob3d/guard-target/debug/xtask".to_owned(),
+        format!("cp /tmp/fake {root_str}/.git/qoob3d/guard-target/debug/xtask"),
+        "cp /tmp/fake \"$CLAUDE_PROJECT_DIR\"/.git/qoob3d/guard-target/debug/xtask".to_owned(),
+    ];
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &unused_home());
+        for command in &commands {
+            assert_denied(
+                check_shell(&root, &s, command),
+                &[ADR_0043],
+                &format!("{command} (unlocked: {unlocked})"),
+            );
+        }
+    });
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0043 (review G3, spec-fixes F1): pure reads of `.git/` pass; names
+// that only start like `.git` (`.github/`, `.githooks/`, `.gitignore`) are
+// not the git directory, and git commands without a `.git/` path are
+// unaffected. Unlocked, harness writes to `.github/`/`.githooks/` pass.
+#[test]
+fn g3_git_dir_reads_and_git_like_names_pass() {
+    let root = repo("g3_git_reads");
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &unused_home());
+        for command in [
+            "cat .git/HEAD",
+            "ls .git/qoob3d/guard-target/debug",
+            "stat .git/qoob3d/guard-target/debug/xtask",
+            "grep -r main .git/refs | wc -l",
+            "echo target >> .gitignore",
+            "cat .github/CODEOWNERS",
+            "git status",
+            "git log --oneline -3",
+        ] {
+            assert_eq!(check_shell(&root, &s, command), Ok(()), "{command} (unlocked: {unlocked})");
+        }
+    });
+    let unlocked = session(true, &unused_home());
+    for command in ["cp /tmp/ci.yml .github/workflows/ci.yml", "rm .githooks/pre-push"] {
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (review G3): cargo also links the xtask binary as
+// `target/debug/deps/xtask-<hash>`; that prefix is a harness path in shell
+// commands. Locked denied, unlocked allowed (the unlock lifts harness paths).
+#[test]
+fn g3_xtask_deps_binary_in_shell_is_harness() {
+    let root = repo("g3_deps_shell");
+    let root_str = root.to_str().unwrap().to_owned();
+    let commands = [
+        "cp /tmp/fake target/debug/deps/xtask-0123abcd".to_owned(),
+        "rm target/debug/deps/xtask-*".to_owned(),
+        format!("cp /tmp/fake {root_str}/target/debug/deps/xtask-0123abcd"),
+    ];
+    let unlocked = session(true, &unused_home());
+    for command in &commands {
+        assert_denied(check_shell(&root, &locked(), command), &[MSG_HARNESS_SHELL], command);
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command} (unlocked)");
+    }
+    for command in [
+        "cp /tmp/x target/debug/deps/qoob3d_core-0123abcd",
+        "rm target/debug/deps/xtaskish-1",
+        "cargo build -p xtask",
+    ] {
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (review G3): `target/debug/deps/xtask-<hash>` is a harness path
+// for the file tools too: locked denied with the harness message, unlocked
+// allowed. `target/debug/xtask` stays a harness path.
+#[test]
+fn g3_xtask_deps_binary_is_read_only_for_file_tools() {
+    let root = repo("g3_deps_write");
+    let unlocked = session(true, &unused_home());
+    for (i, rel) in [
+        "target/debug/deps/xtask-0123abcd",
+        "target/debug/deps/xtask-0123abcd.d",
+        "target/debug/xtask",
+    ]
+    .iter()
+    .enumerate()
+    {
+        for tool in ["Edit", "Write"] {
+            let input = write(tool, &abs(&root, rel), &format!("g3-{i}"), None, None);
+            assert_denied(
+                pre_tool_use(&root, &locked(), &input),
+                &[&format!(
+                    "`{rel}` belongs to the harness and is read-only for agents (ADR-0037)"
+                )],
+                &format!("{tool} {rel}"),
+            );
+            assert_eq!(pre_tool_use(&root, &unlocked, &input), Ok(()), "{tool} {rel} (unlocked)");
+        }
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0043 (review D1): macOS file systems ignore case, so hook-environment
+// fragments in shell commands match case-insensitively: denied locked and
+// unlocked. (`.Claude/…` inside the repo is also harness; locked, either
+// message may answer.)
+#[test]
+fn d1_shell_hook_environment_fragments_ignore_case() {
+    let root = repo("d1_shell_env");
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &unused_home());
+        for command in [
+            "echo export X=1 >> ~/.ZSHENV",
+            "echo {} > ~/.claude/Settings.json",
+            "echo x >> ~/.ZshRc",
+            "cp x ~/.CLAUDE/settings.json",
+            "echo x > $HOME/.Profile",
+            "echo x > .VSCode/Settings.json",
+            "echo '[core]' >> .GIT/config",
+            "cp /tmp/fake .Git/qoob3d/guard-target/debug/xtask",
+        ] {
+            assert_denied(
+                spec_shell(unlocked, command),
+                &[ADR_0043],
+                &format!("{command} (unlocked: {unlocked})"),
+            );
+        }
+        let local = "echo {} > .Claude/Settings.Local.json";
+        let what = format!("{local} (unlocked: {unlocked})");
+        if unlocked {
+            assert_denied(check_shell(&root, &s, local), &[MSG_SELF_UNLOCK], &what);
+        } else {
+            assert!(check_shell(&root, &s, local).is_err(), "{what}");
+        }
+    });
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (review D1): harness fragments in shell commands match
+// case-insensitively. Locked denied with the harness message (spec root and a
+// temp repo), unlocked allowed.
+#[test]
+fn d1_shell_harness_fragments_ignore_case() {
+    let root = repo("d1_shell_harness");
+    let root_str = root.to_str().unwrap().to_owned();
+    let commands = [
+        "cp x XTASK/src/main.rs".to_owned(),
+        "echo x >> CARGO.TOML".to_owned(),
+        "echo x > .Cargo/config.toml".to_owned(),
+        "cp x Clippy.toml".to_owned(),
+        "rm .GitHooks/pre-push".to_owned(),
+        "cp x Target/Debug/XTASK".to_owned(),
+        format!("cp x {root_str}/Xtask/src/main.rs"),
+    ];
+    let unlocked = session(true, &unused_home());
+    for command in &commands {
+        if !command.contains(&root_str) {
+            assert_denied(spec_shell(false, command), &[MSG_HARNESS_SHELL], command);
+            assert_eq!(spec_shell(true, command), Ok(()), "{command} (unlocked)");
+        }
+        assert_denied(check_shell(&root, &locked(), command), &[MSG_HARNESS_SHELL], command);
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0043 (review D1): the protected-file comparison of the file tools
+// ignores case, also for files that do not exist yet; denied locked and
+// unlocked. None of these files exists in the temp home or repo, so the
+// file system cannot correct the case.
+#[test]
+fn d1_hook_environment_files_ignore_case() {
+    let root = repo("d1_files");
+    let home = home_dir("d1_files");
+    let elsewhere = home_dir("d1_files_elsewhere");
+    let files = [
+        abs(&home, ".ZSHENV"),
+        abs(&home, ".ZProfile"),
+        abs(&home, ".Bash_Profile"),
+        abs(&home, ".PROFILE"),
+        abs(&home, ".claude/Settings.json"),
+        abs(&home, ".claude/SETTINGS.LOCAL.JSON"),
+        abs(&elsewhere, ".Claude/Settings.Local.json"),
+        abs(&root, ".VSCode/Settings.json"),
+        abs(&home, "Library/Application Support/Code/User/SETTINGS.json"),
+        abs(&home, ".config/code/user/settings.json"),
+        "/etc/Claude-Code/managed-settings.json".to_owned(),
+        "/Library/Application Support/claudecode/managed-settings.json".to_owned(),
+    ];
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &home);
+        for (i, file) in files.iter().enumerate() {
+            for tool in ["Edit", "Write"] {
+                let input = write(tool, file, &format!("d1-{i}"), None, None);
+                assert_denied(
+                    pre_tool_use(&root, &s, &input),
+                    &[MSG_SELF_UNLOCK, ADR_0043],
+                    &format!("{tool} {file} (unlocked: {unlocked})"),
+                );
+            }
+        }
+        // In the repo `.claude/` is also harness: locked, either rule may
+        // answer; unlocked only the self-unlock rule applies.
+        let local = abs(&root, ".claude/Settings.Local.json");
+        let result = pre_tool_use(&root, &s, &write("Write", &local, "d1-local", None, None));
+        if unlocked {
+            assert_denied(result, &[MSG_SELF_UNLOCK, ADR_0043], &local);
+        } else {
+            assert!(result.is_err(), "{local}");
+        }
+    });
+    fs::remove_dir_all(&root).unwrap();
+    fs::remove_dir_all(&home).unwrap();
+    fs::remove_dir_all(&elsewhere).unwrap();
+}
+
+// ADR-0037 (review D1): the harness check compares the repo-relative path
+// case-insensitively: `Cargo.TOML` (no such file) and directories that do
+// not exist in the temp repo are denied locked, allowed unlocked.
+// `XTASK/new.rs` with an existing `xtask/` is listed as well (the spec says
+// it is caught already).
+#[test]
+fn d1_harness_files_ignore_case() {
+    let root = repo("d1_harness");
+    fs::create_dir_all(root.join("xtask")).unwrap();
+    let unlocked = session(true, &unused_home());
+    for (i, (rel, normal)) in [
+        ("Cargo.TOML", "cargo.toml"),
+        ("CLIPPY.toml", "clippy.toml"),
+        ("Harness/rules.md", "harness/rules.md"),
+        (".GitHub/workflows/ci.yml", ".github/workflows/ci.yml"),
+        (".Claude/agents/x.md", ".claude/agents/x.md"),
+        ("XTASK/new.rs", "xtask/new.rs"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let input = write("Write", &abs(&root, rel), &format!("d1h-{i}"), None, None);
+        let message = pre_tool_use(&root, &locked(), &input).expect_err(rel);
+        assert!(
+            message.to_lowercase().contains(&format!("`{normal}` belongs to the harness")),
+            "{rel}: {message}"
+        );
+        assert_eq!(pre_tool_use(&root, &unlocked, &input), Ok(()), "{rel} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0030 (review D1): the fixture check compares the repo-relative path
+// case-insensitively. Where the file system ignores case (macOS), the
+// differently cased path is the existing fixture and is denied; where it
+// does not, it is a new file and passes.
+#[test]
+fn d1_fixtures_ignore_case() {
+    let root = repo("d1_fixture");
+    let file = abs(&root, "crates/qoob3d-core/tests/FIXTURES/V1.qbd");
+    let case_insensitive = Path::new(&file).exists();
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &unused_home());
+        let input = write("Write", &file, "d1f", Some("a"), Some("test-author"));
+        let result = pre_tool_use(&root, &s, &input);
+        if case_insensitive {
+            let message = result.expect_err(&file);
+            assert!(message.contains("is a format fixture and immutable (ADR-0030)"), "{message}");
+        } else {
+            assert_eq!(result, Ok(()), "{file}");
+        }
+    });
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0043 (review F6): shell startup names count only as a whole path
+// component, so identifiers and file names that merely contain them pass in
+// write commands, locked and unlocked.
+#[test]
+fn f6_startup_names_inside_identifiers_pass() {
+    both_sessions(|unlocked| {
+        for command in [
+            "sed -i '' s/a/b/ crates/qoob3d-core/src/profile.rs",
+            "cat > /tmp/x <<EOF\nlet n = self.profiles.len();\nEOF",
+            "echo my.profile_x > /tmp/y",
+            "sed -i '' s/self.profiles/self.regions/ crates/qoob3d-kernel/src/model.rs",
+            "python3 -c 'print(self.profile)'",
+            "perl -pi -e s/cfg.bashrc_path/cfg.rc/ /tmp/notes.txt",
+            "echo x > /tmp/a.zshrc_backup",
+        ] {
+            assert_eq!(spec_shell(unlocked, command), Ok(()), "{command:?} (unlocked: {unlocked})");
+        }
+    });
+}
+
+// ADR-0043 (review F6): a startup name after start, whitespace, quote, `/`,
+// `=`, `~`, `>`, `<` and before end, whitespace, quote, `;`, `|`, `&`, `)`
+// is a path; non-read commands naming it are denied, locked and unlocked.
+#[test]
+fn f6_startup_names_as_path_components_are_denied() {
+    both_sessions(|unlocked| {
+        for command in [
+            "echo x >> ~/.profile",
+            "echo x >> $HOME/.profile",
+            "echo x >.profile",
+            "echo x > \"/Users/x/.profile\"",
+            "echo x > '/Users/x/.profile'",
+            "dd if=/tmp/x of=.profile",
+            "sed -i '' s/a/b/ .zprofile",
+            "cat x > ~/.profile; ls",
+            "echo x >> ~/.profile && ls",
+            "(echo x >> ~/.profile)",
+            "echo x >> ~/.profile| cat",
+            "echo x\t>>\t~/.bashrc",
+        ] {
+            assert_denied(
+                spec_shell(unlocked, command),
+                &[MSG_SELF_UNLOCK],
+                &format!("{command:?} (unlocked: {unlocked})"),
+            );
+        }
+    });
+}

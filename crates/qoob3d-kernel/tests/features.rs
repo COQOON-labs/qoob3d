@@ -165,8 +165,9 @@ fn format_v2_fixture_builds_without_errors() {
 }
 
 // ---------------------------------------------------------------------------
-// Rebuild cache (ADR-0012): deterministic checks via `RebuildResult::stats`.
-// No timing assertions – the counters say what the rebuild had to compute.
+// Rebuild cache (ADR-0012, ADR-0046): deterministic checks via
+// `RebuildResult::stats`. No timing assertions (ADR-0046 decision 5) – the
+// counters say what the rebuild had to compute.
 // ---------------------------------------------------------------------------
 
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -178,7 +179,7 @@ fn counts(r: &RebuildResult) -> (usize, usize, usize) {
 
 /// Features a rebuild evaluates, counted from the document: every
 /// non-suppressed sketch and solid feature. Suppressed features and
-/// construction planes count in neither stats field (criterion A).
+/// construction planes count in neither stats field (ADR-0046 decision 1).
 fn evaluated_features(doc: &Document) -> usize {
     doc.features
         .iter()
@@ -260,7 +261,7 @@ const VOLUME_TOL: f64 = 1e-6;
 
 #[test]
 fn first_rebuild_of_the_gear_computes_everything() {
-    // ADR-0012 criterion B. examples::gear() = [Gear1 (SpurGear, NewBody)]:
+    // ADR-0046 decision 1, first rebuild. examples::gear() = [Gear1 (SpurGear, NewBody)]:
     // 0 sketches + 1 solid feature = 1 evaluated feature, 1 body.
     let doc = examples::gear();
     assert_eq!(evaluated_features(&doc), 1, "derivation of the expected count");
@@ -273,9 +274,9 @@ fn first_rebuild_of_the_gear_computes_everything() {
 
 #[test]
 fn unchanged_gear_comes_entirely_from_the_cache() {
-    // ADR-0012 criterion C (replaces the wall-clock test, criterion F).
+    // ADR-0046 decisions 2 and 5 (replaces the wall-clock test).
     // Second rebuild of the same document: nothing computed, the one
-    // feature from B cached, no body analyzed again; results identical.
+    // feature cached, no body analyzed again; results identical.
     let doc = examples::gear();
     let mut kernel = Kernel::spawn(|| {});
     let first = rebuild(&mut kernel, &doc);
@@ -295,7 +296,7 @@ fn unchanged_gear_comes_entirely_from_the_cache() {
 
 #[test]
 fn unchanged_multi_feature_document_comes_entirely_from_the_cache() {
-    // ADR-0012 criteria B and C on a timeline with a construction plane.
+    // ADR-0046 decisions 1 and 2 on a timeline with a construction plane.
     // examples::plate_with_hole() = [Sketch1, Extrude1 (new), Plane1,
     // Sketch2, Extrude2 (join), Extrude3 (cut)]: 2 sketches + 3 solid
     // features = 5 evaluated, Plane1 counts in neither field. The boss is
@@ -318,7 +319,7 @@ fn unchanged_multi_feature_document_comes_entirely_from_the_cache() {
 
 #[test]
 fn empty_document_computes_nothing() {
-    // ADR-0012 criterion A, degenerate case: no features, no bodies.
+    // ADR-0046 decision 1, degenerate case: no features, no bodies.
     let doc = Document::default();
     let mut kernel = Kernel::spawn(|| {});
     assert_eq!(counts(&rebuild(&mut kernel, &doc)), (0, 0, 0));
@@ -327,7 +328,7 @@ fn empty_document_computes_nothing() {
 
 #[test]
 fn suppressed_features_and_planes_count_in_neither_field() {
-    // ADR-0012 criterion A. plate_with_hole with Extrude3 (cut) suppressed:
+    // ADR-0046 decision 1. plate_with_hole with Extrude3 (cut) suppressed:
     // Sketch1, Extrude1, Sketch2, Extrude2 = 4 evaluated; Plane1 and the
     // suppressed Extrude3 count in neither field.
     // Volume without the cut: plate 60 · 40 · 5 + boss π · 5² · 8
@@ -345,11 +346,11 @@ fn suppressed_features_and_planes_count_in_neither_field() {
 
 #[test]
 fn suppressing_the_last_feature_reuses_the_steps_before_it() {
-    // ADR-0012: suppression is part of the key. After a full rebuild of
-    // plate_with_hole, suppressing Extrude3 leaves Sketch1, Extrude1,
-    // Sketch2, Extrude2 unchanged → 0 computed, 4 cached. The resulting
-    // body (state after Extrude2) was never analyzed in the first rebuild
-    // (that showed the state after the cut), so it is analyzed now: 1.
+    // ADR-0046 decisions 2 and 3: suppression is part of the key. After a
+    // full rebuild of plate_with_hole, suppressing Extrude3 leaves Sketch1,
+    // Extrude1, Sketch2, Extrude2 unchanged → 0 computed, 4 cached. The
+    // resulting body (state after Extrude2) was never analyzed in the first
+    // rebuild (that showed the state after the cut), so it is analyzed now: 1.
     let doc = examples::plate_with_hole();
     let mut suppressed = doc.clone();
     let cut = *solid_ids(&doc).last().unwrap();
@@ -364,7 +365,7 @@ fn suppressing_the_last_feature_reuses_the_steps_before_it() {
 
 #[test]
 fn changing_the_last_solid_feature_recomputes_only_it() {
-    // ADR-0012 criterion D. plate_with_hole: Extrude3 (cut, symmetric 40)
+    // ADR-0046 decision 3 (hash chain). plate_with_hole: Extrude3 (cut, symmetric 40)
     // → symmetric 10. Its sketch lies on Plane1 (z = 5), so the Ø6 hole
     // now spans z ∈ [0, 10] instead of [−15, 25]: 10 mm deep instead of
     // through all 13 mm (plate z 0…5, boss z 5…13).
@@ -390,7 +391,7 @@ fn changing_the_last_solid_feature_recomputes_only_it() {
 
 #[test]
 fn changing_the_last_feature_analyzes_only_the_body_it_changes() {
-    // ADR-0012 criteria C/D: an unchanged body keeps its analysis.
+    // ADR-0046 decisions 2 and 3: an unchanged body keeps its analysis.
     // two_bodies(): Extrude2 30 → 20. Sketch1, Sketch2, Extrude1 cached = 3,
     // Extrude2 computed = 1; only Body2 (the cylinder) is analyzed = 1.
     // Body1 stays 10 000 mm³ (bit-identical), Body2 = π · 5² · 20 = 500π.
@@ -414,13 +415,16 @@ fn changing_the_last_feature_analyzes_only_the_body_it_changes() {
 
 #[test]
 fn changing_the_first_solid_feature_recomputes_it_and_every_later_one() {
-    // ADR-0012 criterion D, hash chain: key_i = hash(key_{i-1}, param_i).
-    // two_bodies(): Extrude1 10 → 12. The sketches precede it and are
-    // cached = 2; Extrude1 and Extrude2 (its key depends on Extrude1's)
-    // are computed = 2. Body1 changes and is analyzed again; whether Body2
-    // (geometrically unchanged, but from a recomputed step) is analyzed is
-    // not specified, so 1 ≤ analyzed ≤ 2.
-    // Body1 = 40 · 25 · 12 = 12 000 mm³, Body2 = 750π mm³ (unchanged).
+    // ADR-0046 decision 3. two_bodies(): Extrude1 10 → 12.
+    // - Sketch1 and Sketch2 are keyed by their own content, which is
+    //   unchanged → cached = 2.
+    // - Hash chain (ADR-0012): key_i = hash(key_{i-1}, param_i), so Extrude1
+    //   and Extrude2 get new keys → computed = 2.
+    // - Every body in the state produced by a recomputed step counts as
+    //   analyzed, even if its geometry is unchanged (the kernel does not
+    //   compare geometry): the state after Extrude2 holds Body1 and Body2
+    //   → analyzed = 2.
+    // Body1 = 40 · 25 · 12 = 12 000 mm³, Body2 = π · 5² · 30 = 750π mm³.
     let (doc, e1, _) = two_bodies();
     let mut changed = doc.clone();
     extrude_mut(&mut changed, e1).distance = 12.0;
@@ -428,40 +432,41 @@ fn changing_the_first_solid_feature_recomputes_it_and_every_later_one() {
     rebuild(&mut kernel, &doc);
     let r = rebuild(&mut kernel, &changed);
     assert!(r.errors.is_empty(), "{:?}", r.errors);
-    let (computed, cached, analyzed) = counts(&r);
-    assert_eq!((computed, cached), (2, 2));
-    assert!((1..=2).contains(&analyzed), "analyzed {analyzed}");
+    assert_eq!(counts(&r), (2, 2, 2));
+    assert_eq!(r.bodies.len(), 2);
     assert_rel(body(&r, 1).volume_mm3, 12_000.0, VOLUME_TOL);
     assert_rel(body(&r, 2).volume_mm3, 750.0 * PI, VOLUME_TOL);
 }
 
 #[test]
 fn changing_the_first_solid_feature_of_a_join_cut_chain() {
-    // ADR-0012 criterion D on plate_with_hole: Extrude1 (plate) 5 → 6.
-    // Extrude1, Extrude2, Extrude3 must be computed (3). Sketch1 precedes
-    // Extrude1 and is cached. Sketch2 comes after Extrude1; the spec does not
-    // say whether a sketch after a changed feature is recomputed, so it may
-    // land in either field: computed ∈ {3, 4}, cached = 5 − computed.
+    // ADR-0046 decision 3 on plate_with_hole: Extrude1 (plate) 5 → 6.
+    // - Sketch1 and Sketch2 are keyed by their own content. Sketch2 lies on
+    //   Plane1 = XY offset 5, which does not depend on Extrude1, so neither
+    //   sketch changes → cached = 2 (Plane1 counts in neither field).
+    // - Extrude1 changed; Extrude2 and Extrude3 follow it in the hash chain
+    //   → computed = 3.
+    // - The one body of the final state comes from a recomputed step
+    //   → analyzed = 1.
+    // computed + cached = 5 = evaluated_features (2 sketches + 3 extrudes).
     // Volume: plate 60 · 40 · 6 + boss above it π · 5² · (13 − 6) − hole
     // π · 3² · 13 = 14 400 + 175π − 117π = 14 400 + 58π mm³.
     let doc = examples::plate_with_hole();
     let mut changed = doc.clone();
     let plate = solid_ids(&doc)[0];
     extrude_mut(&mut changed, plate).distance = 6.0;
+    assert_eq!(evaluated_features(&changed), 5, "derivation of the expected count");
     let mut kernel = Kernel::spawn(|| {});
     rebuild(&mut kernel, &doc);
     let r = rebuild(&mut kernel, &changed);
     assert!(r.errors.is_empty(), "{:?}", r.errors);
-    let (computed, cached, analyzed) = counts(&r);
-    assert!((3..=4).contains(&computed), "computed {computed}");
-    assert_eq!(computed + cached, evaluated_features(&changed));
-    assert_eq!(analyzed, 1, "the single body changed");
+    assert_eq!(counts(&r), (3, 2, 1));
     assert_rel(only_body(&r).volume_mm3, 14_400.0 + 58.0 * PI, VOLUME_TOL);
 }
 
 #[test]
 fn undo_to_the_previous_document_computes_nothing() {
-    // ADR-0012 criterion E: rebuild A, then B (one parameter changed), then
+    // ADR-0046 decision 4: rebuild A, then B (one parameter changed), then
     // A again. The kernel keeps this and the previous rebuild, so the third
     // rebuild takes all 5 evaluated features of A from the cache.
     // A = plate_with_hole, B = A with Extrude3 symmetric 40 → 10.
@@ -481,8 +486,38 @@ fn undo_to_the_previous_document_computes_nothing() {
 }
 
 #[test]
+fn export_does_not_change_what_the_cache_retains() {
+    // ADR-0046 decision 4: the kernel keeps the current and the previous
+    // rebuild; exports read the cache without changing what is retained.
+    // Rebuild A, rebuild B (Extrude3 symmetric 40 → 10), export B, rebuild A:
+    // A is still the previous rebuild, so the last rebuild computes 0 and
+    // takes all 5 evaluated features of A (2 sketches + 3 extrudes) from the
+    // cache, with a bit-identical volume.
+    let a = examples::plate_with_hole();
+    let mut b = a.clone();
+    let cut = *solid_ids(&a).last().unwrap();
+    extrude_mut(&mut b, cut).distance = 10.0;
+    let mut kernel = Kernel::spawn(|| {});
+    let first = rebuild(&mut kernel, &a);
+    assert_eq!(counts(&rebuild(&mut kernel, &b)).0, 1, "B changes one feature");
+    let export = kernel
+        .export_blocking(
+            Arc::new(b.clone()),
+            qoob3d_kernel::EXPORT_TESSELLATION_TOLERANCE_MM,
+            TIMEOUT,
+        )
+        .expect("kernel answers");
+    assert_eq!(export.len(), 1, "B exports its one body");
+    let again = rebuild(&mut kernel, &a);
+    assert!(again.errors.is_empty(), "{:?}", again.errors);
+    assert_eq!(counts(&again), (0, evaluated_features(&a), 0));
+    assert_eq!(counts(&again), (0, 5, 0));
+    assert_eq!(volume_bits(&again), volume_bits(&first));
+}
+
+#[test]
 fn failed_features_are_cached_too() {
-    // ADR-0012 criterion C for a document with a feature error: cuboid
+    // ADR-0046 decision 2 for a document with a feature error: cuboid
     // with one rectangle side deleted (see
     // `missing_profile_is_a_feature_error_not_a_guess`). Evaluated: Sketch1 +
     // Extrude1 = 2, no body. The second rebuild of the same document takes

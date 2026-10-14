@@ -120,3 +120,28 @@ fn non_harness_paths() {
 fn fixture_directory() {
     assert_eq!(FIXTURES, "crates/qoob3d-core/tests/fixtures/");
 }
+
+// ADR-0037 (review G3): cargo links the xtask binary also as
+// `target/debug/deps/xtask-<hash>`; every path with that prefix is harness,
+// and `target/debug/xtask` stays harness. Only at the root, only with the
+// hyphen.
+#[test]
+fn xtask_deps_binary_is_harness() {
+    for path in [
+        "target/debug/deps/xtask-0123abcd",
+        "target/debug/deps/xtask-0123abcd.d",
+        "target/debug/deps/xtask-",
+        "target/debug/xtask",
+    ] {
+        assert!(is_harness(path), "{path} should be harness");
+    }
+    for path in [
+        "target/debug/deps/xtaskish-0123abcd",
+        "target/debug/deps/qoob3d_app-0123abcd",
+        "target/debug/deps/libxtask-0123abcd.rlib",
+        "crates/x/target/debug/deps/xtask-0123abcd",
+        "target/debug/deps",
+    ] {
+        assert!(!is_harness(path), "{path} should not be harness");
+    }
+}

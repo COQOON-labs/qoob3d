@@ -487,6 +487,61 @@ fn polyline_closes_into_a_profile() {
     wait_until(&mut harness, "triangle profile", |a| profiles(a) == 1);
 }
 
+/// Every `.rs` file below `dir`, recursively, except unit test
+/// files named `tests.rs` (ADR-0039): production submodules can hold UI
+/// texts too.
+fn ui_source_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("source directory readable") {
+            let path = entry.expect("directory entry readable").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && path.file_name().is_some_and(|n| n != "tests.rs")
+            {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+// ADR-0020/ADR-0039: the glyph test scans production submodules at any depth
+// (`src/a/b.rs`, `src/a/b/c.rs`) and skips only files named `tests.rs`
+// (also nested ones); non-`.rs` files are no sources.
+#[test]
+fn ui_source_scan_includes_submodules_and_skips_unit_tests() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ui_source_scan");
+    let _ = std::fs::remove_dir_all(&dir);
+    for file in [
+        "lib.rs",
+        "tests.rs",
+        "panel.rs",
+        "panel/tests.rs",
+        "panel/dialog.rs",
+        "panel/dialog/deep.rs",
+        "panel/dialog/tests.rs",
+        "panel/notes.md",
+        "panel/my_tests.rs",
+    ] {
+        let path = dir.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
+    }
+    let mut found: Vec<String> = ui_source_files(&dir)
+        .iter()
+        .map(|p| p.strip_prefix(&dir).unwrap().to_string_lossy().replace('\\', "/"))
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        ["lib.rs", "panel.rs", "panel/dialog.rs", "panel/dialog/deep.rs", "panel/my_tests.rs"]
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Every non-ASCII character in UI texts (translations and code literals)
 /// must exist in the bundled fonts, otherwise egui draws "□".
 #[test]
@@ -497,13 +552,13 @@ fn every_ui_glyph_exists_in_the_fonts() {
     for dir in ["locales/en", "locales/de"] {
         texts.push(std::fs::read_to_string(root.join(dir).join("main.ftl")).unwrap());
     }
-    for entry in std::fs::read_dir(root.join("src")).unwrap() {
-        let path = entry.unwrap().path();
-        // Subdirectories hold the modules' unit tests (ADR-0039), not UI texts.
-        if path.is_dir() {
-            continue;
-        }
-        let source = std::fs::read_to_string(&path).unwrap();
+    let sources = ui_source_files(&root.join("src"));
+    // Sanity check of the scan: a known top-level module is included, no
+    // unit test file is.
+    assert!(sources.iter().any(|p| p.ends_with("src/app.rs")), "{sources:?}");
+    assert!(!sources.iter().any(|p| p.ends_with("tests.rs")), "{sources:?}");
+    for path in &sources {
+        let source = std::fs::read_to_string(path).unwrap();
         // String literals only; comments may use any character.
         for line in source.lines().filter(|l| !l.trim_start().starts_with("//")) {
             texts.extend(line.split('"').skip(1).step_by(2).map(str::to_string));
