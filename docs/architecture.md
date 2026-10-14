@@ -78,6 +78,8 @@ flowchart TD
     kernel --> core
     render --> core
     kernel --> occ[third_party/opencascade<br/>fork, ADR-0014]
+    kernel --> occsys[third_party/opencascade-sys<br/>fork, ADR-0047]
+    occ --> occsys
 ```
 
 ## Where do I find what?

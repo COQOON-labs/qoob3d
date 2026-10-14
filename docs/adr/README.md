@@ -56,4 +56,5 @@ Accepted ADRs are not rewritten but superseded by a new ADR.
 | [ADR-0044](0044-commit-identity-and-code-owners.md) | Every commit uses the project identity, and CODEOWNERS covers every harness path | accepted | 2026-10-14 | xtask |
 | [ADR-0045](0045-repository-language-english.md) | The repository is English; German exists only as the UI language pack | accepted | 2026-10-14 | xtask, qoob3d-app |
 | [ADR-0046](0046-rebuild-statistics-and-cached-body-analysis.md) | Rebuilds report what they computed, and body analysis is cached with the body | accepted | 2026-10-14 | qoob3d-kernel |
+| [ADR-0047](0047-opencascade-sys-fork-with-links-key.md) | opencascade-sys as a minimal fork with `links = "occt"`, the kernel takes the OCCT headers from DEP_OCCT_INCLUDE | accepted | 2026-10-14 | qoob3d-kernel |
 <!-- adr-index:end -->

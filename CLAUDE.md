@@ -18,7 +18,7 @@ When in doubt, choose what improves the path "design → slicer → print".
 | Style register (binding taste decisions) | `docs/design/code-style.md` |
 
 Stack: Rust 1.99 (Edition 2024, `rust-toolchain.toml`) · OpenCascade 7.8.1 via
-`opencascade-sys` 0.3.0 + fork of `opencascade` in `third_party/` + own cxx wrappers (ADR-0014) ·
+forks of `opencascade-sys` 0.3.0 (ADR-0047) and `opencascade` in `third_party/` + own cxx wrappers (ADR-0014) ·
 eframe/egui 0.36.2 · wgpu 30 (only via `qoob3d_render::wgpu`) · glam 0.34 · egui_kittest (tests).
 
 ## Commands

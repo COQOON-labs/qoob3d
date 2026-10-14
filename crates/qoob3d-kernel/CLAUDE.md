@@ -13,8 +13,8 @@ OpenCascade connection. Runs entirely in its own worker thread.
   (ADR-0014). Wrap every function with `guarded(...)` so that `Standard_Failure` →
   `std::runtime_error` → `Err`. Results as flat buffers (`rust::Vec`), logic in Rust as far
   as possible.
-- `opencascade` (high level) is a fork in `third_party/opencascade`. Every change there
-  belongs in its `README.md` (LGPL).
+- `opencascade` (high level) and `opencascade-sys` are forks in `third_party/`. Every change
+  there belongs in the fork's `README.md` (LGPL).
 - Tests check real geometry: volume, `MeshReport::is_watertight()`, normal direction,
   number of edges (seams must not appear as edges).
 
@@ -30,7 +30,9 @@ OpenCascade connection. Runs entirely in its own worker thread.
 - `src/profiles.rs`: `sketch_profiles` → regions via General Fuse (`qoob3d_sketch_regions`
   in C++, ADR-0028). Construction and degenerate curves do not count.
 - `src/tessellate.rs`: call of the C++ mesher → `ShapeMesh`, structure check, demo part.
-- `src/occt.rs` + `cpp/`: own cxx bridge. `build.rs` compiles it against `target/OCCT`.
+- `src/occt.rs` + `cpp/`: own cxx bridge. `build.rs` compiles it against the OCCT headers
+  from `DEP_OCCT_INCLUDE` (set by the `opencascade-sys` fork in `third_party/opencascade-sys`
+  via `links = "occt"`, ADR-0047).
 
 ## Pitfalls
 
@@ -53,4 +55,4 @@ OpenCascade connection. Runs entirely in its own worker thread.
 
 ## Relevant ADRs
 
-ADR-0004, ADR-0005, ADR-0011, ADR-0012, ADR-0014, ADR-0028, ADR-0031, ADR-0032, ADR-0034
+ADR-0004, ADR-0005, ADR-0011, ADR-0012, ADR-0014, ADR-0028, ADR-0031, ADR-0032, ADR-0034, ADR-0047

@@ -26,6 +26,11 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# QOOB3D fork of opencascade-sys 0.3.0 with `links = "occt"`, so the kernel's
+# build script runs after OCCT is built (third_party/opencascade-sys/README.md, ADR-0047).
+[patch.crates-io]
+opencascade-sys = { path = "third_party/opencascade-sys" }
+
 # Lint policy (ADR-0040). Every suppression is `#[expect(lint, reason = "…")]`;
 # `xtask hygiene` caps their number (harness/ratchet.txt).
 [workspace.lints.rust]
