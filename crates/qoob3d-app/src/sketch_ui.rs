@@ -1,6 +1,6 @@
 //! Sketch mode in the UI (ADR-0027): maps the pointer onto the sketch plane,
 //! feeds the pure tools/snapping of `qoob3d-sketch`, draws sketches as an egui
-//! overlay and handles plane picking. Requirements: docs/requirements/skizzen.md.
+//! overlay and handles plane picking. Requirements: docs/requirements/sketches.md.
 
 use eframe::egui::{
     self, Align2, Color32, CursorIcon, Event, FontId, Key, Mesh, PointerButton, Pos2, Rect,
@@ -246,7 +246,7 @@ impl SketchSession {
         actions
     }
 
-    #[allow(clippy::too_many_arguments)] // one call site; splitting adds noise
+    #[expect(clippy::too_many_arguments, reason = "one call site; splitting adds noise")]
     fn select_mode(
         &mut self,
         ui: &egui::Ui,
@@ -975,59 +975,4 @@ pub fn plane_center(camera: &Camera, rect: Rect, plane: OriginPlane) -> Option<P
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use eframe::egui::pos2;
-    use qoob3d_render::ViewPreset;
-
-    fn view_for(camera: &Camera, plane: OriginPlane) -> View<'_> {
-        View {
-            camera,
-            rect: Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0)),
-            frame: plane.frame(),
-        }
-    }
-
-    #[test]
-    fn screen_to_sketch_round_trip_on_every_plane() {
-        for (plane, preset) in [
-            (OriginPlane::XY, ViewPreset::Iso),
-            (OriginPlane::XZ, ViewPreset::Front),
-            (OriginPlane::YZ, ViewPreset::Iso),
-        ] {
-            let mut camera = Camera::default();
-            camera.look_from(preset.eye_direction());
-            let view = view_for(&camera, plane);
-            let p = DVec2::new(12.5, -7.25);
-            let s = view.to_screen(p).unwrap();
-            let back = view.to_local(s).unwrap();
-            assert!(back.distance(p) < 1e-3, "{plane:?}: {back:?}");
-            assert!(view.units_per_px(s) > 0.0);
-        }
-    }
-
-    #[test]
-    fn edge_on_plane_gives_no_input() {
-        let mut camera = Camera::default();
-        camera.look_from(ViewPreset::Front.eye_direction());
-        // Looking along −Y at the XY plane: edge-on.
-        let view = view_for(&camera, OriginPlane::XY);
-        assert!(view.to_local(pos2(400.0, 300.0)).is_none());
-    }
-
-    #[test]
-    fn plane_centres_pick_their_plane() {
-        let camera = Camera::default(); // iso
-        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0));
-        let a = f64::from(camera.half_height_at_target()) * 0.45;
-        let planes = pickable_planes(&qoob3d_core::document::Document::default());
-        for plane in OriginPlane::ALL {
-            let p = plane_center(&camera, rect, plane).unwrap();
-            assert_eq!(
-                plane_under(&camera, rect, p, a, &planes),
-                Some(PlaneRef::Origin(plane)),
-                "{plane:?}"
-            );
-        }
-    }
-}
+mod tests;

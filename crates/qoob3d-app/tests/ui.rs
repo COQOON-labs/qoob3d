@@ -136,7 +136,7 @@ fn cursor_at(harness: &mut Harness<'_, QoobApp>, pos: Pos2) -> CursorIcon {
     harness.output().platform_output.cursor_icon
 }
 
-/// Cursor policy (docs/design/bedienung.md): arrow everywhere, pointing hand
+/// Cursor policy (docs/design/controls.md): arrow everywhere, pointing hand
 /// only on the ViewCube; never a text cursor on labels.
 #[test]
 fn cursors_follow_the_policy() {
@@ -499,6 +499,10 @@ fn every_ui_glyph_exists_in_the_fonts() {
     }
     for entry in std::fs::read_dir(root.join("src")).unwrap() {
         let path = entry.unwrap().path();
+        // Subdirectories hold the modules' unit tests (ADR-0039), not UI texts.
+        if path.is_dir() {
+            continue;
+        }
         let source = std::fs::read_to_string(&path).unwrap();
         // String literals only; comments may use any character.
         for line in source.lines().filter(|l| !l.trim_start().starts_with("//")) {

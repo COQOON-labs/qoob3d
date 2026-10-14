@@ -1,5 +1,5 @@
 //! Viewport navigation, mapped 1:1 to Autodesk Fusion's default scheme
-//! (ADR-0008, docs/design/bedienung.md):
+//! (ADR-0008, docs/design/controls.md):
 //!
 //! | Input                           | Action                                   |
 //! |---------------------------------|------------------------------------------|
@@ -25,14 +25,14 @@ const TRACKPAD_GESTURE_GAP: f64 = 0.25;
 
 /// Navigation state that lives across frames.
 #[derive(Debug, Default)]
-pub struct NavState {
+pub(crate) struct NavState {
     /// Pivot of the orbit in progress (mouse or trackpad).
     pub orbit_pivot: Option<Vec3>,
     last_trackpad_orbit: f64,
 }
 
 #[derive(Debug, Default)]
-pub struct NavOutcome {
+pub(crate) struct NavOutcome {
     pub fit_requested: bool,
     /// The user moved the camera this frame (cancels camera animations).
     pub interacted: bool,
@@ -41,7 +41,7 @@ pub struct NavOutcome {
 /// Applies this frame's viewport input to `camera`. `pick` returns the
 /// surface point hit by a ray, used as orbit pivot (Fusion behaviour).
 /// `left_drag_orbit`: a left-button drag (macOS three-finger drag) orbits.
-pub fn handle_input(
+pub(crate) fn handle_input(
     ui: &egui::Ui,
     response: &Response,
     rect: Rect,
@@ -100,7 +100,7 @@ pub fn handle_input(
                 unit: MouseWheelUnit::Line | MouseWheelUnit::Page, delta, ..
             } => {
                 // macOS turns Shift+wheel into horizontal scrolling.
-                let steps = if delta.y != 0.0 { delta.y } else { delta.x };
+                let steps = if delta.y == 0.0 { delta.x } else { delta.y };
                 camera.zoom_at(WHEEL_ZOOM_STEP.powf(steps), cursor_ndc, aspect);
                 out.interacted = true;
             }
@@ -131,14 +131,14 @@ pub fn handle_input(
 }
 
 /// Converts a screen position into normalised device coordinates of `rect`.
-pub fn to_ndc(p: Pos2, rect: Rect) -> Vec2 {
+pub(crate) fn to_ndc(p: Pos2, rect: Rect) -> Vec2 {
     let x = (p.x - rect.left()) / rect.width().max(1.0) * 2.0 - 1.0;
     let y = 1.0 - (p.y - rect.top()) / rect.height().max(1.0) * 2.0;
     Vec2::new(x, y)
 }
 
 /// Inverse of [`to_ndc`].
-pub fn from_ndc(ndc: Vec2, rect: Rect) -> Pos2 {
+pub(crate) fn from_ndc(ndc: Vec2, rect: Rect) -> Pos2 {
     Pos2::new(
         rect.left() + (ndc.x + 1.0) * 0.5 * rect.width(),
         rect.top() + (1.0 - ndc.y) * 0.5 * rect.height(),
@@ -146,17 +146,4 @@ pub fn from_ndc(ndc: Vec2, rect: Rect) -> Pos2 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ndc_round_trip() {
-        let rect = Rect::from_min_size(Pos2::new(10.0, 20.0), egui::vec2(400.0, 300.0));
-        for p in [Pos2::new(10.0, 20.0), Pos2::new(410.0, 320.0), Pos2::new(123.0, 77.0)] {
-            let back = from_ndc(to_ndc(p, rect), rect);
-            assert!((back - p).length() < 1e-3, "{p:?} -> {back:?}");
-        }
-        assert_eq!(to_ndc(rect.center(), rect), Vec2::ZERO);
-        assert_eq!(to_ndc(rect.left_top(), rect), Vec2::new(-1.0, 1.0));
-    }
-}
+mod tests;

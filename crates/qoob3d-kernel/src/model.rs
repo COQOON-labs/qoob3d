@@ -186,7 +186,6 @@ impl Model {
             .collect()
     }
 
-    #[allow(clippy::type_complexity)] // internal tuple, one caller pattern
     fn run(&mut self, doc: &Document) -> (Rc<State>, Vec<SketchResult>, Vec<(FeatureId, String)>) {
         let mut state = Rc::new(State { bodies: Vec::new(), next_number: 1 });
         let mut sketches = Vec::new();

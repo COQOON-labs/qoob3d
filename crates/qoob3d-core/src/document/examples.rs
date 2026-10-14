@@ -48,7 +48,7 @@ fn profile(sketch: FeatureId, mut key: Vec<EntityId>) -> ProfileRef {
     ProfileRef { sketch, key }
 }
 
-/// Quader: Sketch on XY → rectangle (R) w × d from the origin → Extrude h.
+/// Box: Sketch on XY → rectangle (R) w × d from the origin → Extrude h.
 pub fn cuboid(w: f64, d: f64, h: f64) -> Document {
     let mut doc = Document::default();
     let mut s = Sketch::new(xy());
@@ -65,7 +65,7 @@ pub fn cuboid(w: f64, d: f64, h: f64) -> Document {
     doc
 }
 
-/// Zylinder: Sketch on XY → circle (C) radius r at the origin → Extrude h.
+/// Cylinder: Sketch on XY → circle (C) radius r at the origin → Extrude h.
 pub fn cylinder(r: f64, h: f64) -> Document {
     let mut doc = Document::default();
     let mut s = Sketch::new(xy());
@@ -82,7 +82,7 @@ pub fn cylinder(r: f64, h: f64) -> Document {
     doc
 }
 
-/// Kugel: Sketch on XZ → arc (A) centre origin from (r, 0) to (−r, 0) →
+/// Sphere: Sketch on XZ → arc (A) centre origin from (r, 0) to (−r, 0) →
 /// line closing the half disc → Revolve 360° around that line.
 pub fn sphere(r: f64) -> Document {
     let mut doc = Document::default();
@@ -103,7 +103,7 @@ pub fn sphere(r: f64) -> Document {
     doc
 }
 
-/// Pyramide: Sketch on XY → centred square a → offset plane h above XY →
+/// Pyramid: Sketch on XY → centred square a → offset plane h above XY →
 /// Sketch on it with a point at its origin → Loft square → point.
 pub fn pyramid(a: f64, h: f64) -> Document {
     let mut doc = Document::default();
@@ -126,7 +126,7 @@ pub fn pyramid(a: f64, h: f64) -> Document {
     doc
 }
 
-/// Zahnrad: Create → Spur Gear on XY, module 2, 20 teeth, 20°, 8 mm thick,
+/// Gear: Create → Spur Gear on XY, module 2, 20 teeth, 20°, 8 mm thick,
 /// 8 mm bore.
 pub fn gear() -> Document {
     let mut doc = Document::default();
@@ -143,7 +143,7 @@ pub fn gear() -> Document {
     doc
 }
 
-/// Spirale: Create → Coil on XY. Helix: Ø20, 5 turns, pitch 4, wire 2.
+/// Coil: Create → Coil on XY. Helix: Ø20, 5 turns, pitch 4, wire 2.
 /// Spiral: flat, starts at Ø10, 4 turns, grows 4 mm per turn, wire 2.
 pub fn coil(kind: CoilKind) -> Document {
     let mut doc = Document::default();
@@ -269,22 +269,4 @@ pub fn all_kinds() -> Document {
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn all_kinds_covers_every_feature_kind() {
-        let doc = super::all_kinds();
-        doc.validate().unwrap();
-        for kind in super::FeatureKind::KIND_IDS {
-            assert!(doc.count_of(kind) > 0, "{kind} missing");
-        }
-    }
-
-    #[test]
-    fn every_example_is_valid_and_round_trips() {
-        for (name, doc) in super::all() {
-            doc.validate().unwrap_or_else(|e| panic!("{name}: {e}"));
-            let back = super::Document::from_json(&doc.to_json()).unwrap();
-            assert_eq!(back, doc, "{name}");
-        }
-    }
-}
+mod tests;

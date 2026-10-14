@@ -56,7 +56,7 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
             None => {
-                eprintln!("smoke: FAIL  Fenster wurde geschlossen, bevor der Test fertig war");
+                eprintln!("smoke: FAIL  window was closed before the test finished");
                 std::process::exit(1);
             }
         }

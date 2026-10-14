@@ -1,8 +1,11 @@
 //! cxx bridge to QOOB3D's own OCCT wrappers in `cpp/` (ADR-0014).
+#![expect(
+    unsafe_code,
+    unreachable_pub,
+    reason = "cxx generates the unsafe FFI glue and its pub items; the C++ side converts \
+              every OCCT exception into an `Err` (ADR-0004), so calls are safe from Rust"
+)]
 
-// cxx generates the unsafe FFI glue; the C++ side converts every OCCT
-// exception into an `Err` (ADR-0004), so calls are safe to use from Rust.
-#[allow(unsafe_code)]
 #[cxx::bridge]
 pub(crate) mod ffi {
     /// Flat tessellation result. Triangles: 3 floats per vertex, 3 indices

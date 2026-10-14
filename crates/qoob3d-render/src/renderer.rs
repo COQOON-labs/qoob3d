@@ -17,20 +17,20 @@ const SAMPLE_COUNT: u32 = 4;
 
 /// Linear-space colours of the calm dark theme (docs/design/theme.md).
 mod palette {
-    pub const BG_TOP: [f32; 4] = [0.032, 0.036, 0.042, 1.0];
-    pub const BG_BOTTOM: [f32; 4] = [0.010, 0.011, 0.013, 1.0];
-    pub const BODY: [f32; 4] = [0.50, 0.53, 0.57, 1.0];
-    pub const EDGE: [f32; 4] = [0.006, 0.007, 0.008, 1.0];
-    pub const GRID_MINOR: [f32; 4] = [0.09, 0.10, 0.11, 0.35];
-    pub const GRID_MAJOR: [f32; 4] = [0.14, 0.15, 0.17, 0.6];
-    pub const PLATE_FILL: [f32; 4] = [0.035, 0.040, 0.046, 0.65];
-    pub const PLATE_BORDER: [f32; 4] = [0.20, 0.22, 0.24, 0.9];
-    pub const AXIS_X: [f32; 4] = [0.55, 0.06, 0.05, 0.9];
-    pub const AXIS_Y: [f32; 4] = [0.08, 0.40, 0.10, 0.9];
-    pub const AXIS_Z: [f32; 4] = [0.08, 0.20, 0.65, 0.9];
+    pub(super) const BG_TOP: [f32; 4] = [0.032, 0.036, 0.042, 1.0];
+    pub(super) const BG_BOTTOM: [f32; 4] = [0.010, 0.011, 0.013, 1.0];
+    pub(super) const BODY: [f32; 4] = [0.50, 0.53, 0.57, 1.0];
+    pub(super) const EDGE: [f32; 4] = [0.006, 0.007, 0.008, 1.0];
+    pub(super) const GRID_MINOR: [f32; 4] = [0.09, 0.10, 0.11, 0.35];
+    pub(super) const GRID_MAJOR: [f32; 4] = [0.14, 0.15, 0.17, 0.6];
+    pub(super) const PLATE_FILL: [f32; 4] = [0.035, 0.040, 0.046, 0.65];
+    pub(super) const PLATE_BORDER: [f32; 4] = [0.20, 0.22, 0.24, 0.9];
+    pub(super) const AXIS_X: [f32; 4] = [0.55, 0.06, 0.05, 0.9];
+    pub(super) const AXIS_Y: [f32; 4] = [0.08, 0.40, 0.10, 0.9];
+    pub(super) const AXIS_Z: [f32; 4] = [0.08, 0.20, 0.65, 0.9];
     /// Warning amber (#F5A623) for non-printable / single-nozzle zones.
-    pub const RESTRICTED: [f32; 4] = [0.91, 0.38, 0.02, 1.0];
-    pub const BUILD_VOLUME: [f32; 4] = [0.30, 0.33, 0.37, 0.55];
+    pub(super) const RESTRICTED: [f32; 4] = [0.91, 0.38, 0.02, 1.0];
+    pub(super) const BUILD_VOLUME: [f32; 4] = [0.30, 0.33, 0.37, 0.55];
 }
 
 /// Capacity of the bed polygon uniform; must match `bed.points` in the
@@ -222,7 +222,9 @@ pub struct ViewportRenderer {
 }
 
 impl ViewportRenderer {
+    #[expect(clippy::too_many_lines, reason = "predates ADR-0040; split when next changed")]
     pub fn new(device: &wgpu::Device) -> Self {
+        use wgpu::CompareFunction::{Always, Greater, GreaterEqual};
         let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/scene.wgsl"));
 
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
@@ -311,7 +313,6 @@ impl ViewportRenderer {
             })
         };
 
-        use wgpu::CompareFunction::{Always, Greater, GreaterEqual};
         let alpha = Some(wgpu::BlendState::ALPHA_BLENDING);
         let background_pipeline = pipeline(
             "qoob3d background",
@@ -426,6 +427,7 @@ impl ViewportRenderer {
     /// it was (re)created this call, in which case the caller must
     /// re-register it with the UI. `view.texture()` gives the sRGB bytes for
     /// readback.
+    #[expect(clippy::too_many_lines, reason = "predates ADR-0040; split when next changed")]
     pub fn render(
         &mut self,
         device: &wgpu::Device,

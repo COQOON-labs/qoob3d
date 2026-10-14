@@ -421,6 +421,7 @@ impl Command {
     // ------------------------------------------------------------- viewport
 
     /// Hover, click selection and drawing in the viewport.
+    #[expect(clippy::cognitive_complexity, reason = "predates ADR-0040; split when next changed")]
     pub fn viewport(
         &mut self,
         ui: &egui::Ui,

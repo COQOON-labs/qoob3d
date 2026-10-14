@@ -11,7 +11,8 @@ use qoob3d_kernel::{Kernel, RebuildResult};
 
 fn build(doc: Document) -> RebuildResult {
     let mut kernel = Kernel::spawn(|| {});
-    let result = kernel.rebuild_blocking(Arc::new(doc), Duration::from_secs(120)).unwrap();
+    let result =
+        kernel.rebuild_blocking(Arc::new(doc), Duration::from_secs(120)).expect("kernel answers");
     assert!(result.errors.is_empty(), "feature errors: {:?}", result.errors);
     for body in &result.bodies {
         assert!(body.valid, "body {} is not a valid solid", body.number);
