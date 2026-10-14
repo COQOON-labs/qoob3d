@@ -3589,3 +3589,66 @@ fn heredocs_of_known_data_readers_stay_data() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// A heredoc inside a compound command (found by the implementer on 04aacc2,
+// within the user's fail-closed direction): a group, subshell, loop, `if`,
+// `case` or function body opened on an earlier line can send the heredoc's
+// output to a shell after it closes. When a body would be stripped but the
+// command has a segment starting with `}`, `)`, `done`, `fi` or `esac`, the
+// body is kept as shell text. Words in a stripped body are no segments.
+// ---------------------------------------------------------------------------
+
+/// A data reader's heredoc inside a compound command whose output goes to a
+/// shell, with the directory the denial must name. bash and zsh run the body
+/// in every one (checked with a harmless equivalent). Must be denied in a
+/// locked session.
+const HEREDOCS_IN_COMPOUND_COMMANDS: &[(&str, &str)] = &[
+    // The implementer's examples.
+    ("{\ncat <<EOF\nrm -rf xtask\nEOF\n} | bash", "xtask"),
+    ("for i in 1\ndo\ncat <<EOF\nrm -rf xtask\nEOF\ndone | sh", "xtask"),
+    ("f() {\ncat <<EOF\nrm -rf xtask\nEOF\n}\nf | bash", "xtask"),
+    // Derived: `if`, `case`, a subshell, `while`, another directory.
+    ("if true\nthen\ncat <<EOF\nrm -rf xtask\nEOF\nfi | bash", "xtask"),
+    ("case x in\nx)\ncat <<EOF\nrm -rf xtask\nEOF\n;;\nesac | bash", "xtask"),
+    ("(\ncat <<EOF\nrm -rf harness\nEOF\n) | bash", "harness"),
+    ("while true\ndo\ncat <<EOF\nrm -rf .claude\nEOF\nbreak\ndone | bash", ".claude"),
+];
+
+/// Data heredocs whose stripped body has lines that would close a compound
+/// command if they were shell (`done`, `fi`, `}`, `)`, `esac`), and the PR
+/// body form whose `)` closes `$(…)`. Must pass in a locked session.
+const PROSE_WITH_CLOSING_WORDS: &[&str] = &[
+    "git commit -F - <<'EOF'\nfix: done with the harness\n\ndone\nfi\n}\n)\nesac\nEOF",
+    "cat > /tmp/note <<EOF\nxtask notes\ndone\n} the harness\nEOF",
+    "gh pr create --title Guard --body \"$(cat <<'EOF'\n## Summary\n- harness: done\nfi\nEOF\n)\"",
+];
+
+// ADR-0037/ADR-0043 (implementer finding on 04aacc2): a heredoc inside a
+// compound command keeps its body as shell text. Locked denied naming the
+// directory, unlocked allowed; spec root and a temp repo.
+#[test]
+fn heredocs_in_compound_commands_are_checked() {
+    let root = repo("heredocs_in_compound_commands");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in HEREDOCS_IN_COMPOUND_COMMANDS {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (implementer finding on 04aacc2): closing words inside a stripped
+// body and the `)` of `$(…)` do not make a data heredoc fail closed. Locked,
+// spec root and a temp repo.
+#[test]
+fn closing_words_in_prose_keep_data_heredocs_data() {
+    let root = repo("prose_with_closing_words");
+    for command in PROSE_WITH_CLOSING_WORDS {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}

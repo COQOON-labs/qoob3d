@@ -1,0 +1,7 @@
+# Agent puts a data heredoc inside a group command whose output goes to bash:
+# bash runs the body; a compound command closing after the heredoc keeps the
+# body as shell text (fail closed; ADR-0037, ADR-0043, ADR-0049; implementer
+# finding on 04aacc2)
+command: cargo xtask guard
+expect: could modify the harness file `xtask
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "{\ncat <<EOF\nrm -rf xtask\nEOF\n} | bash"}, "hook_event_name": "PreToolUse"}
