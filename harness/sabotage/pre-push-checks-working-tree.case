@@ -1,6 +1,6 @@
-# The pre-push hook checks the working tree again instead of each pushed commit (ADR-0048)
-command: cargo test -p xtask --quiet pre_push_checks_each_pushed_commit_not_the_working_tree
-expect: pre_push_checks_each_pushed_commit_not_the_working_tree
+# The pre-push hook checks the working tree again instead of the tip of each pushed ref (ADR-0048)
+command: cargo test -p xtask --quiet pre_push_checks_the_tip_of_each_pushed_ref_not_the_working_tree
+expect: pre_push_checks_the_tip_of_each_pushed_ref_not_the_working_tree
 --- patch
 diff --git a/.githooks/pre-push b/.githooks/pre-push
 --- a/.githooks/pre-push

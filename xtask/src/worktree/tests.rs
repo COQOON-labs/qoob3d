@@ -194,11 +194,11 @@ fn check_command_runs_the_check_in_the_worktree_with_the_shared_target_dir() {
     assert_eq!(target_env, Some((OsStr::new("CARGO_TARGET_DIR"), Some(target.as_os_str()))));
 }
 
-// ADR-0048: the hook checks every pushed commit with `check-rev` inside the
-// loop over the pushed refs and never runs `cargo xtask check` in the working
-// tree (comment lines do not run).
+// ADR-0048: the hook checks the tip of each pushed ref (`$local_sha`) with
+// `check-rev` inside the loop over the pushed refs and never runs
+// `cargo xtask check` in the working tree (comment lines do not run).
 #[test]
-fn pre_push_checks_each_pushed_commit_not_the_working_tree() {
+fn pre_push_checks_the_tip_of_each_pushed_ref_not_the_working_tree() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let hook = fs::read_to_string(root.join(".githooks/pre-push")).unwrap();
     let call = "cargo xtask check-rev \"$local_sha\"";

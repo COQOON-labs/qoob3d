@@ -126,6 +126,19 @@ const HARNESS_WRITES: &[(&str, &str)] = &[
     ("cp /tmp/x .githooks/pre-push 2>/dev/null", ".githooks"),
     ("cat a >/dev/null >> clippy.toml", "clippy.toml"),
     ("rm -f deny.toml &>/dev/null", "deny.toml"),
+    // In-place edits other than the literal `sed -i` (critic K-10 on
+    // 7ce6580): `-i` after or bundled with another sed flag, sed's long
+    // option `--in-place` (also as a GNU abbreviation) and the `-i.bak`
+    // form, `ruby -i` and gawk's `inplace` extension edit the named file.
+    ("sed -E -i '' s/a/b/ xtask/src/guard.rs", "xtask/"),
+    ("sed -Ei '' s/a/b/ .githooks/pre-push", ".githooks"),
+    ("sed --in-place s/a/b/ Cargo.toml", "Cargo.toml"),
+    ("sed -n -i s/a/b/ clippy.toml", "clippy.toml"),
+    ("sed --in-pl=bak s/a/b/ deny.toml", "deny.toml"),
+    ("sed -i.bak s/a/b/ rustfmt.toml", "rustfmt.toml"),
+    ("ruby -pi -e 1 xtask/src/guard.rs", "xtask/"),
+    ("gawk -i inplace 1 xtask/src/guard.rs", "xtask/"),
+    ("awk -i inplace 1 Cargo.toml", "Cargo.toml"),
 ];
 
 /// Commands that must pass in a locked session (spec §1.4, MUST PASS, plus
@@ -153,6 +166,14 @@ const HARMLESS: &[&str] = &[
     "cat Cargo.toml &>/dev/null",
     "ls harness/ > /dev/null",
     "cat clippy.toml 2> /dev/null",
+    // sed, ruby and awk without an in-place option only print (critic K-10
+    // on 7ce6580): the `i` in `s/i/j/` is the script, not a flag.
+    "sed -n 1,5p xtask/src/guard.rs",
+    "sed -e s/i/j/ xtask/src/guard.rs",
+    "sed -E 's/x/y/' Cargo.toml",
+    "ruby -e 'puts 1' xtask/src/guard.rs",
+    "awk '{print}' Cargo.toml",
+    "gawk -f prog.awk Cargo.toml",
 ];
 
 // ADR-0037/ADR-0043 (spec §1.3): commands that bypass a gate or name the
@@ -2380,5 +2401,94 @@ fn a2_sort_without_a_compress_program_stays_a_read() {
             assert_eq!(check_shell(&root, &s, command), Ok(()), "{what}");
         }
     });
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (critic K-10 on 7ce6580): in-place editing is an option of the
+// program, wherever it stands, not the literal `sed -i`. Derived from the
+// options of BSD sed (macOS), GNU sed, ruby and gawk:
+// - sed: `-i[ext]`/`-i ext` and BSD's `-I ext` edit in place, in any position
+//   among the flags and bundled into a group (`-Ei`, `-ni`); GNU's
+//   `--in-place[=suffix]`, which getopt_long accepts abbreviated to any
+//   unambiguous prefix (no other GNU sed long option starts with `--i`, so
+//   `--in` already means it). The case of the flags matters: lower-cased,
+//   `-E -i` would read as `-e` with the script `-i`. `sed` by path and
+//   Homebrew's GNU sed `gsed` are sed; after `xargs` it still runs.
+// - ruby: `-i[ext]`, also bundled (`-pi`) and after `-I<dir>`, by path.
+// - gawk/awk: `-i inplace`/`-iinplace`/`--include=inplace` (also as
+//   `--include inplace`, `inplace.awk`, and abbreviated `--incl`) loads the
+//   inplace extension, which rewrites every named file.
+// With a harness path: locked denied with the harness message naming the
+// fragment, unlocked allowed. Spec root and a temp repo.
+#[test]
+fn k10_sed_ruby_and_awk_in_place_options_write_harness_files() {
+    let root = repo("k10_in_place");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in [
+        // sed: flag order, bundles, BSD `-I`, long option and abbreviations.
+        ("sed -e s/a/b/ -i Cargo.toml", "Cargo.toml"),
+        ("sed -Ei.bak s/a/b/ Cargo.toml", "Cargo.toml"),
+        ("sed -ni s/a/b/p clippy.toml", "clippy.toml"),
+        ("sed -I '' s/a/b/ Cargo.toml", "Cargo.toml"),
+        ("sed -E -I '' s/a/b/ xtask/src/main.rs", "xtask/"),
+        ("sed --in-place=.bak s/a/b/ deny.toml", "deny.toml"),
+        ("sed -E --in-place s/a/b/ .github/workflows/ci.yml", ".github/"),
+        ("sed --in s/a/b/ rustfmt.toml", "rustfmt.toml"),
+        ("/usr/bin/sed -E -i '' s/a/b/ Cargo.toml", "Cargo.toml"),
+        ("gsed --in-place s/a/b/ harness/rules.md", "harness/"),
+        ("/opt/homebrew/bin/gsed -E -i s/a/b/ Cargo.toml", "Cargo.toml"),
+        ("echo Cargo.toml | xargs sed -E -i '' s/a/b/", "Cargo.toml"),
+        // ruby.
+        ("ruby -i.bak -pe 1 Cargo.toml", "Cargo.toml"),
+        ("ruby -i -pe 1 clippy.toml", "clippy.toml"),
+        ("ruby -Ilib -pi -e 1 deny.toml", "deny.toml"),
+        ("/usr/bin/ruby -pi -e 1 xtask/src/main.rs", "xtask/"),
+        // gawk/awk.
+        ("gawk -iinplace 1 Cargo.toml", "Cargo.toml"),
+        ("gawk --include=inplace 1 clippy.toml", "clippy.toml"),
+        ("gawk --include inplace 1 deny.toml", "deny.toml"),
+        ("gawk --incl=inplace 1 rustfmt.toml", "rustfmt.toml"),
+        ("gawk -i inplace.awk 1 .githooks/pre-push", ".githooks"),
+        ("/opt/homebrew/bin/gawk -i inplace 1 xtask/src/main.rs", "xtask/"),
+    ] {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}`");
+        assert_denied(spec_shell(false, command), &[&needle], command);
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], command);
+        assert_eq!(spec_shell(true, command), Ok(()), "{command} (unlocked)");
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (critic K-10 on 7ce6580): an `i` that is no in-place option does
+// not make sed, ruby or awk write the files they name, so these pass in a
+// locked session:
+// - sed: the `i` of a script attached to `-e` (`-es/i/j/`) or given as
+//   `--expression=`, long options that contain an `i` but are no prefix of
+//   `--in-place` (`--posix`, `--silent`), and a `grep -i` naming sed.
+// - ruby: `-r<lib>` and `-I<dir>` take the rest of the word as argument
+//   (`-rdigest`, `-Ilib`), like perl's `-M`/`-I` (review4 S3).
+// - awk: `-F`/`-v` values with an `i`, and `-f` programs.
+#[test]
+fn k10_sed_ruby_and_awk_without_in_place_pass() {
+    let root = repo("k10_no_in_place");
+    for command in [
+        "sed -es/i/j/ Cargo.toml",
+        "sed --expression=s/i/j/ xtask/src/main.rs",
+        "sed --posix -n 1p Cargo.toml",
+        "sed --silent 1,5p clippy.toml",
+        "sed -n -e s/i/j/p -e 1p deny.toml",
+        "/usr/bin/sed -E -n 1p Cargo.toml",
+        "grep -i sed Cargo.toml",
+        "ruby -rdigest -e 'puts 1' Cargo.toml",
+        "ruby -Ilib -e 'puts 1' xtask/src/main.rs",
+        "/usr/bin/ruby -e 'puts 1' Cargo.toml",
+        "awk -F: '{print $1}' Cargo.toml",
+        "awk -v i=1 '{print i}' clippy.toml",
+        "gawk -e 'BEGIN { n = 0 }' -f prog.awk xtask/src/main.rs",
+    ] {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command}");
+    }
     fs::remove_dir_all(&root).unwrap();
 }
