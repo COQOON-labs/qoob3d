@@ -1,5 +1,5 @@
 # Agent replaces the guard binary under .git/qoob3d/ through the shell, even unlocked (ADR-0043)
 command: cargo xtask guard
-expect: can set the environment of Claude Code hooks
+expect: `.git/` is managed by git and the guard
 env: QOOB3D_HARNESS_UNLOCK=1
 stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "cp /tmp/fake .git/qoob3d/guard-target/debug/xtask"}, "hook_event_name": "PreToolUse"}

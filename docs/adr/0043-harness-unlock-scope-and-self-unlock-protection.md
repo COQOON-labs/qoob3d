@@ -37,9 +37,13 @@ ADR-0037 lets the human unlock harness work by starting Claude Code with
    `.claude/settings.local.json`, VS Code settings (`.vscode/settings.json`, the user
    settings of VS Code) and shell startup files (`~/.zshrc`, `~/.zprofile`, `~/.zshenv`,
    `~/.bashrc`, `~/.bash_profile`, `~/.profile`) and everything under `.git/` (e.g. the hooks
-   path in `.git/config`). A shell command that mentions one of these files is denied unless it
-   is a pure read (no redirection, every segment starts with a read-only program such as `cat`,
-   `grep`, `head`). Commands that run `launchctl setenv`, that name `QOOB3D_HARNESS_UNLOCK` or
+   path in `.git/config`). A shell command that mentions one of the settings or startup files is
+   denied unless it is a pure read (no redirection, every segment starts with a read-only program
+   such as `cat`, `grep`, `head`); a name counts wherever it is not part of a longer file name, so
+   globs and brace expansion (`~/{.zshrc,.bashrc}`) are caught, glob classes (`.zsh[r]c`) are not.
+   A shell command that mentions `.git` (also as `git rev-parse --git-dir`/`--git-path`) is
+   denied only together with a write operation or a cargo target dir, so `du`, `find -prune`
+   and `--exclude=.git` keep working. Commands that run `launchctl setenv`, that name `QOOB3D_HARNESS_UNLOCK` or
    `QOOB3D_SKIP_REVIEW`, or that bypass the git hooks (`--no-verify`, `git commit -n`,
    `core.hooksPath` in any case, abbreviations such as `--no-veri`) are denied. Matching removes
    shell quotes first and ignores case, because git keys and the macOS file system do, so

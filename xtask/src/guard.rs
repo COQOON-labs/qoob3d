@@ -3,7 +3,8 @@
 //! - harness files are read-only unless the human started the session with
 //!   `QOOB3D_HARNESS_UNLOCK=1` ([`Session::unlocked`]); the unlock lifts nothing else,
 //! - files that can set the environment of the hooks, and `.git/`, are never
-//!   written, so that no agent can unlock itself,
+//!   written, so that no agent can unlock itself; a shell command naming `.git`
+//!   is denied only together with a write operation or a cargo target dir,
 //! - format fixtures are never modified,
 //! - one agent context writes either tests or production code, never both,
 //! - shell commands must not bypass the git hooks or write harness files.
@@ -30,11 +31,12 @@ const BYPASSES: &[&str] =
 /// The shortest abbreviation of `--no-verify` git accepts (`--no-ver` is
 /// ambiguous with `--no-verbose`).
 const NO_VERIFY_MIN: &str = "--no-veri";
-/// Shell fragments that (may) write files.
+/// Shell fragments that (may) write files; also `dd` as a word and `perl`
+/// with an in-place flag ([`writes`]).
 const WRITES: &[&str] = &[
     ">",
     "sed -i",
-    "perl -i",
+    "of=",
     "tee ",
     "mv ",
     "cp ",
@@ -95,8 +97,12 @@ const HOOK_ENVIRONMENT_IN_SHELL: &[&str] = &[
 /// The git directory holds the hooks path, the hooks and the guard binary
 /// (`.git/qoob3d/guard-target`).
 const GIT_DIR: &str = ".git";
-/// Characters that end a file name in a shell command, besides whitespace.
-const NAME_ENDS: &str = "\"';|&)/<>`";
+/// Lower-case shell fragments that substitute the git directory.
+const GIT_DIR_QUERIES: &[&str] =
+    &["rev-parse --git-dir", "--absolute-git-dir", "--git-common-dir", "--git-path"];
+/// Lower-case shell fragments that point cargo's build output, and so the
+/// guard binary, somewhere else.
+const TARGET_DIRS: &[&str] = &["cargo_target_dir", "--target-dir"];
 /// Programs that only read; a command made of them may name a hook-environment
 /// file. Not `less`/`more`: their `-o`/`--log-file` writes a file.
 const READ_ONLY: &[&str] =
@@ -149,7 +155,9 @@ pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Resu
     {
         return Err(self_unlock_message(&file));
     }
-    if session.unlocked || !forms.iter().any(|form| WRITES.iter().any(|w| form.contains(w))) {
+    let writes = forms.iter().any(|form| writes(form));
+    check_git_dir_in_shell(&forms, writes)?;
+    if session.unlocked || !writes {
         return Ok(());
     }
     if let Some(path) = forms.iter().find_map(|form| harness_in_shell(root, form)) {
@@ -162,8 +170,8 @@ pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Resu
 }
 
 /// The first file named in the lower-cased `forms` of a command (as given,
-/// normalised) that can set the hook environment. Startup files and `.git`
-/// count only as whole names.
+/// normalised) that can set the hook environment. Startup files count only as
+/// whole names.
 fn hook_environment_in_shell(session: &Session, forms: &[String; 2]) -> Option<String> {
     let home_settings = format!("{}/.claude/settings", session.home.display()).to_lowercase();
     let fragment = HOOK_ENVIRONMENT_IN_SHELL
@@ -172,23 +180,41 @@ fn hook_environment_in_shell(session: &Session, forms: &[String; 2]) -> Option<S
         .chain([home_settings.as_str()])
         .find(|f| forms[1].contains(f));
     let name = || {
-        SHELL_STARTUP
-            .iter()
-            .copied()
-            .chain([GIT_DIR])
-            .find(|name| forms.iter().any(|form| names_file(form, name)))
+        SHELL_STARTUP.iter().copied().find(|name| forms.iter().any(|form| names_file(form, name)))
     };
     fragment.or_else(name).map(str::to_owned)
 }
 
-/// `name` stands in `command` as a whole path component.
+/// `.git` named in the lower-cased `forms` of a command, by name or by a git-dir
+/// query, together with a write operation or a cargo target dir (ADR-0043).
+fn check_git_dir_in_shell(forms: &[String; 2], writes: bool) -> Result<(), String> {
+    let names_git_dir = forms.iter().any(|form| names_file(form, GIT_DIR))
+        || GIT_DIR_QUERIES.iter().any(|q| forms[1].contains(q));
+    if names_git_dir && (writes || TARGET_DIRS.iter().any(|t| forms[1].contains(t))) {
+        return Err(git_dir_message(GIT_DIR));
+    }
+    Ok(())
+}
+
+/// `name` stands in `command` as a whole file name: no file-name character
+/// directly before or after it. Globs and brace expansion therefore end a
+/// name (`~/.zshrc*`); a glob class inside it (`~/.zsh[r]c`) is not caught.
 fn names_file(command: &str, name: &str) -> bool {
+    let is_name_char = |c: char| c.is_ascii_alphanumeric() || "._-".contains(c);
     command.match_indices(name).any(|(i, _)| {
         let before = command[..i].chars().next_back();
         let after = command[i + name.len()..].chars().next();
-        before.is_none_or(|c| c.is_whitespace() || TOKEN_SEPARATORS.contains(c) || "/~".contains(c))
-            && after.is_none_or(|c| c.is_whitespace() || NAME_ENDS.contains(c))
+        !before.is_some_and(is_name_char) && !after.is_some_and(is_name_char)
     })
+}
+
+/// A lower-cased command that (may) write files.
+fn writes(command: &str) -> bool {
+    WRITES.iter().any(|w| command.contains(w))
+        || command
+            .split(|c: char| !(c.is_ascii_alphanumeric() || "_-".contains(c)))
+            .any(|w| w == "dd")
+        || runs_with_short_flag(command, &["perl"], 'i')
 }
 
 /// Gate bypasses in a normalised, lower-cased command.
@@ -226,14 +252,22 @@ fn abbreviates_no_verify(command: &str) -> bool {
 /// `git … commit` followed by a short-flag group containing `n`, the short
 /// form of `--no-verify`.
 fn commits_without_verify(command: &str) -> bool {
+    runs_with_short_flag(command, &["git", "commit"], 'n')
+}
+
+/// A segment with the words of `program` in this order, followed by a
+/// short-flag group containing `flag`.
+fn runs_with_short_flag(command: &str, program: &[&str], flag: char) -> bool {
     segments(command).any(|segment| {
-        let mut words =
-            segment.split_whitespace().skip_while(|w| *w != "git").skip_while(|w| *w != "commit");
-        words.next().is_some()
+        let mut words = segment.split_whitespace();
+        program.iter().all(|p| words.any(|w| w == *p))
             && words.any(|word| {
                 word.strip_prefix('-').is_some_and(|flags| {
                     !flags.starts_with('-')
-                        && flags.split_once('=').map_or(flags, |(letters, _)| letters).contains('n')
+                        && flags
+                            .split_once('=')
+                            .map_or(flags, |(letters, _)| letters)
+                            .contains(flag)
                 })
             })
     })
@@ -258,6 +292,13 @@ fn self_unlock_message(path: &str) -> String {
         "`{path}` can set the environment of Claude Code hooks (self-unlock) and is never \
          written by agents, not even in an unlocked session (ADR-0043). Ask the human to make \
          this change."
+    )
+}
+
+fn git_dir_message(path: &str) -> String {
+    format!(
+        "`{path}`: `.git/` is managed by git and the guard; agents never write it, not even in \
+         an unlocked session (ADR-0043). Ask the human to make this change."
     )
 }
 
@@ -310,10 +351,7 @@ fn refers_to_repo(before: &str, roots: &[String]) -> bool {
 fn check_file_write(root: &Path, session: &Session, rel: &str) -> Result<(), String> {
     let lower_rel = rel.to_lowercase();
     if lower_rel == GIT_DIR || lower_rel.starts_with(".git/") {
-        return Err(format!(
-            "`{rel}`: `.git/` is managed by git and the guard; agents never write it, not even \
-             in an unlocked session (ADR-0043). Ask the human to make this change."
-        ));
+        return Err(git_dir_message(rel));
     }
     if paths::is_harness(rel) && !session.unlocked {
         return Err(format!(

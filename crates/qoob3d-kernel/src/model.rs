@@ -62,7 +62,8 @@ pub struct RebuildResult {
     pub stats: RebuildStats,
 }
 
-/// What a rebuild had to compute instead of taking it from the cache (ADR-0012).
+/// What a rebuild had to compute instead of taking it from the hash-chain cache
+/// of ADR-0012 (ADR-0046).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RebuildStats {
     /// Sketches and solid features evaluated in this rebuild (not taken from the cache).
@@ -100,7 +101,8 @@ fn shape(r: Result<UniquePtr<ffi::TopoDS_Shape>, cxx::Exception>) -> Result<Shap
     Ok(Shape(s))
 }
 
-/// View mesh, volume and validity of a body state, computed once (ADR-0012).
+/// View mesh, volume and validity of a body state, computed once and kept with
+/// the body (ADR-0046).
 #[derive(Clone)]
 struct Analysis {
     mesh: Arc<ShapeMesh>,

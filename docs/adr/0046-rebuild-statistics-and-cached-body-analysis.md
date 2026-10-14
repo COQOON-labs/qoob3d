@@ -26,14 +26,16 @@ from the cache. Timing assertions depend on machine load and cannot tell which w
 
    Suppressed features and construction planes count in neither feature field.
 2. **Body analysis** (view mesh, volume, validity) is computed once per body state and stored with
-   it. A body that comes from the cache is not analyzed again; its volume is bit-identical.
+   it, only for the bodies in the rebuild result (intermediate states between features are not
+   analyzed). A body that comes from the cache is not analyzed again; its volume is bit-identical.
 3. **Cache keys:**
    - Solid features use the hash chain of ADR-0012: changing feature *i* recomputes *i* and every
      later solid feature.
    - Sketch profiles depend only on the sketch itself and are keyed by its content, so an unchanged
      sketch after a changed feature stays cached.
-   - Every body in the state produced by a recomputed step counts as analyzed, even if its geometry
-     happens to be unchanged; the kernel does not compare geometry.
+   - A body created or modified by a recomputed step gets a new analysis, even if its geometry
+     happens to be unchanged (the kernel does not compare geometry); bodies a recomputed step only
+     carries over keep their analysis.
 4. **Retention:** the kernel keeps the results of the current and the previous rebuild (cheap
    undo/redo) and drops the rest. Exports read the cache without changing what is retained.
 5. **Tests** check the cache through these statistics, never through timing
