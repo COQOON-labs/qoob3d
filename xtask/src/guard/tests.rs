@@ -894,9 +894,10 @@ fn f1_read_exception_is_strict() {
             "cat ~/.zshrc || nano ~/.zshrc",
             "cat ~/.zshrc & ed ~/.zshrc",
             "cat ~/.zshrc\nvim ~/.zshrc",
-            // `>` anywhere, also with a read-only program and to another file.
+            // `>` anywhere, also with a read-only program and to another file
+            // (review4 S2 exempts only the `/dev/null` and `2>&1` redirections).
             "cat ~/.zshrc > /tmp/copy",
-            "grep PATH ~/.zshrc 2>/dev/null",
+            "grep PATH ~/.zshrc 2>/tmp/err",
             // Leading assignment.
             "FOO=1 cat ~/.zshrc",
             // A program not on the list.
@@ -1029,10 +1030,9 @@ fn t1_git_like_names_are_not_the_git_dir() {
     fs::remove_dir_all(&root).unwrap();
 }
 
-// ADR-0043 (addendum T1, refined by review3 R2): `.git/config` and
-// `.git/hooks` named together with a write operation are denied with the
-// `.git/` message, locked and unlocked; reads pass. `perl -pi` is a write
-// operation since review3 R5.
+// ADR-0043 (addendum T1, refined by review3 R2 and review4 S1): `.git/config`
+// and `.git/hooks` named in a command that is no pure read are denied with
+// the `.git/` message, locked and unlocked; pure reads pass.
 #[test]
 fn t1_git_config_and_hooks_in_shell() {
     let root = repo("t1_shell");
@@ -1236,11 +1236,12 @@ fn g2_other_no_options_pass() {
     });
 }
 
-// ADR-0043 (review G3, refined by review3 R2): the guard binary lives in
-// `.git/qoob3d/guard-target`, so a shell command naming `.git` together with
-// a write operation or a cargo target dir is denied with the `.git/`
+// ADR-0043 (review G3, refined by review3 R2 and review4 S1): the guard
+// binary lives in `.git/qoob3d/guard-target`, so a shell command naming
+// `.git` that is no pure read and no exclusion is denied with the `.git/`
 // message, locked and unlocked, relative, absolute or via
-// $CLAUDE_PROJECT_DIR. `dd … of=` is a write operation since review3 R5.
+// $CLAUDE_PROJECT_DIR. The cargo target-dir cases need no special rule any
+// more: `cargo build` is no read-only program.
 #[test]
 fn g3_shell_writes_under_git_dir_are_denied() {
     let root = repo("g3_git_shell");
@@ -1251,7 +1252,7 @@ fn g3_shell_writes_under_git_dir_are_denied() {
         "echo x > .git/info/exclude".to_owned(),
         "touch .git/qoob3d/roles/s--main".to_owned(),
         "mv /tmp/x .git/HEAD".to_owned(),
-        // No WRITES fragment, but a cargo target dir.
+        // No WRITES fragment; denied because `cargo` is no read-only program.
         "CARGO_TARGET_DIR=.git/qoob3d/guard-target cargo build --package xtask".to_owned(),
         "cargo build --target-dir .git/qoob3d/guard-target -p xtask".to_owned(),
         "dd if=/tmp/fake of=.git/qoob3d/guard-target/debug/xtask".to_owned(),
@@ -1635,7 +1636,8 @@ fn r1_startup_names_inside_other_file_names_pass() {
 }
 
 /// Commands that name the git directory (by name or by `git rev-parse`) and
-/// write or set a cargo target dir (review3 R2, DENIED).
+/// write or set a cargo target dir (review3 R2, DENIED; still denied under
+/// review4 S1: none is a pure read or a pure exclusion).
 const GIT_DIR_WRITES: &[&str] = &[
     // The spec's examples.
     "echo hi > .git/hooks/pre-commit",
@@ -1663,28 +1665,43 @@ const GIT_DIR_WRITES: &[&str] = &[
     "dd of=.git/hooks/pre-push if=/tmp/x",
 ];
 
-/// Commands that name the git directory without writing (review3 R2, PASS).
+/// Commands that name the git directory and pass: pure reads (review4 S2) or
+/// commands whose every `.git` is an exclusion (review4 S1 PASS, which
+/// includes the review3 R2 PASS examples except running the guard binary from
+/// `.git/qoob3d/…`, no longer required to pass).
 const GIT_DIR_NON_WRITES: &[&str] = &[
-    // The spec's examples.
+    // Exclusions: `find … -path <x>/.git -prune`, `-name .git -prune`,
+    // `--exclude=`, `--exclude-dir=`, `-E `, `!` (after quote removal).
     "find . -path ./.git -prune -o -name '*.rs' -print",
-    "du -sh .git",
-    ".git/qoob3d/guard-target/debug/xtask guard",
+    "find . -name .git -prune -o -type f -print",
     "tar czf /tmp/x.tgz --exclude=.git .",
     "rsync -a --exclude=.git . /tmp/y",
     "grep -rn --exclude-dir=.git foo . | sort",
     "fd -E .git foo",
+    "rg --glob '!.git' foo | head",
+    // Pure reads, with the read-only programs added by S2.
+    "du -sh .git",
     "ls -la .git",
     "cat .git/config",
     "git rev-parse --git-dir",
-    // The other git-dir options of R2, without a write.
+    "git rev-parse --show-toplevel",
+    // Redirections S2 exempts.
+    "ls .git 2>/dev/null",
+    "find . -path ./.git -prune -o -name '*.rs' -print 2>/dev/null",
+    "git rev-parse --git-dir 2>/dev/null",
+    // Whitespace after `>` is exempt too (coordinator decision c).
+    "ls .git 2> /dev/null",
+    "du -sh .git > /dev/null",
+    // The other git-dir options of review3 R2 with `git rev-parse`, a
+    // read-only program since S2.
     "git rev-parse --absolute-git-dir",
     "git rev-parse --git-path hooks",
-    "ls \"$(git rev-parse --git-common-dir)\"",
+    "git rev-parse --git-common-dir",
 ];
 
-// ADR-0043 (review3 R2): naming `.git` (whole name, any case) or
-// substituting the git dir via `git rev-parse` together with a write
-// operation or a cargo target dir is denied in any session with the `.git/`
+// ADR-0043 (review3 R2, review4 S1): naming `.git` (whole name, any case) or
+// substituting the git dir via `git rev-parse` in a command that writes or
+// sets a cargo target dir is denied in any session with the `.git/`
 // message. `.git` is no hook-environment fragment any more, so the
 // self-unlock message must not answer. Spec root and a temp repo (absolute
 // root spelled out as well).
@@ -1713,10 +1730,11 @@ fn r2_git_dir_with_a_write_is_denied_with_the_git_message() {
     fs::remove_dir_all(&root).unwrap();
 }
 
-// ADR-0043 (review3 R2): naming `.git` or the git-dir options without a write
-// operation or cargo target dir passes, locked and unlocked.
+// ADR-0043 (review3 R2, review4 S1/S2): naming `.git` or the git-dir options
+// in a pure read, or `.git` only as an exclusion, passes, locked and
+// unlocked.
 #[test]
-fn r2_git_dir_without_a_write_passes() {
+fn s1_git_dir_reads_and_exclusions_pass() {
     let root = repo("r2_git_reads");
     both_sessions(|unlocked| {
         let s = session(unlocked, &unused_home());
@@ -1731,7 +1749,7 @@ fn r2_git_dir_without_a_write_passes() {
 
 // ADR-0043 (review3 R1 applied to `.git`): a file-name character directly
 // before or after `.git` makes it another name, so writes to these pass; a
-// cargo target dir elsewhere passes too (it only matters with `.git`).
+// cargo target dir that does not name `.git` passes too.
 #[test]
 fn r2_git_like_names_and_other_target_dirs_pass() {
     let root = repo("r2_git_like");
@@ -1801,6 +1819,363 @@ fn r5_add_commands_and_perl_without_in_place_pass() {
     ] {
         assert_eq!(spec_shell(false, command), Ok(()), "{command}");
         assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Third branch review (review4 spec S1–S4).
+// ---------------------------------------------------------------------------
+
+/// The spec's DENIED examples of review4 S1: writers missing from the review3
+/// WRITES list, cargo target dirs spelled other than `CARGO_TARGET_DIR` /
+/// `--target-dir`, and `git rev-parse` git-dir queries with options in
+/// between. Each names the git dir and is neither a pure read nor an
+/// exclusion, so S1 denies it.
+const S1_GIT_DIR_DENIED: &[&str] = &[
+    "install -m 755 /tmp/fake .git/qoob3d/guard-target/debug/xtask",
+    "rsync /tmp/fake .git/qoob3d/guard-target/debug/xtask",
+    "ditto /tmp/fake .git/hooks/pre-push",
+    "curl -sSo .git/hooks/pre-push https://example.com/x",
+    "tar xf h.tar -C .git/hooks",
+    "git config --file .git/config include.path /tmp/evil",
+    "/usr/bin/perl -i -pe s/a/b/ .git/config",
+    "CARGO_BUILD_TARGET_DIR=.git/qoob3d/guard-target cargo build -p xtask",
+    "cargo build -p xtask --config build.target-dir=\".git/qoob3d/guard-target\"",
+    "cp /tmp/x \"$(git rev-parse -q --git-dir)/hooks/pre-push\"",
+    "cp /tmp/x \"$(git rev-parse --path-format=absolute --git-dir)/hooks/pre-push\"",
+];
+
+/// Consequences of the S1 rule that are not spec examples. Each names the
+/// git dir; the comment says why it is no pure read (S2) and no exclusion.
+const S1_GIT_DIR_DENIED_DERIVED: &[&str] = &[
+    // The program is not read-only.
+    "vim .git/config",
+    "sh .git/hooks/pre-push",
+    "find .git -name '*.lock' -delete",
+    // A redirection other than the exempt ones (`2>/dev/null`, `>/dev/null`,
+    // `&>/dev/null`, `2>&1`) remains after stripping those.
+    "cat .git/config > /tmp/copy",
+    "cat /tmp/fake 2>/dev/null >.git/hooks/pre-push",
+    // `tee` and `xargs` are not read-only, also after a read-only segment.
+    "cat /tmp/fake 2>&1 | tee .git/hooks/pre-push",
+    "git rev-parse --git-dir | xargs -I{} cp /tmp/x {}/hooks/pre-push",
+    // `sort` with an output file, also in a short-flag group, is no read.
+    "sort -o .git/info/exclude /tmp/x",
+    "sort --output=.git/info/exclude /tmp/x",
+    "sort -uo .git/info/exclude /tmp/x",
+    // `cargo` is no read-only program and `-v ` is no exclusion prefix (the
+    // spec's former PASS example, withdrawn as a spec mistake).
+    "cargo test -p xtask 2>&1 | grep -v .git",
+    // A command substitution is no pure read (review3 R2 listed this as PASS).
+    "ls \"$(git rev-parse --git-common-dir)\"",
+    // Not every `.git` is an exclusion.
+    "tar czf /tmp/x.tgz --exclude=.git .git",
+    "rsync -a --exclude=.git /tmp/fake/ .git/hooks/",
+    // Every `.git` is an exclusion, but the command has a git-dir query.
+    "rsync -a --exclude=.git /tmp/fake/ \"$(git rev-parse --git-dir)/hooks/\"",
+];
+
+// ADR-0043 (review4 S1): a command naming the git dir — `.git` by name or a
+// `git rev-parse` query with options between `rev-parse` and the git-dir
+// option — is denied unless it is a pure read or names `.git` only as an
+// exclusion. Locked and unlocked, spec root and a temp repo, with the `.git/`
+// message and never the self-unlock message.
+#[test]
+fn s1_git_dir_outside_reads_and_exclusions_is_denied() {
+    let root = repo("s1_git_denied");
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &unused_home());
+        for command in S1_GIT_DIR_DENIED.iter().chain(S1_GIT_DIR_DENIED_DERIVED) {
+            for result in [spec_shell(unlocked, command), check_shell(&root, &s, command)] {
+                let what = format!("{command:?} (unlocked: {unlocked})");
+                assert_denied(result.clone(), &[MSG_GIT_DIR, ADR_0043], &what);
+                let message = result.unwrap_err();
+                assert!(!message.contains(MSG_SELF_UNLOCK), "{what}: {message}");
+            }
+        }
+    });
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0043 (review4 S2): the read-only list also has `du`, `sort` (without
+// an output file), `uniq`, `cut`, `tr`, `nl`, `basename`, `dirname`,
+// `realpath`, `md5`, `shasum` and segments starting with `git rev-parse`;
+// `2>/dev/null`, `>/dev/null` (also with whitespace after `>`), `&>/dev/null`
+// and `2>&1` keep a read a read; they are removed before segmenting.
+// So these name hook-environment files and pass, locked and unlocked.
+#[test]
+fn s2_more_read_only_programs_and_null_redirections_pass() {
+    both_sessions(|unlocked| {
+        for command in [
+            // The spec's example.
+            "cat ~/.zshrc 2>/dev/null",
+            // The other exempt redirections, also with whitespace after `>`.
+            "cat ~/.zshrc >/dev/null",
+            "cat ~/.zshrc > /dev/null",
+            "cat ~/.zshrc 2> /dev/null",
+            // Exempt redirections are removed before splitting into
+            // segments, so their `&` splits nothing.
+            "grep -q PATH ~/.zshrc &>/dev/null",
+            "cat ~/.zshrc 2>&1 | head",
+            "grep -c PATH ~/.zshrc &>/dev/null && cat ~/.zprofile 2>&1",
+            // Every added program.
+            "du -h ~/.zshrc",
+            "sort ~/.zshrc | uniq -c",
+            "cut -c1-20 ~/.zshenv",
+            "cat ~/.zshrc | tr a-z A-Z | nl",
+            "basename ~/.zprofile",
+            "dirname ~/.zprofile",
+            "realpath ~/.zshrc",
+            "md5 ~/.zshrc",
+            "shasum -a 256 ~/.claude/settings.json",
+            "git rev-parse --show-toplevel && cat ~/.zshrc",
+        ] {
+            assert_eq!(spec_shell(unlocked, command), Ok(()), "{command:?} (unlocked: {unlocked})");
+        }
+    });
+}
+
+// ADR-0043 (review4 S2): `sort` with `--output` or a short-flag group
+// containing `o` (`-o`, `-uo`, `-o<file>`), any other `>`, and a
+// `git` segment that does not start with `git rev-parse` are no reads, so
+// naming a hook-environment file with them is denied, locked and unlocked.
+#[test]
+fn s2_read_exception_stays_strict() {
+    both_sessions(|unlocked| {
+        for command in [
+            "sort -o ~/.zshrc /tmp/x",
+            "sort /tmp/x -o ~/.zshrc",
+            "sort --output=~/.zshrc /tmp/x",
+            "sort --output ~/.zshrc /tmp/x",
+            "sort -uo ~/.zshrc /tmp/x",
+            "sort -o~/.zshrc /tmp/x",
+            "cat ~/.zshrc 2>/dev/null > /tmp/copy",
+            "cat ~/.zshrc > /dev/null > /tmp/copy",
+            "cat /tmp/x 2>&1 >~/.zshrc",
+            "cat ~/.zshrc 2>/tmp/err",
+            "git config --global x.y z; cat ~/.zshrc",
+        ] {
+            assert_denied(
+                spec_shell(unlocked, command),
+                &[MSG_SELF_UNLOCK, ADR_0043],
+                &format!("{command:?} (unlocked: {unlocked})"),
+            );
+        }
+    });
+}
+
+// ADR-0037 (review4 S3): `perl` is recognised by the last path component of
+// the program word, and an in-place flag is a short-flag group with a
+// lower-case `i`. With a harness path: locked denied with the harness
+// message naming the fragment, unlocked allowed. Spec root and a temp repo.
+#[test]
+fn s3_perl_by_path_with_in_place_flag_writes_harness_files() {
+    let root = repo("s3_perl_denied");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in [
+        // The spec's example.
+        ("/usr/bin/perl -pi -e s/a/b/ Cargo.toml", "Cargo.toml"),
+        // Another path, `-i.bak`; `-M`/`-I` groups next to a real `-i`.
+        ("/opt/homebrew/bin/perl -i.bak -pe s/a/b/ deny.toml", "deny.toml"),
+        ("perl -Mstrict -pi -e s/a/b/ clippy.toml", "clippy.toml"),
+        ("perl -Ilib -i -pe s/a/b/ rustfmt.toml", "rustfmt.toml"),
+    ] {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}`");
+        assert_denied(spec_shell(false, command), &[&needle], command);
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], command);
+        assert_eq!(spec_shell(true, command), Ok(()), "{command} (unlocked)");
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (review4 S3): `-M<module>` and `-I<dir>` are no in-place flags,
+// even when the lower-cased word contains an `i` (`-mstrict`, `-ilib`), so
+// these read harness files and pass in a locked session.
+#[test]
+fn s3_perl_module_and_include_flags_are_not_in_place() {
+    let root = repo("s3_perl_pass");
+    for command in [
+        // The spec's examples.
+        "perl -Mstrict -ne print Cargo.toml",
+        "perl -Ilib -ne print Cargo.toml",
+        // By path, a module name with `i`, a directory with `i`.
+        "/usr/bin/perl -Mwarnings -ne print Cargo.toml",
+        "perl -I/tmp/lib -Mstrict -ne print xtask/src/main.rs",
+    ] {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (review4 S4): `install`, `rsync`, `ditto`, `curl` with
+// `-o`/`-O`/`--output`, `wget`, `tar` with an extract flag and
+// `git config --file` are write operations. With a harness path: locked
+// denied with the harness message naming the fragment, unlocked allowed.
+#[test]
+fn s4_more_write_programs_write_harness_files() {
+    let root = repo("s4_writes");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in [
+        // The spec's examples.
+        ("install -m 644 /tmp/x xtask/src/main.rs", "xtask/"),
+        ("rsync /tmp/x Cargo.toml", "Cargo.toml"),
+        ("curl -so clippy.toml https://example.com/x", "clippy.toml"),
+        // The other writers and spellings of S4.
+        ("ditto /tmp/x deny.toml", "deny.toml"),
+        ("curl --output rustfmt.toml https://example.com/x", "rustfmt.toml"),
+        ("curl -o harness/rules.md https://example.com/x", "harness/"),
+        ("cd xtask/src && curl -sO https://example.com/main.rs", "xtask/"),
+        ("wget -P .github/workflows https://example.com/ci.yml", ".github/"),
+        ("wget -O .github/workflows/ci.yml https://example.com/x", ".github/"),
+        ("tar xzf /tmp/h.tgz xtask/src/main.rs", "xtask/"),
+        ("tar -xf /tmp/h.tar Cargo.toml", "Cargo.toml"),
+        ("git config --file .cargo/config.toml alias.b build", ".cargo/"),
+    ] {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}`");
+        assert_denied(spec_shell(false, command), &[&needle], command);
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], command);
+        assert_eq!(spec_shell(true, command), Ok(()), "{command} (unlocked)");
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (review4 S4): the new writers need their trigger: `install` as a
+// whole word and without a harness path, `tar` only with an extract flag
+// (`c`/`t` are no extract flags; the `x` in `--exclude` or `/tmp/x.tgz` is
+// none either), `curl` only with an output option, `git config` only with
+// `--file`. These pass in a locked session.
+#[test]
+fn s4_commands_without_a_write_trigger_pass() {
+    let root = repo("s4_pass");
+    for command in [
+        // The spec's examples.
+        "cargo install cargo-deny",
+        "tar czf /tmp/x.tgz --exclude=target .",
+        // Harness paths with a non-writing use of the new programs.
+        "tar czf /tmp/x.tgz --exclude=target xtask/",
+        "tar tzf /tmp/x.tgz xtask/src/main.rs",
+        "curl -sS https://example.com/x | grep -c Cargo.toml",
+        "git config --get user.name && cat Cargo.toml",
+        "brew reinstall cmake && cat Cargo.toml",
+    ] {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Stricter rules accepted after review4 (coordinator decisions 1–4).
+// ---------------------------------------------------------------------------
+
+// ADR-0043 (review4, decisions 1, 2, 4): `find` is a read only without action
+// primaries (`-exec*`, `-ok*`, `-delete`, `-fprint*`, `-fls`), even when it
+// also prunes `.git`; `-E ` is an exclusion only in an `fd` segment; `perl`
+// is recognised in any case. Denied with the `.git/` message (never the
+// self-unlock message), locked and unlocked, spec root and a temp repo.
+#[test]
+fn s5_find_actions_foreign_e_flags_and_upper_case_perl_on_git_dir_are_denied() {
+    let root = repo("s5_git_denied");
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &unused_home());
+        for command in [
+            // Decision 1: action primaries, before or after the prune.
+            "find . -name .git -prune -exec cp /tmp/x {}/hooks/pre-push \\;",
+            "find . -exec cp /tmp/x {}/hooks/pre-push \\; -name .git -prune -o -print",
+            "find .git -name '*.lock' -delete",
+            // The other action primaries.
+            "find . -path ./.git -prune -o -execdir rm {} +",
+            "find . -path ./.git -prune -o -ok rm {} \\;",
+            "find .git -fprint /tmp/list",
+            "find .git -fls /tmp/list",
+            // Decision 2: `-E ` outside `fd`.
+            "sed -i s/a/b/ -E .git/config",
+            "rsync /tmp/fake -E .git/hooks/pre-push",
+            // Decision 4: `perl` in upper case.
+            "PERL -pi -e s/a/b/ .git/config",
+        ] {
+            for result in [spec_shell(unlocked, command), check_shell(&root, &s, command)] {
+                let what = format!("{command:?} (unlocked: {unlocked})");
+                assert_denied(result.clone(), &[MSG_GIT_DIR, ADR_0043], &what);
+                let message = result.unwrap_err();
+                assert!(!message.contains(MSG_SELF_UNLOCK), "{what}: {message}");
+            }
+        }
+    });
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0043 (review4, decision 1): `find` without action primaries is a pure
+// read, so it may name `.git`, locked and unlocked; `fd -E .git` stays an
+// exclusion (decision 2).
+#[test]
+fn s5_find_without_actions_and_fd_exclusions_pass() {
+    let root = repo("s5_git_pass");
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &unused_home());
+        for command in [
+            "find .git/hooks -type f",
+            "find .git -name '*.lock' | wc -l",
+            "find . -path ./.git -prune -o -type f -print",
+            "fd -E .git foo",
+            "fd -H -E .git -e rs main",
+        ] {
+            let what = format!("{command:?} (unlocked: {unlocked})");
+            assert_eq!(spec_shell(unlocked, command), Ok(()), "{what}");
+            assert_eq!(check_shell(&root, &s, command), Ok(()), "{what}");
+        }
+    });
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0043 (review4, decisions 3, 4): `uniq` with a second operand writes it
+// (`uniq IN OUT`), and git-style abbreviations of `--output` (`--out=`) are
+// `--output`. Naming a hook-environment file this way is denied with the
+// self-unlock message, locked and unlocked. One operand stays a read.
+#[test]
+fn s5_uniq_output_operand_and_abbreviated_sort_output_are_denied() {
+    both_sessions(|unlocked| {
+        for command in [
+            "uniq /tmp/x ~/.zshrc",
+            "uniq -c /tmp/x ~/.zshenv",
+            "sort --out=~/.zshrc /tmp/x",
+            "sort --outp ~/.zshrc /tmp/x",
+        ] {
+            assert_denied(
+                spec_shell(unlocked, command),
+                &[MSG_SELF_UNLOCK, ADR_0043],
+                &format!("{command:?} (unlocked: {unlocked})"),
+            );
+        }
+        for command in ["uniq ~/.zshrc", "uniq -c ~/.zshrc", "sort ~/.zshrc | uniq"] {
+            assert_eq!(spec_shell(unlocked, command), Ok(()), "{command:?} (unlocked: {unlocked})");
+        }
+    });
+}
+
+// ADR-0037 (review4, decision 4): the long and short spellings `curl
+// --remote-name`, `tar --extract` and `git config -f` are write operations.
+// With a harness path: locked denied with the harness message naming the
+// fragment, unlocked allowed. Spec root and a temp repo.
+#[test]
+fn s5_long_and_short_writer_options_write_harness_files() {
+    let root = repo("s5_writers");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in [
+        ("cd xtask/src && curl --remote-name https://example.com/main.rs", "xtask/"),
+        ("tar --extract -f /tmp/h.tar Cargo.toml", "Cargo.toml"),
+        ("tar --extract --file=/tmp/h.tar harness/rules.md", "harness/"),
+        ("git config -f .cargo/config.toml alias.b build", ".cargo/"),
+    ] {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}`");
+        assert_denied(spec_shell(false, command), &[&needle], command);
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], command);
+        assert_eq!(spec_shell(true, command), Ok(()), "{command} (unlocked)");
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command} (unlocked)");
     }
     fs::remove_dir_all(&root).unwrap();
 }
