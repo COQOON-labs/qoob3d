@@ -35,7 +35,6 @@ const NO_VERIFY_MIN: &str = "--no-veri";
 /// and the programs with an output option in [`writes`] and [`edits_in_place`].
 const WRITES: &[&str] = &[
     ">",
-    "sed -i",
     "of=",
     "tee ",
     "mv ",
@@ -54,6 +53,16 @@ const WRITES: &[&str] = &[
     "rsync",
     "ditto",
     "wget",
+];
+/// Programs that rewrite the files they name ([`edits_in_place`]): names,
+/// in-place short flags, short flags taking the rest of the group as
+/// argument, long options. sed: `-i[ext]`, BSD `-I ext`, GNU `--in-place`;
+/// perl/ruby: `-i[ext]`; awk: `-i inplace` or `--include=inplace` loads gawk's
+/// inplace extension.
+const IN_PLACE: &[(&[&str], &str, &str, &[&str])] = &[
+    (&["sed", "gsed"], "iI", "ef", &["--in-place"]),
+    (&["perl", "ruby"], "i", "IMmr", &[]),
+    (&["awk", "gawk"], "i", "vFfeE", &["--include"]),
 ];
 /// Path fragments of the harness as they appear in shell commands.
 const HARNESS_IN_SHELL: &[&str] = &[
@@ -243,8 +252,8 @@ fn file_name_positions<'a>(command: &'a str, name: &'a str) -> impl Iterator<Ite
     })
 }
 
-/// A lower-cased command that (may) write files; `perl -i` in
-/// [`edits_in_place`] needs the case.
+/// A lower-cased command that (may) write files; in-place editors in
+/// [`edits_in_place`] need the case.
 fn writes(command: &str) -> bool {
     WRITES.iter().any(|w| command.contains(w))
         || command
@@ -261,17 +270,30 @@ fn writes(command: &str) -> bool {
         })
 }
 
-/// `perl`, also by path, followed by a short-flag group with a lower-case `i`
-/// before any `-I<dir>`/`-M<module>` argument (`-pi`, `-i.bak`).
+/// A program of [`IN_PLACE`], also by path, followed by a short-flag group
+/// with one of its in-place letters before any letter whose argument is the
+/// rest of the group (`-pi`, `-Ei.bak`, but not `-es/i/j/`), or by its long
+/// option, also abbreviated (`--in`). `command` keeps its case: lower-cased,
+/// sed's `-E -i` would read as `-e` with the script `-i`.
 fn edits_in_place(command: &str) -> bool {
     segments(command).any(|segment| {
-        let mut words = segment.split_whitespace();
-        words.any(|w| w.rsplit('/').next().is_some_and(|name| name.eq_ignore_ascii_case("perl")))
-            && words.any(|word| {
-                short_flags(word).is_some_and(|flags| {
-                    flags.chars().take_while(|c| !"IMm".contains(*c)).any(|c| c == 'i')
-                })
+        IN_PLACE.iter().any(|(programs, in_place, argument, long)| {
+            let mut words = segment.split_whitespace();
+            words.any(|w| {
+                w.rsplit('/')
+                    .next()
+                    .is_some_and(|name| programs.iter().any(|p| name.eq_ignore_ascii_case(p)))
+            }) && words.any(|word| {
+                let name = word.split_once('=').map_or(word, |(name, _)| name);
+                short_flags(name).is_some_and(|flags| {
+                    flags
+                        .chars()
+                        .take_while(|c| !argument.contains(*c))
+                        .any(|c| in_place.contains(c))
+                }) || (name.len() > 2
+                    && long.iter().any(|o| name.starts_with(o) || o.starts_with(name)))
             })
+        })
     })
 }
 
