@@ -117,6 +117,15 @@ const HARNESS_WRITES: &[(&str, &str)] = &[
     ("cat <<EOF > harness/rules.md", "harness/"),
     ("cp /tmp/fake target/debug/xtask", "target/debug/xtask"),
     ("rm rust-toolchain.toml", "rust-toolchain"),
+    // A null redirection next to a real write does not hide the write
+    // (review5 A3): stripping `2>/dev/null`, `>/dev/null`, `&>/dev/null` and
+    // `2>&1` still leaves `>`, `tee `, `cp ` or `rm `.
+    ("echo x > xtask/src/guard.rs 2>/dev/null", "xtask/"),
+    ("cat a 2>/dev/null >Cargo.toml", "Cargo.toml"),
+    ("cat a 2>&1 | tee harness/rules.md", "harness/"),
+    ("cp /tmp/x .githooks/pre-push 2>/dev/null", ".githooks"),
+    ("cat a >/dev/null >> clippy.toml", "clippy.toml"),
+    ("rm -f deny.toml &>/dev/null", "deny.toml"),
 ];
 
 /// Commands that must pass in a locked session (spec §1.4, MUST PASS, plus
@@ -134,6 +143,16 @@ const HARMLESS: &[&str] = &[
     "git diff --stat Cargo.toml",
     "git push origin feature",
     "echo hi > /tmp/x",
+    // Reads of harness files with a null redirection write no file
+    // (review5 A3): the exempt redirections of pure reads (`2>/dev/null`,
+    // `>/dev/null`, `&>/dev/null`, `2>&1`, also with whitespace after `>`)
+    // are no write operation for the harness check either.
+    "cat xtask/src/guard.rs 2>/dev/null",
+    "grep -rn foo xtask/src 2>&1 | head",
+    "ls harness/ >/dev/null",
+    "cat Cargo.toml &>/dev/null",
+    "ls harness/ > /dev/null",
+    "cat clippy.toml 2> /dev/null",
 ];
 
 // ADR-0037/ADR-0043 (spec §1.3): commands that bypass a gate or name the
@@ -2177,5 +2196,168 @@ fn s5_long_and_short_writer_options_write_harness_files() {
         assert_eq!(spec_shell(true, command), Ok(()), "{command} (unlocked)");
         assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command} (unlocked)");
     }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Fifth branch review (review5 A1–A3; A3 is in HARNESS_WRITES and HARMLESS).
+// ---------------------------------------------------------------------------
+
+/// `rg` with a preprocessor option runs the given program on every searched
+/// file (`--pre CMD`; `--pre-glob GLOB` selects the files for it), so it is no
+/// pure read (review5 A1). All four spellings of the spec.
+const RG_PRE_ON_GIT_DIR: &[&str] = &[
+    // The spec's examples.
+    "rg --pre=rm x .git/hooks/pre-push",
+    "rg --pre rm x .git/config",
+    // `--pre-glob` in both spellings, alone and with `--pre`.
+    "rg --pre-glob=* x .git/config",
+    "rg --pre-glob '*' --pre=sh x .git/hooks/pre-push",
+    // After another option and behind a read-only segment.
+    "rg -n --pre=/tmp/w.sh x .git/config",
+    "cat /tmp/x | rg --pre sh x .git/config",
+];
+
+/// The same with shell startup files (review5 A1).
+const RG_PRE_ON_STARTUP_FILES: &[&str] = &[
+    // The spec's examples.
+    "rg --pre=/tmp/w.sh x ~/.zshrc",
+    "rg --pre-glob '*' --pre=sh x ~/.zprofile",
+    // The other spellings.
+    "rg --pre sh x ~/.zshenv",
+    "rg --pre-glob=*.gz x ~/.bashrc",
+    "rg --pre-glob *.gz x ~/.profile",
+    "rg -n x ~/.zshrc; rg --pre=sh x ~/.zshrc",
+];
+
+// ADR-0043 (review5 A1): `rg --pre`/`--pre-glob` runs a program, so naming
+// `.git` with it is denied with the `.git/` message (never the self-unlock
+// message), locked and unlocked, spec root and a temp repo.
+#[test]
+fn a1_rg_with_a_preprocessor_on_git_dir_is_denied() {
+    let root = repo("a1_rg_git");
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &unused_home());
+        for command in RG_PRE_ON_GIT_DIR {
+            for result in [spec_shell(unlocked, command), check_shell(&root, &s, command)] {
+                let what = format!("{command:?} (unlocked: {unlocked})");
+                assert_denied(result.clone(), &[MSG_GIT_DIR, ADR_0043], &what);
+                let message = result.unwrap_err();
+                assert!(!message.contains(MSG_SELF_UNLOCK), "{what}: {message}");
+            }
+        }
+    });
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0043 (review5 A1): `rg --pre`/`--pre-glob` naming a shell startup file
+// is denied with the self-unlock message, locked and unlocked.
+#[test]
+fn a1_rg_with_a_preprocessor_on_startup_files_is_denied() {
+    both_sessions(|unlocked| {
+        for command in RG_PRE_ON_STARTUP_FILES {
+            assert_denied(
+                spec_shell(unlocked, command),
+                &[MSG_SELF_UNLOCK, ADR_0043],
+                &format!("{command:?} (unlocked: {unlocked})"),
+            );
+        }
+    });
+}
+
+// ADR-0043 (review5 A1): `rg` without a preprocessor stays a pure read: a
+// pattern `pre`, the different flag `--pretty` and other options do not
+// count, on startup files and on `.git`, locked and unlocked.
+#[test]
+fn a1_rg_without_a_preprocessor_stays_a_read() {
+    let root = repo("a1_rg_read");
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &unused_home());
+        for command in [
+            // The spec's examples.
+            "rg -n foo ~/.zshrc",
+            "rg -n pre ~/.zshrc",
+            "rg --pretty x ~/.zshrc",
+            // The same on `.git`, and `pre` inside other words.
+            "rg -n url .git/config",
+            "rg --pretty x .git/config",
+            "rg -n pre-push .git/config",
+            "rg -n prefix ~/.zprofile | head",
+        ] {
+            let what = format!("{command:?} (unlocked: {unlocked})");
+            assert_eq!(spec_shell(unlocked, command), Ok(()), "{what}");
+            assert_eq!(check_shell(&root, &s, command), Ok(()), "{what}");
+        }
+    });
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0043 (review5 A2): GNU `sort --compress-program=PROG` runs PROG on its
+// temporary files, so it is no pure read. GNU accepts unambiguous
+// abbreviations of long options; the only other `sort` option starting with
+// `--c` is `--check`, so every prefix from `--co` on means
+// `--compress-program`. With a startup file: the self-unlock message; with
+// `.git`: the `.git/` message. Locked and unlocked.
+#[test]
+fn a2_sort_with_a_compress_program_is_denied() {
+    let root = repo("a2_sort_git");
+    both_sessions(|unlocked| {
+        for command in [
+            // The spec's example.
+            "sort --compress-program=sh ~/.zshrc",
+            // Separate argument and abbreviations.
+            "sort --compress-program sh ~/.zshenv",
+            "sort --compress-prog=sh ~/.zshrc",
+            "sort --compress=sh ~/.zprofile",
+            "sort -u --compress-prog sh ~/.bashrc",
+            "sort --co=sh ~/.profile",
+            "cat /tmp/x | sort --compress-program=sh ~/.zshrc",
+        ] {
+            assert_denied(
+                spec_shell(unlocked, command),
+                &[MSG_SELF_UNLOCK, ADR_0043],
+                &format!("{command:?} (unlocked: {unlocked})"),
+            );
+        }
+        let s = session(unlocked, &unused_home());
+        for command in [
+            // The spec's example.
+            "sort --compress-prog sh .git/config",
+            "sort --compress-program=sh .git/info/exclude",
+            "sort --compress=/tmp/w.sh .git/config",
+        ] {
+            for result in [spec_shell(unlocked, command), check_shell(&root, &s, command)] {
+                let what = format!("{command:?} (unlocked: {unlocked})");
+                assert_denied(result.clone(), &[MSG_GIT_DIR, ADR_0043], &what);
+                let message = result.unwrap_err();
+                assert!(!message.contains(MSG_SELF_UNLOCK), "{what}: {message}");
+            }
+        }
+    });
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0043 (review5 A2): `sort` without an output file and without a
+// compress program stays a pure read; `--check` is no abbreviation of
+// `--compress-program`. Locked and unlocked, startup files and `.git`.
+#[test]
+fn a2_sort_without_a_compress_program_stays_a_read() {
+    let root = repo("a2_sort_read");
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &unused_home());
+        for command in [
+            // The spec's examples.
+            "sort -u ~/.zshrc",
+            "sort --check ~/.zshrc",
+            // `-c` and `--check=quiet` are `--check` as well.
+            "sort -c ~/.zprofile",
+            "sort --check=quiet ~/.zshenv",
+            "sort -u .git/info/exclude",
+        ] {
+            let what = format!("{command:?} (unlocked: {unlocked})");
+            assert_eq!(spec_shell(unlocked, command), Ok(()), "{what}");
+            assert_eq!(check_shell(&root, &s, command), Ok(()), "{what}");
+        }
+    });
     fs::remove_dir_all(&root).unwrap();
 }

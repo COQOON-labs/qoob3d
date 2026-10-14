@@ -1,0 +1,5 @@
+# Agent runs a program through `sort --compress-program` next to a shell startup file, even unlocked (ADR-0043)
+command: cargo xtask guard
+expect: can set the environment of Claude Code hooks
+env: QOOB3D_HARNESS_UNLOCK=1
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "sort --compress-program=sh ~/.zshrc"}, "hook_event_name": "PreToolUse"}
