@@ -23,12 +23,15 @@ eframe/egui 0.36.2 · wgpu 30 (nur über `qoob3d_render::wgpu`) · glam 0.34 · 
 
 ```sh
 cargo run                                   # App starten
-cargo xtask check                           # DEFINITION VON „FERTIG“ (fmt, clippy, test, arch, docs, deny, smoke)
+cargo xtask check                           # DEFINITION VON „FERTIG“ (fmt, clippy, test, arch, docs, i18n, models, deny, smoke)
 cargo xtask check --fast                    # ohne smoke + deny (läuft automatisch im Stop-Hook,
                                             #   .claude/hooks/check-on-stop.sh)
 cargo xtask docs [--fix]                    # Doku-Lint; --fix erzeugt den ADR-Index neu
 cargo xtask i18n                            # Übersetzungen vollständig, keine festen UI-Texte
 cargo xtask printers <orca>/resources/profiles  # Druckerdatenbank neu generieren (ADR-0021)
+cargo xtask models [--write]                # Referenzmodelle bauen, messen, exportieren (ADR-0033)
+cargo run -- models/gear.qbd --report       # JSON: Körper, Volumen, dicht, Fehler (Exit 1 = nicht druckbar)
+cargo run -- models/gear.qbd --export x.3mf # STL/3MF headless; mit --render x.png als Bild
 cargo run -- --render /tmp/x.png --view iso # headless Szenen-Render (+ --ortho --zoom 4 --printer bambu-lab-h2d --volume)
 cargo xtask screenshot                      # ganze UI (egui_kittest) + Szenen → target/screenshots/*.png
 cargo run -- --smoke-test                   # echte App mit synthetischer Eingabe, Exit-Code 0/1
@@ -50,10 +53,16 @@ In Tool-Shells ggf. vorher `export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.car
 4. **Kein `#[ignore]`, kein `#[allow(…)]` ohne Begründungskommentar.** Keine Assertions
    abschwächen, um Tests grün zu bekommen.
 5. **Golden Files und Snapshots nie ohne Rückfrage beim Nutzer akzeptieren.**
-6. **Crate-Grenzen** (ADR-0003): `core` ohne OCCT/GPU/UI; Kernel und Renderer kennen sich nicht.
+6. **Crate-Grenzen** (ADR-0036): `core` ohne OCCT/GPU/UI; Kernel und Renderer kennen sich nicht.
 7. Nach jedem Meilenstein: Testliste für den Nutzer, Status unten aktualisieren,
    `docs/architecture.md` anpassen, wenn sich das Gesamtbild geändert hat.
 8. Commits nur auf Anweisung des Nutzers.
+9. **Neue Feature-Art** (oder Kurvenart) ist erst fertig mit: Datenmodell + `validate` +
+   Formatversion/Migration/Fixture (ADR-0030), Kernel-Test mit **analytischem** Volumen
+   (`crates/qoob3d-kernel/tests/features.rs`), Beispiel in `document::examples` +
+   `models/<name>.expect.json` mit Formel (ADR-0033), Dialog in `commands.rs`, E2E-Test in
+   `crates/qoob3d-app/tests/modeling.rs`, Übersetzungen, Doku. `cargo xtask models` meldet
+   fehlende Abdeckung.
 
 ## Konventionen
 
@@ -84,6 +93,21 @@ Crate-spezifische Fallstricke stehen in der jeweiligen `crates/<crate>/CLAUDE.md
   oft fehl. Vorher die aktuelle Stelle lesen.
 - **Sprache ist pro Thread** (`i18n::set_language`). Neue Threads, die übersetzen, müssen sie setzen.
 - **`crates/qoob3d-core/src/printer/data.rs` ist generiert**, nicht von Hand ändern.
+- **egui-Tab-Fokus:** Tab und Pfeiltasten verschieben in egui den Tastaturfokus, bevor unser
+  Code läuft. Solange das Werte-HUD Tasten braucht, setzt `app.rs` die Fokusrichtung zurück
+  (`hud_has_keyboard`).
+- **Glyphen:** Nicht jedes Unicode-Zeichen ist in den egui-Schriften, fehlende erscheinen als
+  „□“. `every_ui_glyph_exists_in_the_fonts` prüft alle Texte. `Fonts::has_glyph` meldet
+  falsche Negative, nicht verwenden.
+- **Fixtures** unter `crates/qoob3d-core/tests/fixtures/` nie ändern. Neue Formatversion →
+  neue Fixture + Migration (ADR-0030).
+- **kittest-Zeit:** Standard sind 0,25 s pro Schritt; Doppelklicks brauchen
+  `.with_step_dt(1.0 / 60.0)` (siehe `tests/modeling.rs`). Neue egui-Areas (Dialoge) stehen
+  erst nach 1–2 Frames an ihrem Platz; vor Klicks einige Schritte laufen lassen.
+- **Unabhängige Prüfer nutzen:** Der eigene ZIP-Leser übersah einen Writer-Fehler, `unzip -t`
+  fand ihn (ADR-0033). Für Dateiformate immer ein Fremdwerkzeug mitprüfen lassen. Ist Bambu
+  Studio installiert (oder `QOOB3D_BAMBU_STUDIO` gesetzt), lädt `cargo xtask models` jedes 3MF
+  mit `BambuStudio --info` (Objekte, manifold, Volumen); der E2E-Export-Test ebenso.
 
 ## Meilensteine
 
@@ -92,17 +116,23 @@ Crate-spezifische Fallstricke stehen in der jeweiligen `crates/<crate>/CLAUDE.md
 | M1 | OCCT bauen, Würfel → Dreiecke → wgpu-Fenster, mit der Maus drehbar | ✅ fertig |
 | M1.5 | Qualitäts-Harness: `xtask check`, `--render`, `--smoke-test`, `MeshReport`, cargo-deny, Stop-Hook, ADR-Struktur | ✅ fertig |
 | M2 | Viewport komplett: Orbit um Cursor-Pivot, Raster mit Druckbett, Achsen, ViewCube, Kanten, Perspektive/Ortho, eigener Mesher. App-Rahmen (Toolbar, Baum, Timeline) im Theme. `egui_kittest` | ✅ fertig |
-| M3 | Dokumentmodell, Skizzen auf XY/XZ/YZ (Linie/Rechteck/Kreis, Maßeingabe, Fangen), Profilerkennung, Timeline/Baum, Speichern/Laden `.qoob3d` mit Validierung, Fuzzing | offen |
-| M4 | Extrusion (Neuer Körper/Vereinigen/Ausschneiden), Vorschau, Rebuild-Cache | offen |
-| M5 | Editierbare Timeline (Parameter, Neuberechnung ab Feature, Unterdrücken, Löschen, Rollback, Fehlerzustände), Undo/Redo | offen |
-| M6 | Export **STL, 3MF**, STEP mit eigener Export-Tessellierung, Menü, zuletzt geöffnete Dateien | offen |
+| M3a | Dokumentmodell + `.qbd` (Validierung, Migrationen, Fixture), Skizzen auf XY/XZ/YZ, Linie/Polylinie, Rechteck (2 Punkte, Mitte), Kreis, Punkt, Konstruktion, Werte-HUD mit Ausdrücken, Fangen, Auswahl/Ziehen/Löschen, Profile per General Fuse, Undo/Redo, Browser/Timeline. Reihenfolge ADR-0025, Stand je Anforderung: `docs/requirements/skizzen.md` §18 | ✅ fertig |
+| M4 | Körper-Features: Extrudieren, Drehen, Erhebung (auch zur Spitze), versetzte Ebene, Stirnrad, Spirale/Feder; Neu/Verbinden/Ausschneiden; Dialoge mit Live-Vorschau; Bögen in Skizzen; Rebuild-Cache (Hash-Kette); Export STL/3MF; CLI `--report/--export`; Referenzmodell-Gate. ADR-0031…0036, Stand: `docs/requirements/koerper.md` | ✅ fertig |
+| M3b | Solver (Spike E-01 vorab), Bedingungen, Bemaßungen, Parameter, Bogen, Langloch, Polygon, Trimmen, Abrunden, Versatz, Spiegeln | offen |
+| M3c | Konstruktionsebenen (auch schräg), Skizzen auf Flächen, Projizieren, Slice | offen |
+| M5 | Editierbare Timeline (Parameter, Neuberechnung ab Feature, Unterdrücken, Rollback, Fehlerzustände) | offen |
+| M6 | STEP-Export, Menü, zuletzt geöffnete Dateien, Körperauswahl, Fasen/Abrundungen | offen |
 
 ## Offene Punkte
 
 - **Lizenz:** OCCT ist LGPL-2.1 und wird statisch gelinkt. Die Druckerdaten stammen aus
   OrcaSlicer (AGPL-3.0); übernommen sind nur Maße/Koordinaten (ADR-0021). Beides vor einer
   Weitergabe von Binaries prüfen.
-- **Auswahlrahmen vs. Linksziehen-Orbit** (ADR-0022) mit M3 entscheiden.
+- **Auswahlrahmen im Modellmodus** (ADR-0022): Im Skizziermodus gehört Linksziehen dem
+  Zeichnen und Auswählen (ADR-0027). Im Modellmodus orbitet es weiterhin; Feature-Dialoge
+  wählen per Klick. Mit Körper-/Flächenauswahl (M6) neu bewerten.
+- **Join/Cut-Teilnehmer** sind immer alle berührten Körper (ADR-0031); eine explizite Auswahl
+  fehlt noch.
 - **Linux-Build** ist noch nicht getestet. Benötigt CMake, C++-Compiler, Vulkan und die
   X11/Wayland/xkbcommon-Dev-Pakete.
 - **Prozess-Isolation des Kernels** (Absturzschutz, untrusted STEP-Import), spätestens beim Import.

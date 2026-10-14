@@ -1,0 +1,53 @@
+{
+  "format": "qoob3d",
+  "format_version": 2,
+  "document": {
+    "features": [
+      {
+        "id": 1,
+        "name": "Sketch1",
+        "kind": {
+          "type": "Sketch",
+          "plane": {
+            "Origin": "XY"
+          },
+          "points": [
+            {
+              "id": 1,
+              "x": 0.0,
+              "y": 0.0
+            }
+          ],
+          "curves": [
+            {
+              "id": 2,
+              "type": "Circle",
+              "center": 1,
+              "radius": 10.0
+            }
+          ],
+          "next_id": 3,
+          "visible": true
+        }
+      },
+      {
+        "id": 2,
+        "name": "Extrude1",
+        "kind": {
+          "type": "Extrude",
+          "profiles": [
+            {
+              "sketch": 1,
+              "key": [
+                2
+              ]
+            }
+          ],
+          "distance": 30.0,
+          "operation": "new_body"
+        }
+      }
+    ],
+    "next_feature_id": 3
+  }
+}

@@ -98,7 +98,7 @@ pub fn tr(key: &str) -> String {
 }
 
 /// Translates `key` with named arguments, e.g. `tr_args("status-model", &[("edges", 14.into())])`.
-/// Falls back to English, then to `⟦key⟧` (never happens when the xtask check is green).
+/// Falls back to English, then to `«key»` (never happens when the xtask check is green).
 pub fn tr_args(key: &str, args: &[(&str, FluentValue<'_>)]) -> String {
     let mut fluent_args = FluentArgs::new();
     for (name, value) in args {
@@ -117,7 +117,7 @@ pub fn tr_args(key: &str, args: &[(&str, FluentValue<'_>)]) -> String {
         }
     }
     tracing::warn!(key, "missing translation key");
-    format!("⟦{key}⟧")
+    format!("«{key}»")
 }
 
 /// Formats a number with `digits` decimals and the language's separator.
@@ -150,7 +150,7 @@ mod tests {
         assert_eq!(tr("nav-grid"), "Raster");
         assert_eq!(decimal(15.7, 2), "15,70");
         assert_eq!(tr_args("coming-in", &[("milestone", "M3".into())]), "Kommt mit M3");
-        assert_eq!(tr("does-not-exist"), "⟦does-not-exist⟧");
+        assert_eq!(tr("does-not-exist"), "«does-not-exist»");
         set_language(Language::English);
     }
 

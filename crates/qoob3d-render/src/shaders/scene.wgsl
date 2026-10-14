@@ -27,6 +27,11 @@ struct Globals {
     axis_x: vec4<f32>,
     axis_y: vec4<f32>,
     restricted: vec4<f32>,
+    // Plane of the grid (world XY or the active sketch plane): origin, u, v, n.
+    grid_origin: vec4<f32>,
+    grid_u: vec4<f32>,
+    grid_v: vec4<f32>,
+    grid_n: vec4<f32>,
 };
 
 // Bed polygons back to back: printable area, exclude zone, nozzle 1, nozzle 2
@@ -261,10 +266,17 @@ fn fs_grid(in: GridOut) -> GridFrag {
     let p0 = unproject(in.ndc, 1.0);
     let p1 = unproject(in.ndc, 0.5);
     let dir = p1 - p0;
-    if (abs(dir.z) < 1e-12) { discard; }
-    let t = -p0.z / dir.z;
+    let plane_o = g.grid_origin.xyz;
+    let plane_n = g.grid_n.xyz;
+    let denom = dot(dir, plane_n);
+    if (abs(denom) < 1e-12) { discard; }
+    let t = dot(plane_o - p0, plane_n) / denom;
     if (t < 0.0) { discard; }
     let p = p0 + dir * t;
+    // Local plane coordinates; equal to world XY for the default plane.
+    let q = vec2<f32>(dot(p - plane_o, g.grid_u.xyz), dot(p - plane_o, g.grid_v.xyz));
+    let target_rel = g.orbit_target.xyz - plane_o;
+    let target_q = vec2<f32>(dot(target_rel, g.grid_u.xyz), dot(target_rel, g.grid_v.xyz));
 
     var out: GridFrag;
     let clip = g.view_proj * vec4<f32>(p, 1.0);
@@ -273,33 +285,33 @@ fn fs_grid(in: GridOut) -> GridFrag {
 
     // Fade towards the horizon and at grazing angles (avoids moiré).
     let dist = g.orbit_target.w;
-    let from_target = length(p.xy - g.orbit_target.xy);
+    let from_target = length(q - target_q);
     let fade = (1.0 - smoothstep(3.0 * dist, 8.0 * dist, from_target))
-        * smoothstep(0.02, 0.2, abs(normalize(dir).z));
+        * smoothstep(0.02, 0.2, abs(dot(normalize(dir), plane_n)));
 
     var c = vec4<f32>(0.0);
     // World units per pixel, for pixel-wide outlines and anti-aliasing.
-    let px = max(max(fwidth(p.x), fwidth(p.y)), 1e-6);
+    let px = max(max(fwidth(q.x), fwidth(q.y)), 1e-6);
     let n_plate = bed.counts.x;
     let n_excl = bed.counts.y;
     let n_e1 = bed.counts.z;
     let n_e2 = bed.counts.w;
     let show_plate = g.grid.w > 0.5;
-    let inside = show_plate && poly_inside(p.xy, 0u, n_plate);
+    let inside = show_plate && poly_inside(q, 0u, n_plate);
     if (inside) {
         c = over(c, g.plate_fill);
         // Zones only one nozzle reaches (multi-nozzle printers): tinted.
         if (n_e1 >= 3u && n_e2 >= 3u) {
-            let both = poly_inside(p.xy, n_plate + n_excl, n_e1)
-                && poly_inside(p.xy, n_plate + n_excl + n_e1, n_e2);
+            let both = poly_inside(q, n_plate + n_excl, n_e1)
+                && poly_inside(q, n_plate + n_excl + n_e1, n_e2);
             if (!both) {
                 c = over(c, vec4<f32>(g.restricted.rgb, 0.11));
             }
         }
         // Non-printable zone: hatched amber.
-        if (poly_inside(p.xy, n_plate, n_excl)) {
+        if (poly_inside(q, n_plate, n_excl)) {
             let stripe_period = 4.0;
-            let s = fract((p.x + p.y) / stripe_period);
+            let s = fract((q.x + q.y) / stripe_period);
             let edge = px / stripe_period;
             let stripe = smoothstep(0.5 - edge, 0.5 + edge, s);
             c = over(c, vec4<f32>(g.restricted.rgb, 0.18 + 0.32 * stripe));
@@ -309,9 +321,9 @@ fn fs_grid(in: GridOut) -> GridFrag {
         let lod = log2(max(dist, 1e-3)) / log2(10.0) - 1.0;
         let base = pow(10.0, floor(lod));
         let blend = fract(lod);
-        let minor = grid_lines(p.xy, base) * (1.0 - blend);
-        let mid = grid_lines(p.xy, base * 10.0);
-        let major = grid_lines(p.xy, base * 100.0);
+        let minor = grid_lines(q, base) * (1.0 - blend);
+        let mid = grid_lines(q, base * 10.0);
+        let major = grid_lines(q, base * 100.0);
         let a_minor = g.grid_minor.a * max(minor, mid * blend);
         let a_major = g.grid_major.a * max(mid * (1.0 - blend), major);
         c = over(c, vec4<f32>(g.grid_minor.rgb, a_minor * fade));
@@ -319,14 +331,14 @@ fn fs_grid(in: GridOut) -> GridFrag {
     }
     if (show_plate) {
         // Outlines: plate in grey, exclude zone in amber (~1.5 px wide).
-        let d_plate = poly_distance(p.xy, 0u, n_plate) / px;
+        let d_plate = poly_distance(q, 0u, n_plate) / px;
         c = over(c, vec4<f32>(g.plate_border.rgb, g.plate_border.a * (1.0 - smoothstep(0.5, 1.5, d_plate))));
-        let d_excl = poly_distance(p.xy, n_plate, n_excl) / px;
+        let d_excl = poly_distance(q, n_plate, n_excl) / px;
         c = over(c, vec4<f32>(g.restricted.rgb, 0.9 * (1.0 - smoothstep(0.5, 1.5, d_excl))));
     }
     if (g.grid.z > 0.5) {
-        let ax = axis_line(p.y, 1.6 * g.viewport.z);
-        let ay = axis_line(p.x, 1.6 * g.viewport.z);
+        let ax = axis_line(q.y, 1.6 * g.viewport.z);
+        let ay = axis_line(q.x, 1.6 * g.viewport.z);
         c = over(c, vec4<f32>(g.axis_x.rgb, g.axis_x.a * ax * fade));
         c = over(c, vec4<f32>(g.axis_y.rgb, g.axis_y.a * ay * fade));
     }

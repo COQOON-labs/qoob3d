@@ -1,0 +1,33 @@
+{
+  "format": "qoob3d",
+  "format_version": 1,
+  "document": {
+    "features": [
+      {
+        "id": 1,
+        "name": "Sketch1",
+        "kind": {
+          "type": "Sketch",
+          "plane": { "Origin": "XY" },
+          "points": [
+            { "id": 1, "x": 0.0, "y": 0.0 },
+            { "id": 2, "x": 40.0, "y": 0.0 },
+            { "id": 3, "x": 40.0, "y": 30.0 },
+            { "id": 4, "x": 0.0, "y": 30.0 },
+            { "id": 9, "x": 20.0, "y": 15.0 }
+          ],
+          "curves": [
+            { "id": 5, "type": "Line", "start": 1, "end": 2 },
+            { "id": 6, "type": "Line", "start": 2, "end": 3 },
+            { "id": 7, "type": "Line", "start": 3, "end": 4 },
+            { "id": 8, "type": "Line", "start": 4, "end": 1 },
+            { "id": 10, "type": "Circle", "center": 9, "radius": 7.0 }
+          ],
+          "next_id": 11,
+          "visible": true
+        }
+      }
+    ],
+    "next_feature_id": 2
+  }
+}

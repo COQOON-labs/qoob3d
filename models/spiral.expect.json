@@ -1,0 +1,17 @@
+{
+  "why": "Flache Spirale r=5…21 (4 Windungen, 4 mm/Windung), Draht Ø2: V = π·1²·L, L = ∫√(r²+b²)dθ = 327.18",
+  "bodies": 1,
+  "volume_mm3": 1027.87203882292,
+  "volume_rel_tol": 0.01,
+  "bbox_min": [
+    -20,
+    -21,
+    -1
+  ],
+  "bbox_max": [
+    22,
+    19,
+    1
+  ],
+  "bbox_tol": 0.15
+}

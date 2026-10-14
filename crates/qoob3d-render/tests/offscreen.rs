@@ -38,12 +38,7 @@ fn cube_is_drawn_over_background() {
         queue,
         [W, H],
         &camera,
-        &SceneOptions {
-            show_grid: false,
-            bed: None,
-            show_build_volume: false,
-            pixels_per_point: 1.0,
-        },
+        &SceneOptions { show_grid: false, ..SceneOptions::new(None) },
     );
     assert!(recreated);
     let pixels = read_rgba8(device, queue, view.texture());

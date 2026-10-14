@@ -14,6 +14,7 @@ publish = false
 qoob3d-core = { path = "crates/qoob3d-core" }
 qoob3d-kernel = { path = "crates/qoob3d-kernel" }
 qoob3d-render = { path = "crates/qoob3d-render" }
+qoob3d-sketch = { path = "crates/qoob3d-sketch" }
 
 # QOOB3D fork of opencascade 0.3.0, see third_party/opencascade/README.md (ADR-0014).
 opencascade = { path = "third_party/opencascade" }

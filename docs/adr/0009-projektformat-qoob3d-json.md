@@ -1,12 +1,12 @@
 ---
 id: ADR-0009
 title: Projektdateien .qoob3d sind versioniertes JSON und enthalten nur die Feature-Liste
-status: akzeptiert
+status: ersetzt
 date: 2026-10-13
 crates: [qoob3d-core]
 tags: [dateiformat, dokumentmodell]
 supersedes: []
-superseded_by: null
+superseded_by: ADR-0030
 ---
 
 ## Kontext

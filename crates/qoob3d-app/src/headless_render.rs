@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
+use qoob3d_core::ShapeMesh;
 use qoob3d_kernel::{Kernel, Response};
 use qoob3d_render::headless::{HeadlessGpu, read_rgba8};
 use qoob3d_render::{Camera, Projection, SceneOptions, ViewPreset, ViewportRenderer};
@@ -19,13 +20,16 @@ pub struct RenderView {
     pub build_volume: bool,
 }
 
-pub fn run(out: &Path, view: RenderView, size: [u32; 2]) -> anyhow::Result<()> {
-    let mut kernel = Kernel::spawn(|| {});
-    let id = kernel.submit(crate::app::initial_request())?;
-    let mesh = match kernel.recv_timeout(Duration::from_secs(120)) {
-        Some(Response::Mesh { id: got, result }) if got == id => result?,
-        Some(other) => bail!("unexpected kernel response: {other:?}"),
-        None => bail!("kernel did not answer within 120 s"),
+/// Renders `scene` (a document's bodies) or, without one, the demo body.
+pub fn run(
+    out: &Path,
+    view: RenderView,
+    size: [u32; 2],
+    scene: Option<ShapeMesh>,
+) -> anyhow::Result<()> {
+    let mesh = match scene {
+        Some(mesh) => mesh,
+        None => demo_mesh()?,
     };
     let bounds = mesh.faces.bounds().context("kernel returned an empty mesh")?;
     let report = mesh.faces.analyze();
@@ -64,6 +68,16 @@ pub fn run(out: &Path, view: RenderView, size: [u32; 2]) -> anyhow::Result<()> {
         report.volume_mm3
     );
     Ok(())
+}
+
+fn demo_mesh() -> anyhow::Result<ShapeMesh> {
+    let mut kernel = Kernel::spawn(|| {});
+    let id = kernel.submit(crate::app::initial_request())?;
+    match kernel.recv_timeout(Duration::from_secs(120)) {
+        Some(Response::Mesh { id: got, result }) if got == id => Ok(result?),
+        Some(other) => bail!("unexpected kernel response: {other:?}"),
+        None => bail!("kernel did not answer within 120 s"),
+    }
 }
 
 fn write_png(path: &Path, [w, h]: [u32; 2], rgba: &[u8]) -> anyhow::Result<()> {

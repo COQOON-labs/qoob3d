@@ -16,7 +16,7 @@ const REQUIRED_KEYS: &[&str] =
     &["id", "title", "status", "date", "crates", "tags", "supersedes", "superseded_by"];
 const REQUIRED_SECTIONS: &[&str] = &["## Kontext", "## Entscheidung", "## Konsequenzen"];
 const KNOWN_CRATES: &[&str] =
-    &["qoob3d-core", "qoob3d-kernel", "qoob3d-render", "qoob3d-app", "xtask"];
+    &["qoob3d-core", "qoob3d-kernel", "qoob3d-render", "qoob3d-sketch", "qoob3d-app", "xtask"];
 const INDEX_START: &str = "<!-- adr-index:start";
 const INDEX_END: &str = "<!-- adr-index:end -->";
 /// File types scanned for `ADR-NNNN` references.
@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn finds_adr_references() {
-        assert_eq!(adr_refs("see ADR-0003 and ADR-0012."), ["ADR-0003", "ADR-0012"]);
+        assert_eq!(adr_refs("see ADR-0036 and ADR-0012."), ["ADR-0036", "ADR-0012"]);
         assert!(adr_refs("ADR-NNNN, ADR-12").is_empty());
     }
 

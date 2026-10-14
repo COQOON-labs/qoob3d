@@ -19,6 +19,13 @@ pub struct Settings {
     pub show_build_volume: bool,
     /// Left-button drag (and therefore macOS three-finger drag) orbits.
     pub left_drag_orbit: bool,
+    /// Turn the camera to the sketch plane when a sketch starts (SK-LC-03).
+    pub sketch_look_at: bool,
+    /// Snapping in sketches (SK-SN-05), grid snapping, profile/point display.
+    pub sketch_snap: bool,
+    pub sketch_grid_snap: bool,
+    pub show_profiles: bool,
+    pub show_points: bool,
 }
 
 impl Default for Settings {
@@ -31,6 +38,11 @@ impl Default for Settings {
             show_grid: true,
             show_build_volume: false,
             left_drag_orbit: true,
+            sketch_look_at: true,
+            sketch_snap: true,
+            sketch_grid_snap: true,
+            show_profiles: true,
+            show_points: false,
         }
     }
 }

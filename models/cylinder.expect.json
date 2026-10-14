@@ -1,0 +1,17 @@
+{
+  "why": "Zylinder r=10, h=30: V = π·r²·h",
+  "bodies": 1,
+  "volume_mm3": 9424.77796076938,
+  "volume_rel_tol": 1e-06,
+  "bbox_min": [
+    -10,
+    -10,
+    0
+  ],
+  "bbox_max": [
+    10,
+    10,
+    30
+  ],
+  "bbox_tol": 0.06
+}

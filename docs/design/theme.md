@@ -22,6 +22,23 @@ Kein zweiter Akzent. Fehler sind rot, Warnungen bernstein, beides sparsam.
 | `TEXT_MUTED` | `#8A9099` | Beschriftungen (Captions), Statuszeile, Hinweise |
 | `OVERLAY_BG` | `#1D1F23` mit 90 % Deckkraft | Navigationsleiste im Viewport |
 | Warnung (Bernstein) | `#F5A623` | Sperrzonen (schraffiert), Einzeldüsen-Zonen (getönt) |
+| `CONSTRUCTION` | `#C08A3A` | Konstruktionsgeometrie (gestrichelt), auch in der Vorschau |
+| `ERROR` | `#E5534B` | Offene Kurvenenden, ungültige HUD-Eingabe, Kernel-Fehler |
+
+## Skizzen (`crates/qoob3d-app/src/sketch_ui.rs`, SK-VS-*)
+
+| Element | Darstellung |
+| --- | --- |
+| Kurven der aktiven Skizze | `ACCENT`, 1,6 pt; Auswahl/Hover heller und breiter |
+| Konstruktion | `CONSTRUCTION`, gestrichelt |
+| Profile | `ACCENT` mit ~12 % Deckkraft, Hover ~25 % |
+| Offene Enden | `ERROR`-Punkt |
+| Vorschau beim Zeichnen | gestrichelt, `ACCENT` (im Konstruktionsmodus `CONSTRUCTION`) |
+| Fangen | Symbol am Cursor, Ausrichtungslinien gestrichelt |
+| Werte-HUD | deckend `PANEL_BG`, Monospace, aktives Feld `ACCENT`, Fehler `ERROR` |
+| Inaktive Skizzen | dünn, grau, ohne Profile |
+
+Aussehen prüfen: `cargo xtask screenshot` → `sketch-plane-pick.png`, `sketch.png`.
 
 ## Farben – Viewport (linear, `crates/qoob3d-render/src/renderer.rs::palette`)
 

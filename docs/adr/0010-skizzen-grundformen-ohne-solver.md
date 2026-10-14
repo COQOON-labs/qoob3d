@@ -1,12 +1,12 @@
 ---
 id: ADR-0010
 title: Skizzen bestehen im MVP aus Grundformen mit eigenen Maßen, ohne Constraint-Solver
-status: akzeptiert
+status: ersetzt
 date: 2026-10-13
 crates: [qoob3d-core]
 tags: [skizze, dokumentmodell]
 supersedes: []
-superseded_by: null
+superseded_by: ADR-0024
 ---
 
 ## Kontext

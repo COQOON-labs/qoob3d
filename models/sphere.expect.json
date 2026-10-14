@@ -1,0 +1,17 @@
+{
+  "why": "Kugel r=15: V = 4/3·π·r³",
+  "bodies": 1,
+  "volume_mm3": 14137.166941154068,
+  "volume_rel_tol": 1e-05,
+  "bbox_min": [
+    -15,
+    -15,
+    -15
+  ],
+  "bbox_max": [
+    15,
+    15,
+    15
+  ],
+  "bbox_tol": 0.06
+}

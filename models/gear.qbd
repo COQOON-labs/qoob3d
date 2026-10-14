@@ -1,0 +1,25 @@
+{
+  "format": "qoob3d",
+  "format_version": 2,
+  "document": {
+    "features": [
+      {
+        "id": 1,
+        "name": "Gear1",
+        "kind": {
+          "type": "SpurGear",
+          "plane": {
+            "Origin": "XY"
+          },
+          "module": 2.0,
+          "teeth": 20,
+          "pressure_angle_deg": 20.0,
+          "thickness": 8.0,
+          "bore": 8.0,
+          "operation": "new_body"
+        }
+      }
+    ],
+    "next_feature_id": 2
+  }
+}

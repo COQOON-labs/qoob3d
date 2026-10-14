@@ -9,16 +9,20 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, CursorIcon, Event, Modifiers, PointerButton, Pos2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable as _;
-use qoob3d_app::QoobApp;
 use qoob3d_app::i18n::{self, Language};
 use qoob3d_app::viewcube::CubeFace;
+use qoob3d_app::{Mode, QoobApp, StartOptions};
 use qoob3d_render::Projection;
 
+fn harness(demo: bool) -> Harness<'static, QoobApp> {
+    Harness::builder().with_size(egui::vec2(1440.0, 860.0)).wgpu().build_eframe(move |cc| {
+        QoobApp::new(cc, StartOptions { demo, ..Default::default() }).expect("app starts")
+    })
+}
+
+/// The app with the demo body loaded (navigation tests need geometry).
 fn app() -> Harness<'static, QoobApp> {
-    let mut harness = Harness::builder()
-        .with_size(egui::vec2(1440.0, 860.0))
-        .wgpu()
-        .build_eframe(|cc| QoobApp::new(cc, None).expect("app starts"));
+    let mut harness = harness(true);
     let start = Instant::now();
     while !harness.state().has_model() {
         assert!(start.elapsed() < Duration::from_secs(60), "kernel did not deliver a model");
@@ -313,4 +317,213 @@ fn screenshot_when_requested() {
     let path = std::path::Path::new(&dir).join("printer-list.png");
     image.save(&path).expect("write screenshot");
     println!("screenshot: {}", path.display());
+
+    // Plane pick with the cursor over XY.
+    let mut harness = harness_empty();
+    harness.key_press(egui::Key::S);
+    harness.run_steps(2);
+    let xy = harness.state().plane_screen_pos(qoob3d_core::document::OriginPlane::XY).unwrap();
+    harness.event(Event::PointerMoved(xy));
+    harness.run_steps(2);
+    save_screenshot(&mut harness, &dir, "sketch-plane-pick.png");
+
+    // Sketch: a closed rectangle, a circle, a construction line and a
+    // rectangle in progress with the value HUD.
+    click_at(&mut harness, xy);
+    settle(&mut harness);
+    let at = |h: &Harness<'_, QoobApp>, p: [f64; 2]| h.state().sketch_screen_pos(p).unwrap();
+    harness.key_press(egui::Key::R);
+    harness.run_steps(1);
+    for p in [[-20.0, -10.0], [10.0, 12.0]] {
+        let s = at(&harness, p);
+        click_at(&mut harness, s);
+    }
+    harness.key_press(egui::Key::C);
+    harness.run_steps(1);
+    for p in [[-5.0, 1.0], [1.0, 1.0]] {
+        let s = at(&harness, p);
+        click_at(&mut harness, s);
+    }
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(1);
+    harness.key_press(egui::Key::L);
+    harness.run_steps(1);
+    harness.key_press(egui::Key::X);
+    harness.run_steps(1);
+    for p in [[-25.0, 0.0], [15.0, 0.0]] {
+        let s = at(&harness, p);
+        click_at(&mut harness, s);
+    }
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(1);
+    harness.key_press(egui::Key::R);
+    harness.run_steps(1);
+    let s = at(&harness, [14.0, 4.0]);
+    click_at(&mut harness, s);
+    let s = at(&harness, [19.0, 9.0]);
+    harness.event(Event::PointerMoved(s));
+    harness.run_steps(1);
+    type_text(&mut harness, "8");
+    wait_until(&mut harness, "profiles", |a| !a.project().is_rebuilding());
+    harness.run_steps(2);
+    save_screenshot(&mut harness, &dir, "sketch.png");
+}
+
+fn save_screenshot(harness: &mut Harness<'_, QoobApp>, dir: &std::ffi::OsStr, name: &str) {
+    let image = harness.render().expect("render");
+    let path = std::path::Path::new(dir).join(name);
+    image.save(&path).expect("write screenshot");
+    println!("screenshot: {}", path.display());
+}
+
+fn harness_empty() -> Harness<'static, QoobApp> {
+    let mut harness = harness(false);
+    harness.run_steps(3);
+    harness
+}
+
+// ------------------------------------------------------------------ sketching
+
+fn wait_until(harness: &mut Harness<'_, QoobApp>, what: &str, done: impl Fn(&QoobApp) -> bool) {
+    let start = Instant::now();
+    while !done(harness.state()) {
+        assert!(start.elapsed() < Duration::from_secs(30), "timed out waiting for {what}");
+        harness.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn sketch_curves(app: &QoobApp) -> usize {
+    match app.mode() {
+        Mode::Sketch(s) => app.project().doc().sketch(s.feature).map_or(0, |k| k.curves.len()),
+        _ => 0,
+    }
+}
+
+fn profiles(app: &QoobApp) -> usize {
+    match app.mode() {
+        Mode::Sketch(s) => app.project().profiles(s.feature).len(),
+        _ => 0,
+    }
+}
+
+fn type_text(harness: &mut Harness<'_, QoobApp>, text: &str) {
+    harness.event(Event::Text(text.into()));
+    harness.run_steps(1);
+}
+
+/// SK-QA-04: create a sketch on XY, draw a rectangle with typed size, get a
+/// profile, finish – then undo/redo the whole sketch as one step.
+#[test]
+fn sketch_rectangle_with_typed_values_end_to_end() {
+    let mut harness = harness(false);
+    harness.run_steps(3);
+    harness.key_press(egui::Key::S);
+    harness.run_steps(2);
+    assert!(matches!(harness.state().mode(), Mode::PickPlane), "S starts the plane pick");
+    let xy = harness.state().plane_screen_pos(qoob3d_core::document::OriginPlane::XY).unwrap();
+    click_at(&mut harness, xy);
+    settle(&mut harness);
+    assert!(matches!(harness.state().mode(), Mode::Sketch(_)), "picking a plane starts sketching");
+
+    harness.key_press(egui::Key::R);
+    harness.run_steps(1);
+    let origin = harness.state().sketch_screen_pos([0.0, 0.0]).unwrap();
+    click_at(&mut harness, origin);
+    // Move the cursor into the +x/+y quadrant, then type the size.
+    let toward = harness.state().sketch_screen_pos([10.0, 10.0]).unwrap();
+    harness.event(Event::PointerMoved(toward));
+    harness.run_steps(1);
+    type_text(&mut harness, "40");
+    harness.key_press(egui::Key::Tab);
+    harness.run_steps(1);
+    type_text(&mut harness, "25");
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    assert_eq!(sketch_curves(harness.state()), 4);
+
+    let app = harness.state();
+    let Mode::Sketch(session) = app.mode() else { panic!("still sketching") };
+    let sketch = app.project().doc().sketch(session.feature).unwrap();
+    let max = sketch.points.iter().fold([f64::MIN; 2], |m, p| [m[0].max(p.x), m[1].max(p.y)]);
+    assert!((max[0] - 40.0).abs() < 1e-9 && (max[1] - 25.0).abs() < 1e-9, "{max:?}");
+
+    wait_until(&mut harness, "profile", |a| profiles(a) == 1);
+
+    harness.key_press(egui::Key::Escape); // end the tool
+    harness.run_steps(1);
+    harness.key_press(egui::Key::Enter); // finish sketch
+    harness.run_steps(2);
+    assert!(matches!(harness.state().mode(), Mode::Model));
+    assert_eq!(harness.get_all_by_label("✏ Sketch1").count(), 2, "browser and timeline");
+
+    // The whole session is one undo step.
+    harness.key_press_modifiers(Modifiers::COMMAND, egui::Key::Z);
+    harness.run_steps(2);
+    assert!(harness.state().project().doc().features.is_empty(), "undo removes the sketch");
+    harness.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, egui::Key::Z);
+    harness.run_steps(2);
+    assert_eq!(harness.state().project().doc().features.len(), 1, "redo restores it");
+}
+
+/// A line chain that returns to its start point closes and forms a profile.
+#[test]
+fn polyline_closes_into_a_profile() {
+    let mut harness = harness(false);
+    harness.run_steps(3);
+    harness.get_by_label("✏ Create Sketch").click();
+    harness.run_steps(2);
+    let xy = harness.state().plane_screen_pos(qoob3d_core::document::OriginPlane::XY).unwrap();
+    click_at(&mut harness, xy);
+    settle(&mut harness);
+    harness.get_by_label("∕ Line").click();
+    harness.run_steps(1);
+    // Small enough to stay clear of the sketch palette on the right.
+    for p in [[0.0, 0.0], [15.0, 0.0], [15.0, 10.0], [0.0, 0.0]] {
+        let s = harness.state().sketch_screen_pos(p).unwrap();
+        click_at(&mut harness, s);
+    }
+    assert_eq!(sketch_curves(harness.state()), 3);
+    wait_until(&mut harness, "triangle profile", |a| profiles(a) == 1);
+}
+
+/// Every non-ASCII character in UI texts (translations and code literals)
+/// must exist in the bundled fonts, otherwise egui draws "□".
+#[test]
+fn every_ui_glyph_exists_in_the_fonts() {
+    let harness = harness(false);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut texts = Vec::new();
+    for dir in ["locales/en", "locales/de"] {
+        texts.push(std::fs::read_to_string(root.join(dir).join("main.ftl")).unwrap());
+    }
+    for entry in std::fs::read_dir(root.join("src")).unwrap() {
+        let path = entry.unwrap().path();
+        let source = std::fs::read_to_string(&path).unwrap();
+        // String literals only; comments may use any character.
+        for line in source.lines().filter(|l| !l.trim_start().starts_with("//")) {
+            texts.extend(line.split('"').skip(1).step_by(2).map(str::to_string));
+        }
+    }
+    // `Fonts::has_glyph` reports false negatives (epaint TODO), so compare
+    // the rendered glyph with the replacement glyph instead.
+    let uv = |c: char| {
+        harness.ctx.fonts_mut(|f| {
+            let galley = f.layout_no_wrap(
+                c.to_string(),
+                egui::FontId::proportional(14.0),
+                egui::Color32::WHITE,
+            );
+            galley.rows[0].glyphs[0].uv_rect
+        })
+    };
+    let replacement = uv('\u{10FFFD}');
+    let mut missing: Vec<char> = texts
+        .iter()
+        .flat_map(|t| t.chars())
+        .filter(|c| !c.is_ascii() && uv(*c) == replacement)
+        .collect();
+    missing.sort_unstable();
+    missing.dedup();
+    assert!(missing.is_empty(), "glyphs missing in the UI font: {missing:?}");
 }

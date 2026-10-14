@@ -1,0 +1,127 @@
+{
+  "format": "qoob3d",
+  "format_version": 2,
+  "document": {
+    "features": [
+      {
+        "id": 1,
+        "name": "Sketch1",
+        "kind": {
+          "type": "Sketch",
+          "plane": {
+            "Origin": "XY"
+          },
+          "points": [
+            {
+              "id": 1,
+              "x": -15.0,
+              "y": -15.0
+            },
+            {
+              "id": 2,
+              "x": 15.0,
+              "y": -15.0
+            },
+            {
+              "id": 3,
+              "x": 15.0,
+              "y": 15.0
+            },
+            {
+              "id": 4,
+              "x": -15.0,
+              "y": 15.0
+            }
+          ],
+          "curves": [
+            {
+              "id": 5,
+              "type": "Line",
+              "start": 1,
+              "end": 2
+            },
+            {
+              "id": 6,
+              "type": "Line",
+              "start": 2,
+              "end": 3
+            },
+            {
+              "id": 7,
+              "type": "Line",
+              "start": 3,
+              "end": 4
+            },
+            {
+              "id": 8,
+              "type": "Line",
+              "start": 4,
+              "end": 1
+            }
+          ],
+          "next_id": 9,
+          "visible": true
+        }
+      },
+      {
+        "id": 2,
+        "name": "Plane1",
+        "kind": {
+          "type": "Plane",
+          "base": {
+            "Origin": "XY"
+          },
+          "offset": 25.0
+        }
+      },
+      {
+        "id": 3,
+        "name": "Sketch2",
+        "kind": {
+          "type": "Sketch",
+          "plane": {
+            "Construction": 2
+          },
+          "points": [
+            {
+              "id": 1,
+              "x": 0.0,
+              "y": 0.0
+            }
+          ],
+          "curves": [],
+          "next_id": 2,
+          "visible": true
+        }
+      },
+      {
+        "id": 4,
+        "name": "Loft1",
+        "kind": {
+          "type": "Loft",
+          "sections": [
+            {
+              "Profile": {
+                "sketch": 1,
+                "key": [
+                  5,
+                  6,
+                  7,
+                  8
+                ]
+              }
+            },
+            {
+              "Point": {
+                "sketch": 3,
+                "point": 1
+              }
+            }
+          ],
+          "operation": "new_body"
+        }
+      }
+    ],
+    "next_feature_id": 5
+  }
+}

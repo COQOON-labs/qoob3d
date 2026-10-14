@@ -1,6 +1,6 @@
 # Anforderungen: Skizzen
 
-Stand: 2026-10-13 · Status: **Entwurf zur Abstimmung** · Gilt ab M3
+Stand: 2026-10-13 · Status: **abgestimmt** (alle Empfehlungen aus Abschnitt 17 angenommen, ADR-0024 bis ADR-0029) · Gilt ab M3
 
 Dieses Dokument beschreibt vollständig, was Skizzieren in QOOB3D können muss: Ebenen
 (auch schräge), Werkzeuge, Eingabe, Fangen, Bedingungen, Bemaßung, Profile, Datenmodell,
@@ -332,12 +332,12 @@ classDiagram
 
 | ID | Anforderung | Prio | Phase |
 | --- | --- | --- | --- |
-| SK-DT-01 | **Punkte sind eigene Entitäten**, Kurven referenzieren Punkt-IDs (Linie = 2 Punkte, Kreis = Mittelpunkt + Radius). Damit ist Koinzidenz eine echte Beziehung statt Koordinatengleichheit. **Dies ersetzt ADR-0010** (Grundformen), siehe E-02. | MUSS | A |
+| SK-DT-01 | **Punkte sind eigene Entitäten**, Kurven referenzieren Punkt-IDs (Linie = 2 Punkte, Kreis = Mittelpunkt + Radius). Damit ist Koinzidenz eine echte Beziehung statt Koordinatengleichheit. Entschieden in **ADR-0024** (ersetzt die frühere Grundformen-Entscheidung), siehe E-02. | MUSS | A |
 | SK-DT-02 | Das Rechteck ist kein eigener Typ, sondern 4 Linien + Bedingungen. Das Werkzeug merkt sich nur die Gruppe für die gemeinsame Auswahl. | MUSS | A |
 | SK-DT-03 | Alle IDs sind stabil, eindeutig und werden nie wiederverwendet (Zähler pro Skizze). | MUSS | A |
 | SK-DT-04 | Werte, die der Nutzer eingibt, werden als **Ausdruck** gespeichert (`Expr`, Text + ausgewerteter Cache), nicht nur als Zahl. | MUSS | A |
 | SK-DT-05 | Skizzenkoordinaten in `f64` mm im lokalen System. Ohne Solver (A) sind sie die Wahrheit, mit Solver (B) der Startwert. | MUSS | A |
-| SK-DT-06 | Serialisierung im Projektformat (ADR-0009) mit Migrationen. Fixture-Dateien pro Formatversion. | MUSS | A |
+| SK-DT-06 | Serialisierung im Projektformat (ADR-0030) mit Migrationen. Fixture-Dateien pro Formatversion. | MUSS | A |
 | SK-DT-07 | Projektionen speichern die Quelle (Feature + Element-Referenz) und werden beim Rebuild aktualisiert. | MUSS | C |
 
 ---
@@ -357,9 +357,10 @@ classDiagram
 | SK-VS-09 | Vorschau beim Zeichnen | gestrichelt, Mint | A |
 | SK-VS-10 | Inaktive Skizzen (außerhalb des Modus) | dünn, grau, Profile unsichtbar; Sichtbarkeit pro Skizze im Browser schaltbar | A |
 
-Linien werden mit der bestehenden Linien-Pipeline gezeichnet (Quads in Pixelbreite,
-Tiefenversatz, ADR-0019). Für Strichelung kommt ein Muster-Parameter hinzu.
-Bemaßungstext entsteht wie die ViewCube-Beschriftung als Text-Mesh in der Ebene (ADR-0015).
+Skizzen werden als egui-Overlay über dem Viewport gezeichnet (Kurven, Strichelung,
+Profilflächen als Mesh, Fangsymbole, HUD), nicht in der wgpu-Linien-Pipeline (ADR-0027).
+Das Raster liegt in der Skizzenebene (wgpu, `GridPlane`). Bemaßungstext entsteht wie die
+ViewCube-Beschriftung als Text-Mesh in der Ebene (ADR-0015).
 
 ---
 
@@ -438,7 +439,7 @@ druckbares Teil möglich.
 | ID | Frage | Empfehlung |
 | --- | --- | --- |
 | E-01 | Welcher Solver? | Kurzer Vergleich (Spike) vor M3b. Kandidaten: (a) **eigener Löser in Rust** (Newton/Levenberg-Marquardt + DOF-Analyse über Jacobi-Rang); (b) **planegcs** aus FreeCAD (C++, LGPL-2.1, ausgereift, braucht Eigen/Boost); (c) SolveSpace-Solver (**GPL-3** → nur bei GPL-Lizenz möglich). Empfehlung: (a) gegen (b) im Spike vergleichen, Ergebnis als ADR. |
-| E-02 | Punkte als Entitäten statt Grundformen (ersetzt ADR-0010)? | **Ja**, schon in M3a. Spätere Migration wäre teurer als jetzt. |
+| E-02 | Punkte als Entitäten statt Grundformen? → **entschieden: ADR-0024** | **Ja**, schon in M3a. Spätere Migration wäre teurer als jetzt. |
 | E-03 | Solver vorziehen (MVP-Ausschluss aufheben)? | **Ja**, als M3b direkt nach M3a/M4. |
 | E-04 | Topological Naming für Skizzen auf Flächen | Vor M3c eigene ADR. Kandidat: Flächen über erzeugendes Feature + Herkunft (z. B. „Deckfläche von Extrusion 3, Profil X“) statt Index. |
 | E-05 | Profil-Identität nach Trimmen/Teilen | Neue Kurven tragen die Herkunfts-ID der Ursprungskurve; Profilschlüssel = Menge der Herkunfts-IDs plus Seite. Details im M3b-ADR. |
@@ -448,10 +449,35 @@ druckbares Teil möglich.
 | E-09 | Automatische Bedingungen aus Fangen standardmäßig an? | Ja (wie Fusion). Mit Cmd/Ctrl temporär aus. |
 | E-10 | Reihenfolge M3a → M4 → M3b → M3c? | Ja, siehe Abschnitt 16. |
 
+## 18. Umsetzungsstand
+
+Stand nach M3a (2026-10-13). Alle Phase-A-Anforderungen sind umgesetzt, außer:
+
+| ID | Stand | Wann |
+| --- | --- | --- |
+| SK-LC-06 | Bearbeiten per Doppelklick geht. Zurückrollen der Timeline entfällt, solange es keine Features nach Skizzen gibt | M4 |
+| SK-LC-09 | Leere Skizzen werden gespeichert, aber in der Timeline nicht als „leer“ markiert | offen (KANN) |
+| SK-PL-03 | Look At immer von +n, Rückseite noch nicht wählbar | M3c |
+| SK-PL-04 | Ebenen-Hover hebt die Ebene hervor, u/v-Achsen fehlen | offen |
+| SK-UI-02 | Raster liegt in der Skizzenebene; das Welt-Raster wird nicht zusätzlich gedimmt, weil es ersetzt wird | erfüllt im Sinn |
+| SK-UI-08 | Shift erweitert die Auswahl, Cmd noch nicht | offen |
+| SK-SN-04 | Fangsymbole und Ausrichtungslinien ja, Tooltip mit dem Namen fehlt | offen |
+| SK-DT-02 | Rechteck = 4 Linien; gemeinsame Gruppenauswahl fehlt | M3b (mit H/V-Bedingungen) |
+| SK-DT-04 | Eingaben werden als Ausdruck ausgewertet (`core::expr`), gespeichert wird nur die Geometrie. Ausdrücke speichern Bemaßungen | M3b |
+| SK-KN-03 | Profile als 2D-Polygone ja; B-Rep für Features | M4 |
+
+Vorgezogen aus Phase B (für die Kugel, M4): Bogen um Mittelpunkt (SK-TL-09 teilweise,
+Werkzeug A). 3-Punkt- und Tangentenbogen folgen mit M3b.
+
+Tests: Werkzeuge, Fangen, Auswahl, Bearbeiten in `qoob3d-sketch`; Profile in
+`qoob3d-kernel/src/profiles.rs`; Format, Validierung und Fixture in `qoob3d-core`; Ende-zu-Ende
+(Ebene wählen → Rechteck mit getippten Maßen → Profil → Beenden → Undo/Redo, Polylinie
+schließen) in `crates/qoob3d-app/tests/ui.rs`; echte App in `--smoke-test`.
+
 ## Verweise
 
-- ADR-0002 (FDM-Fokus), ADR-0005 (Kernel-Thread), ADR-0006 (Koordinaten), ADR-0009
-  (Projektformat), ADR-0010 (Grundformen, wird voraussichtlich ersetzt), ADR-0011
+- ADR-0002 (FDM-Fokus), ADR-0005 (Kernel-Thread), ADR-0006 (Koordinaten), ADR-0030
+  (Projektformat), ADR-0011
   (Profilreferenzen), ADR-0012 (Rebuild), ADR-0014 (OCCT-Wrapper), ADR-0015 (Overlays),
   ADR-0019 (Rendering), ADR-0020 (i18n), ADR-0021 (Drucker), ADR-0022 (Linksziehen-Orbit)
 - `docs/design/bedienung.md`, `docs/design/theme.md`

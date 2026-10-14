@@ -2,16 +2,18 @@
 //!
 //! ```text
 //! cargo xtask check [--fast]   definition of done
-//! cargo xtask arch             crate dependency rules (ADR-0003)
+//! cargo xtask arch             crate dependency rules (ADR-0036)
 //! cargo xtask docs [--fix]     documentation lint, regenerates the ADR index (ADR-0001)
 //! cargo xtask screenshot [dir] UI screenshot + scene renders for visual review (ADR-0018)
 //! cargo xtask i18n             translation keys complete and used keys defined (ADR-0020)
 //! cargo xtask printers <dir>   regenerate the printer database from OrcaSlicer (ADR-0021)
+//! cargo xtask models [--write] reference models: build, measure, export (ADR-0033)
 //! ```
 
 mod arch;
 mod docs;
 mod i18n;
+mod models;
 mod printers;
 
 use std::path::{Path, PathBuf};
@@ -29,6 +31,8 @@ fn main() -> ExitCode {
         Some("docs") => report("docs", docs::check(&root, flag("--fix"))),
         Some("screenshot") => screenshot(&root, args.get(1).map(PathBuf::from)),
         Some("i18n") => report("i18n", i18n::check(&root)),
+        Some("models") if flag("--write") => report("models", models::write(&root)),
+        Some("models") => models_step(&root),
         Some("printers") => match args.get(1) {
             Some(dir) => report("printers", printers::generate(&root, Path::new(dir))),
             None => {
@@ -38,7 +42,7 @@ fn main() -> ExitCode {
         },
         _ => {
             eprintln!(
-                "usage: cargo xtask <check [--fast] | arch | docs [--fix] | screenshot [dir]>"
+                "usage: cargo xtask <check [--fast] | arch | docs [--fix] | i18n | models [--write] | screenshot [dir]>"
             );
             return ExitCode::from(2);
         }
@@ -83,6 +87,7 @@ fn check(root: &Path, fast: bool) -> bool {
         ("arch", Step::Internal(|root| report("arch", arch::check(root)))),
         ("docs", Step::Internal(|root| report("docs", docs::check(root, false)))),
         ("i18n", Step::Internal(|root| report("i18n", i18n::check(root)))),
+        ("models", Step::Internal(models_step)),
     ];
     if !fast {
         steps.push(("deny", Step::Cargo(&["deny", "--log-level", "error", "check"])));
@@ -123,12 +128,17 @@ fn screenshot(root: &Path, dir: Option<PathBuf>) -> bool {
         eprintln!("{}: {err}", dir.display());
         return false;
     }
-    let ok = Command::new("cargo")
-        .args(["test", "--quiet", "-p", "qoob3d-app", "--test", "ui", "screenshot_when_requested"])
-        .current_dir(root)
-        .env("QOOB3D_SCREENSHOT_DIR", &dir)
-        .status()
-        .is_ok_and(|s| s.success())
+    let shoot = |test: &str| {
+        Command::new("cargo")
+            .args(["test", "--quiet", "-p", "qoob3d-app", "--test", test])
+            .arg("screenshot_when_requested")
+            .current_dir(root)
+            .env("QOOB3D_SCREENSHOT_DIR", &dir)
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    let ok = shoot("ui")
+        && shoot("modeling")
         && run(root, "cargo", &["build", "--quiet", "--package", "qoob3d-app"]);
     if !ok {
         return false;
@@ -141,8 +151,32 @@ fn screenshot(root: &Path, dir: Option<PathBuf>) -> bool {
             return false;
         }
     }
+    // Every reference model (ADR-0033).
+    let models = root.join("models");
+    let mut names: Vec<String> = std::fs::read_dir(&models)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.strip_suffix(".qbd").map(str::to_string))
+        .collect();
+    names.sort();
+    for name in names {
+        let file = models.join(format!("{name}.qbd"));
+        let out = dir.join(format!("model-{name}.png"));
+        let args =
+            [&*file.to_string_lossy(), "--render", &out.to_string_lossy(), "--size", "900x600"];
+        if !run(root, &binary.to_string_lossy(), &args) {
+            return false;
+        }
+    }
     println!("screenshots in {}", dir.display());
     true
+}
+
+/// Builds the binary, then checks every reference model through it.
+fn models_step(root: &Path) -> bool {
+    run(root, "cargo", &["build", "--quiet", "--package", "qoob3d-app"])
+        && report("models", models::check(root))
 }
 
 fn smoke(root: &Path) -> bool {

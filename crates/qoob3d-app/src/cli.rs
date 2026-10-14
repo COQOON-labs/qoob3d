@@ -9,6 +9,13 @@ use qoob3d_render::ViewPreset;
 #[derive(Debug, Parser)]
 #[command(name = "qoob3d", version, about = "QOOB3D – parametrisches CAD für den FDM-Druck")]
 pub struct Cli {
+    /// `.qbd` file to open.
+    pub file: Option<PathBuf>,
+
+    /// Show the demo body (block with a hole) in addition to the document.
+    #[arg(long)]
+    pub demo: bool,
+
     /// Render headless (no window) into this PNG file and exit.
     #[arg(long, value_name = "PNG")]
     pub render: Option<PathBuf>,
@@ -36,6 +43,15 @@ pub struct Cli {
     /// Show the build volume wireframe in --render.
     #[arg(long)]
     pub volume: bool,
+
+    /// Export the bodies of FILE headless to this .stl or .3mf and exit.
+    #[arg(long, value_name = "STL|3MF", requires = "file")]
+    pub export: Option<PathBuf>,
+
+    /// Rebuild FILE headless and print a JSON report (bodies, volumes,
+    /// validity, feature errors). Exit code 1 if anything is not printable.
+    #[arg(long, requires = "file")]
+    pub report: bool,
 
     /// Start the real app, drive it with synthetic input, verify the effect
     /// and exit with code 0 (ok) or 1 (failure). A watchdog catches hangs.

@@ -1,0 +1,175 @@
+{
+  "format": "qoob3d",
+  "format_version": 2,
+  "document": {
+    "features": [
+      {
+        "id": 1,
+        "name": "Sketch1",
+        "kind": {
+          "type": "Sketch",
+          "plane": {
+            "Origin": "XY"
+          },
+          "points": [
+            {
+              "id": 1,
+              "x": -30.0,
+              "y": -20.0
+            },
+            {
+              "id": 2,
+              "x": 30.0,
+              "y": -20.0
+            },
+            {
+              "id": 3,
+              "x": 30.0,
+              "y": 20.0
+            },
+            {
+              "id": 4,
+              "x": -30.0,
+              "y": 20.0
+            }
+          ],
+          "curves": [
+            {
+              "id": 5,
+              "type": "Line",
+              "start": 1,
+              "end": 2
+            },
+            {
+              "id": 6,
+              "type": "Line",
+              "start": 2,
+              "end": 3
+            },
+            {
+              "id": 7,
+              "type": "Line",
+              "start": 3,
+              "end": 4
+            },
+            {
+              "id": 8,
+              "type": "Line",
+              "start": 4,
+              "end": 1
+            }
+          ],
+          "next_id": 9,
+          "visible": true
+        }
+      },
+      {
+        "id": 2,
+        "name": "Extrude1",
+        "kind": {
+          "type": "Extrude",
+          "profiles": [
+            {
+              "sketch": 1,
+              "key": [
+                5,
+                6,
+                7,
+                8
+              ]
+            }
+          ],
+          "distance": 5.0,
+          "operation": "new_body"
+        }
+      },
+      {
+        "id": 3,
+        "name": "Plane1",
+        "kind": {
+          "type": "Plane",
+          "base": {
+            "Origin": "XY"
+          },
+          "offset": 5.0
+        }
+      },
+      {
+        "id": 4,
+        "name": "Sketch2",
+        "kind": {
+          "type": "Sketch",
+          "plane": {
+            "Construction": 3
+          },
+          "points": [
+            {
+              "id": 1,
+              "x": 0.0,
+              "y": 0.0
+            }
+          ],
+          "curves": [
+            {
+              "id": 2,
+              "type": "Circle",
+              "center": 1,
+              "radius": 5.0
+            },
+            {
+              "id": 3,
+              "type": "Circle",
+              "center": 1,
+              "radius": 3.0
+            }
+          ],
+          "next_id": 4,
+          "visible": true
+        }
+      },
+      {
+        "id": 5,
+        "name": "Extrude2",
+        "kind": {
+          "type": "Extrude",
+          "profiles": [
+            {
+              "sketch": 4,
+              "key": [
+                2,
+                3
+              ]
+            },
+            {
+              "sketch": 4,
+              "key": [
+                3
+              ]
+            }
+          ],
+          "distance": 8.0,
+          "operation": "join"
+        }
+      },
+      {
+        "id": 6,
+        "name": "Extrude3",
+        "kind": {
+          "type": "Extrude",
+          "profiles": [
+            {
+              "sketch": 4,
+              "key": [
+                3
+              ]
+            }
+          ],
+          "distance": 40.0,
+          "symmetric": true,
+          "operation": "cut"
+        }
+      }
+    ],
+    "next_feature_id": 7
+  }
+}

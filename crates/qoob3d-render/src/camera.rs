@@ -30,6 +30,16 @@ pub struct Camera {
     pub projection: Projection,
 }
 
+/// Spacing of the visible grid lines for a camera distance, matching the
+/// level of detail in the grid shader (`fs_grid`): powers of ten, switching
+/// to the next coarser level once the finer lines fade out. Used for
+/// sketch grid snapping.
+pub fn grid_snap_step(distance: f32) -> f32 {
+    let lod = distance.max(1e-3).log10() - 1.0;
+    let base = 10f32.powf(lod.floor());
+    if lod.fract() < 0.5 { base } else { base * 10.0 }
+}
+
 /// A world-space ray; `dir` is normalised.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Ray {
@@ -369,6 +379,13 @@ mod tests {
         let p = persp.target + persp.up() * persp.half_height_at_target();
         assert!((persp.project(p, 1.0).unwrap().y - 1.0).abs() < 1e-4);
         assert!((ortho.project(p, 1.0).unwrap().y - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn grid_snap_step_follows_zoom() {
+        assert_eq!(grid_snap_step(100.0), 10.0);
+        assert_eq!(grid_snap_step(20.0), 1.0);
+        assert_eq!(grid_snap_step(50.0), 10.0, "fine lines faded → coarser step");
     }
 
     #[test]

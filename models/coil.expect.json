@@ -1,0 +1,17 @@
+{
+  "why": "Schraube Ø20, 5 Windungen, Steigung 4, Draht Ø2: V = π·1²·5·√((20π)²+4²)",
+  "bodies": 1,
+  "volume_mm3": 988.9584177812836,
+  "volume_rel_tol": 0.01,
+  "bbox_min": [
+    -11,
+    -11,
+    -1
+  ],
+  "bbox_max": [
+    11,
+    11,
+    21
+  ],
+  "bbox_tol": 0.1
+}

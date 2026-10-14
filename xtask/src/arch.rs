@@ -1,4 +1,4 @@
-//! Crate dependency rules from ADR-0003, checked against `cargo metadata`.
+//! Crate dependency rules from ADR-0036, checked against `cargo metadata`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -7,13 +7,15 @@ use std::process::Command;
 use serde_json::Value;
 
 const WORKSPACE_CRATES: &[&str] =
-    &["qoob3d-core", "qoob3d-kernel", "qoob3d-render", "qoob3d-app", "xtask"];
+    &["qoob3d-core", "qoob3d-sketch", "qoob3d-kernel", "qoob3d-render", "qoob3d-app", "xtask"];
 
 /// Allowed direct dependencies on other workspace crates.
 fn allowed_workspace_deps(krate: &str) -> &'static [&'static str] {
     match krate {
-        "qoob3d-kernel" | "qoob3d-render" => &["qoob3d-core"],
-        "qoob3d-app" => &["qoob3d-core", "qoob3d-kernel", "qoob3d-render"],
+        "qoob3d-sketch" | "qoob3d-kernel" | "qoob3d-render" => &["qoob3d-core"],
+        "qoob3d-app" => &["qoob3d-core", "qoob3d-sketch", "qoob3d-kernel", "qoob3d-render"],
+        // Gates read models and exports; geometry is checked via the binary.
+        "xtask" => &["qoob3d-core"],
         _ => &[],
     }
 }
@@ -23,7 +25,8 @@ fn forbidden_transitive(krate: &str) -> &'static [&'static str] {
     const OCCT: [&str; 3] = ["opencascade", "opencascade-sys", "occt-sys"];
     const GPU_UI: [&str; 5] = ["wgpu", "eframe", "egui", "egui-wgpu", "winit"];
     match krate {
-        "qoob3d-core" => &[
+        // Pure crates: no kernel, GPU or UI, not even transitively.
+        "qoob3d-core" | "qoob3d-sketch" => &[
             "opencascade",
             "opencascade-sys",
             "occt-sys",
@@ -60,7 +63,7 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
         for dep in direct.iter().filter(|d| WORKSPACE_CRATES.contains(&d.as_str())) {
             if !allowed_workspace_deps(krate).contains(&dep.as_str()) {
                 problems.push(format!(
-                    "{krate} → {dep} ist nicht erlaubt (ADR-0003; erlaubt: {:?})",
+                    "{krate} → {dep} ist nicht erlaubt (ADR-0036; erlaubt: {:?})",
                     allowed_workspace_deps(krate)
                 ));
             }
@@ -69,7 +72,7 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
         for &bad in forbidden_transitive(krate) {
             if reachable.contains(bad) {
                 problems.push(format!(
-                    "{krate} zieht (transitiv) `{bad}` – verboten nach ADR-0003. Pfad: {}",
+                    "{krate} zieht (transitiv) `{bad}` – verboten nach ADR-0036. Pfad: {}",
                     graph.path(krate, bad).join(" → ")
                 ));
             }

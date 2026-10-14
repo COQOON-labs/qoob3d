@@ -52,11 +52,54 @@ pub struct SceneOptions<'a> {
     pub show_build_volume: bool,
     /// UI scale: line widths are specified in points.
     pub pixels_per_point: f32,
+    /// Plane the grid lies in (active sketch plane); `None` = world XY.
+    /// The build plate is only shown on world XY.
+    pub grid_plane: Option<GridPlane>,
 }
 
 impl<'a> SceneOptions<'a> {
     pub fn new(bed: Option<&'a BedGeometry>) -> Self {
-        Self { show_grid: true, bed, show_build_volume: false, pixels_per_point: 1.0 }
+        Self {
+            show_grid: true,
+            bed,
+            show_build_volume: false,
+            pixels_per_point: 1.0,
+            grid_plane: None,
+        }
+    }
+}
+
+/// A plane frame for the grid: origin, in-plane axes u/v, normal n.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GridPlane {
+    pub origin: Vec3,
+    pub u: Vec3,
+    pub v: Vec3,
+    pub n: Vec3,
+}
+
+impl GridPlane {
+    pub const WORLD_XY: GridPlane =
+        GridPlane { origin: Vec3::ZERO, u: Vec3::X, v: Vec3::Y, n: Vec3::Z };
+
+    fn is_world_xy(&self) -> bool {
+        self.origin.abs_diff_eq(Vec3::ZERO, 1e-6)
+            && self.u.abs_diff_eq(Vec3::X, 1e-6)
+            && self.v.abs_diff_eq(Vec3::Y, 1e-6)
+    }
+}
+
+/// Colour of a grid axis: the world axis it runs along, else neutral.
+fn axis_colour(dir: Vec3) -> [f32; 4] {
+    let d = dir.normalize_or_zero();
+    if d.x.abs() > 0.99 {
+        palette::AXIS_X
+    } else if d.y.abs() > 0.99 {
+        palette::AXIS_Y
+    } else if d.z.abs() > 0.99 {
+        palette::AXIS_Z
+    } else {
+        [0.3, 0.3, 0.3, 0.8]
     }
 }
 
@@ -115,6 +158,10 @@ struct Globals {
     axis_x: [f32; 4],
     axis_y: [f32; 4],
     restricted: [f32; 4],
+    grid_origin: [f32; 4],
+    grid_u: [f32; 4],
+    grid_v: [f32; 4],
+    grid_n: [f32; 4],
 }
 
 #[repr(C)]
@@ -398,6 +445,8 @@ impl ViewportRenderer {
         self.update_bed(device, queue, options);
         let plate_size = options.bed.map_or([0.0, 0.0], |b| bed_size(&b.printable));
         let v4 = |v: Vec3, w: f32| v.extend(w).to_array();
+        let plane = options.grid_plane.unwrap_or(GridPlane::WORLD_XY);
+        let show_plate = options.bed.is_some() && plane.is_world_xy();
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
@@ -416,16 +465,20 @@ impl ViewportRenderer {
                 plate_size[0],
                 plate_size[1],
                 f32::from(u8::from(options.show_grid)),
-                f32::from(u8::from(options.bed.is_some())),
+                f32::from(u8::from(show_plate)),
             ],
             viewport: [size[0] as f32, size[1] as f32, options.pixels_per_point.max(0.5), 0.0],
             grid_minor: palette::GRID_MINOR,
             grid_major: palette::GRID_MAJOR,
             plate_fill: palette::PLATE_FILL,
             plate_border: palette::PLATE_BORDER,
-            axis_x: palette::AXIS_X,
-            axis_y: palette::AXIS_Y,
+            axis_x: axis_colour(plane.u),
+            axis_y: axis_colour(plane.v),
             restricted: palette::RESTRICTED,
+            grid_origin: v4(plane.origin, 1.0),
+            grid_u: v4(plane.u, 0.0),
+            grid_v: v4(plane.v, 0.0),
+            grid_n: v4(plane.n, 0.0),
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 

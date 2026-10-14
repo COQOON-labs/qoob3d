@@ -1,0 +1,315 @@
+{
+  "format": "qoob3d",
+  "format_version": 2,
+  "document": {
+    "features": [
+      {
+        "id": 1,
+        "name": "Sketch1",
+        "kind": {
+          "type": "Sketch",
+          "plane": {
+            "Origin": "XY"
+          },
+          "points": [
+            {
+              "id": 1,
+              "x": -15.0,
+              "y": -15.0
+            },
+            {
+              "id": 2,
+              "x": 15.0,
+              "y": -15.0
+            },
+            {
+              "id": 3,
+              "x": 15.0,
+              "y": 15.0
+            },
+            {
+              "id": 4,
+              "x": -15.0,
+              "y": 15.0
+            }
+          ],
+          "curves": [
+            {
+              "id": 5,
+              "type": "Line",
+              "start": 1,
+              "end": 2
+            },
+            {
+              "id": 6,
+              "type": "Line",
+              "start": 2,
+              "end": 3
+            },
+            {
+              "id": 7,
+              "type": "Line",
+              "start": 3,
+              "end": 4
+            },
+            {
+              "id": 8,
+              "type": "Line",
+              "start": 4,
+              "end": 1
+            }
+          ],
+          "next_id": 9,
+          "visible": true
+        }
+      },
+      {
+        "id": 2,
+        "name": "Plane1",
+        "kind": {
+          "type": "Plane",
+          "base": {
+            "Origin": "XY"
+          },
+          "offset": 25.0
+        }
+      },
+      {
+        "id": 3,
+        "name": "Sketch2",
+        "kind": {
+          "type": "Sketch",
+          "plane": {
+            "Construction": 2
+          },
+          "points": [
+            {
+              "id": 1,
+              "x": 0.0,
+              "y": 0.0
+            }
+          ],
+          "curves": [],
+          "next_id": 2,
+          "visible": true
+        }
+      },
+      {
+        "id": 4,
+        "name": "Loft1",
+        "kind": {
+          "type": "Loft",
+          "sections": [
+            {
+              "Profile": {
+                "sketch": 1,
+                "key": [
+                  5,
+                  6,
+                  7,
+                  8
+                ]
+              }
+            },
+            {
+              "Point": {
+                "sketch": 3,
+                "point": 1
+              }
+            }
+          ],
+          "operation": "new_body"
+        }
+      },
+      {
+        "id": 5,
+        "name": "Sketch3",
+        "kind": {
+          "type": "Sketch",
+          "plane": {
+            "Origin": "XZ"
+          },
+          "points": [
+            {
+              "id": 1,
+              "x": 60.0,
+              "y": 15.0
+            },
+            {
+              "id": 2,
+              "x": 75.0,
+              "y": 15.0
+            },
+            {
+              "id": 3,
+              "x": 45.0,
+              "y": 15.0
+            }
+          ],
+          "curves": [
+            {
+              "id": 4,
+              "type": "Arc",
+              "center": 1,
+              "start": 2,
+              "end": 3
+            },
+            {
+              "id": 5,
+              "type": "Line",
+              "start": 3,
+              "end": 2
+            }
+          ],
+          "next_id": 6,
+          "visible": true
+        }
+      },
+      {
+        "id": 6,
+        "name": "Revolve1",
+        "kind": {
+          "type": "Revolve",
+          "profiles": [
+            {
+              "sketch": 5,
+              "key": [
+                4,
+                5
+              ]
+            }
+          ],
+          "axis": {
+            "SketchLine": {
+              "sketch": 5,
+              "line": 5
+            }
+          },
+          "angle_deg": 360.0,
+          "operation": "new_body"
+        }
+      },
+      {
+        "id": 7,
+        "name": "Sketch4",
+        "kind": {
+          "type": "Sketch",
+          "plane": {
+            "Origin": "XY"
+          },
+          "points": [
+            {
+              "id": 1,
+              "x": 0.0,
+              "y": 0.0
+            }
+          ],
+          "curves": [
+            {
+              "id": 2,
+              "type": "Circle",
+              "center": 1,
+              "radius": 20.0
+            }
+          ],
+          "next_id": 3,
+          "visible": true
+        }
+      },
+      {
+        "id": 8,
+        "name": "Extrude1",
+        "kind": {
+          "type": "Extrude",
+          "profiles": [
+            {
+              "sketch": 7,
+              "key": [
+                2
+              ]
+            }
+          ],
+          "distance": -3.0,
+          "operation": "join"
+        }
+      },
+      {
+        "id": 9,
+        "name": "Sketch5",
+        "kind": {
+          "type": "Sketch",
+          "plane": {
+            "Origin": "XY"
+          },
+          "points": [
+            {
+              "id": 1,
+              "x": 0.0,
+              "y": 0.0
+            }
+          ],
+          "curves": [
+            {
+              "id": 2,
+              "type": "Circle",
+              "center": 1,
+              "radius": 2.0
+            }
+          ],
+          "next_id": 3,
+          "visible": true
+        }
+      },
+      {
+        "id": 10,
+        "name": "Extrude2",
+        "kind": {
+          "type": "Extrude",
+          "profiles": [
+            {
+              "sketch": 9,
+              "key": [
+                2
+              ]
+            }
+          ],
+          "distance": -3.0,
+          "operation": "cut"
+        }
+      },
+      {
+        "id": 11,
+        "name": "Gear1",
+        "kind": {
+          "type": "SpurGear",
+          "plane": {
+            "Construction": 2
+          },
+          "module": 2.0,
+          "teeth": 20,
+          "pressure_angle_deg": 20.0,
+          "thickness": 8.0,
+          "bore": 8.0,
+          "operation": "new_body"
+        }
+      },
+      {
+        "id": 12,
+        "name": "Coil1",
+        "kind": {
+          "type": "Coil",
+          "plane": {
+            "Origin": "XY"
+          },
+          "kind": "spiral",
+          "diameter": 10.0,
+          "revolutions": 4.0,
+          "pitch": 4.0,
+          "section": 2.0,
+          "operation": "new_body"
+        }
+      }
+    ],
+    "next_feature_id": 13
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "format": "qoob3d",
+  "format_version": 2,
+  "document": {
+    "features": [
+      {
+        "id": 1,
+        "name": "Coil1",
+        "kind": {
+          "type": "Coil",
+          "plane": {
+            "Origin": "XY"
+          },
+          "kind": "helix",
+          "diameter": 20.0,
+          "revolutions": 5.0,
+          "pitch": 4.0,
+          "section": 2.0,
+          "operation": "new_body"
+        }
+      }
+    ],
+    "next_feature_id": 2
+  }
+}

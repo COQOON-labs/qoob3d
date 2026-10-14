@@ -38,6 +38,19 @@ pub struct Observation<'a> {
     pub home_button: Option<Pos2>,
     pub last_orbit_pivot: Option<Vec3>,
     pub animating: bool,
+    /// Screen position of the XY plane square while picking a plane.
+    pub xy_plane: Option<Pos2>,
+    /// Screen positions of sketch points (0,0) and (40,30) in sketch mode.
+    pub sketch_corners: [Option<Pos2>; 2],
+    pub sketching: bool,
+    pub picking_plane: bool,
+    pub sketch_curves: usize,
+    pub sketch_profiles: usize,
+    /// The kernel is still computing (profiles not up to date yet).
+    pub rebuilding: bool,
+    pub features: usize,
+    pub commanding: bool,
+    pub bodies: usize,
 }
 
 /// Screen positions the scripted input aims at (from the previous frame).
@@ -46,6 +59,8 @@ struct Targets {
     center: Pos2,
     viewcube_top: Option<Pos2>,
     home: Option<Pos2>,
+    xy_plane: Option<Pos2>,
+    corners: [Option<Pos2>; 2],
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -84,11 +99,17 @@ impl SmokeTest {
         let result: SmokeResult = Arc::default();
         spawn_watchdog(frames.clone());
         let test = Self {
-            steps: steps(),
+            steps: steps().into_iter().chain(sketch_steps()).collect(),
             current: None,
             frame_in_step: 0,
             before: None,
-            targets: Targets { center: pos2(400.0, 300.0), viewcube_top: None, home: None },
+            targets: Targets {
+                center: pos2(400.0, 300.0),
+                viewcube_top: None,
+                home: None,
+                xy_plane: None,
+                corners: [None, None],
+            },
             finished: false,
             frames,
             result: result.clone(),
@@ -114,6 +135,8 @@ impl SmokeTest {
             center: obs.viewport_center,
             viewcube_top: obs.viewcube_top,
             home: obs.home_button,
+            xy_plane: obs.xy_plane,
+            corners: obs.sketch_corners,
         };
         if self.finished {
             // Waiting for the window to close.
@@ -137,7 +160,8 @@ impl SmokeTest {
         }
         // Animated steps: wait (bounded) until the camera has settled, so the
         // test does not depend on the display refresh rate.
-        if obs.animating && self.frame_in_step < step.frames + MAX_SETTLE_FRAMES {
+        let busy = obs.animating || obs.rebuilding;
+        if busy && self.frame_in_step < step.frames + MAX_SETTLE_FRAMES {
             return Control::Continue;
         }
 
@@ -352,6 +376,122 @@ fn steps() -> Vec<Step> {
                     Ok(())
                 } else {
                     Err(format!("Blick von {got} statt {want}"))
+                }
+            },
+        },
+    ]
+}
+
+/// The sketch workflow on top of the navigation steps (SK-QA-05).
+fn sketch_steps() -> Vec<Step> {
+    vec![
+        Step {
+            name: "Skizze anlegen (S, Ebene XY anklicken)",
+            frames: 8,
+            inject: |f, at, raw| match f {
+                0 => raw.events.push(key(Key::S, true)),
+                1 => raw.events.push(key(Key::S, false)),
+                2..=4 => {
+                    if let Some(p) = at.xy_plane {
+                        left_click(f - 2, p, raw);
+                    }
+                }
+                _ => {}
+            },
+            check: |_, _, obs| {
+                if obs.sketching && obs.features == 1 {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "Skizziermodus {} (Ebenenwahl {}), Features {}",
+                        obs.sketching, obs.picking_plane, obs.features
+                    ))
+                }
+            },
+        },
+        Step {
+            name: "Rechteck zeichnen (R, zwei Klicks)",
+            frames: 10,
+            inject: |f, at, raw| match f {
+                0 => raw.events.push(key(Key::R, true)),
+                1 => raw.events.push(key(Key::R, false)),
+                2..=4 => {
+                    if let Some(p) = at.corners[0] {
+                        left_click(f - 2, p, raw);
+                    }
+                }
+                5..=7 => {
+                    if let Some(p) = at.corners[1] {
+                        left_click(f - 5, p, raw);
+                    }
+                }
+                _ => {}
+            },
+            check: |_, _, obs| {
+                if obs.sketch_curves == 4 {
+                    Ok(())
+                } else {
+                    Err(format!("{} Kurven statt 4", obs.sketch_curves))
+                }
+            },
+        },
+        Step {
+            name: "Profil vom Kernel erkannt",
+            frames: 2,
+            inject: |_, _, _| {},
+            check: |_, _, obs| {
+                if obs.sketch_profiles == 1 {
+                    Ok(())
+                } else {
+                    Err(format!("{} Profile statt 1", obs.sketch_profiles))
+                }
+            },
+        },
+        Step {
+            name: "Skizze beenden (Esc, Enter)",
+            frames: 5,
+            inject: |f, _, raw| match f {
+                0 => raw.events.push(key(Key::Escape, true)),
+                1 => raw.events.push(key(Key::Escape, false)),
+                2 => raw.events.push(key(Key::Enter, true)),
+                3 => raw.events.push(key(Key::Enter, false)),
+                _ => {}
+            },
+            check: |_, _, obs| {
+                if !obs.sketching && obs.features == 1 {
+                    Ok(())
+                } else {
+                    Err(format!("Skizziermodus {}, Features {}", obs.sketching, obs.features))
+                }
+            },
+        },
+        Step {
+            name: "Extrudieren (E, Profil vorgewählt, Enter)",
+            frames: 8,
+            inject: |f, _, raw| match f {
+                0 => raw.events.push(key(Key::E, true)),
+                1 => raw.events.push(key(Key::E, false)),
+                5 => raw.events.push(key(Key::Enter, true)),
+                6 => raw.events.push(key(Key::Enter, false)),
+                _ => {}
+            },
+            check: |_, _, obs| {
+                if !obs.commanding && obs.features == 2 {
+                    Ok(())
+                } else {
+                    Err(format!("Dialog offen {}, Features {}", obs.commanding, obs.features))
+                }
+            },
+        },
+        Step {
+            name: "Körper vom Kernel berechnet",
+            frames: 2,
+            inject: |_, _, _| {},
+            check: |_, _, obs| {
+                if obs.bodies == 1 {
+                    Ok(())
+                } else {
+                    Err(format!("{} Körper statt 1", obs.bodies))
                 }
             },
         },

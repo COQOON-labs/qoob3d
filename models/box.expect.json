@@ -1,0 +1,17 @@
+{
+  "why": "Quader 40×25×10: V = a·b·c",
+  "bodies": 1,
+  "volume_mm3": 10000.0,
+  "volume_rel_tol": 1e-06,
+  "bbox_min": [
+    0,
+    0,
+    0
+  ],
+  "bbox_max": [
+    40,
+    25,
+    10
+  ],
+  "bbox_tol": 0.01
+}

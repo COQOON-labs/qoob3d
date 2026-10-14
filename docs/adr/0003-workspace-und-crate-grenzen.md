@@ -1,12 +1,12 @@
 ---
 id: ADR-0003
 title: Cargo-Workspace mit vier Crates und festen Abhängigkeitsrichtungen
-status: akzeptiert
+status: ersetzt
 date: 2026-10-13
 crates: [qoob3d-core, qoob3d-kernel, qoob3d-render, qoob3d-app]
 tags: [architektur]
 supersedes: []
-superseded_by: null
+superseded_by: ADR-0026
 ---
 
 ## Kontext

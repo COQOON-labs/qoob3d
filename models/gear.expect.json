@@ -1,0 +1,17 @@
+{
+  "why": "Stirnrad m=2, z=20, b=8, Bohrung 8: Kopfkreis Ø m(z+2)=44; Volumen zwischen Fußkreis- und Kopfkreisscheibe, nahe π·(r_f² + (r_a²−r_f²)/2 − 4²)·b ≈ 9529",
+  "bodies": 1,
+  "volume_min": 9000.0,
+  "volume_max": 10200.0,
+  "bbox_min": [
+    -22,
+    -22,
+    0
+  ],
+  "bbox_max": [
+    22,
+    22,
+    8
+  ],
+  "bbox_tol": 0.1
+}

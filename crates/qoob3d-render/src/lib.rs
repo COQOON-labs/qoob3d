@@ -8,6 +8,8 @@ pub mod camera;
 pub mod headless;
 mod renderer;
 
-pub use camera::{Camera, Projection, Ray, ViewPreset};
+pub use camera::{Camera, Projection, Ray, ViewPreset, grid_snap_step};
 pub use eframe::egui_wgpu::wgpu;
-pub use renderer::{COLOR_FORMAT, DISPLAY_FORMAT, MAX_BED_POINTS, SceneOptions, ViewportRenderer};
+pub use renderer::{
+    COLOR_FORMAT, DISPLAY_FORMAT, GridPlane, MAX_BED_POINTS, SceneOptions, ViewportRenderer,
+};

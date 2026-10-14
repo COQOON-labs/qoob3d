@@ -57,6 +57,30 @@ impl Polylines {
     }
 }
 
+impl ShapeMesh {
+    /// One mesh from several (e.g. all bodies for the renderer). Face ids
+    /// stay unique: each part's ids are offset past the previous part's.
+    pub fn merge<'a>(parts: impl IntoIterator<Item = &'a ShapeMesh>) -> ShapeMesh {
+        let mut out = ShapeMesh::default();
+        for part in parts {
+            let base = out.faces.positions.len() as u32;
+            let face_base = out.faces.face_ids.iter().max().map_or(0, |m| m + 1);
+            out.faces.positions.extend_from_slice(&part.faces.positions);
+            out.faces.normals.extend_from_slice(&part.faces.normals);
+            out.faces.indices.extend(part.faces.indices.iter().map(|i| i + base));
+            out.faces.face_ids.extend(part.faces.face_ids.iter().map(|f| f + face_base));
+            let point_base = out.edges.points.len() as u32;
+            out.edges.starts.pop();
+            out.edges.points.extend_from_slice(&part.edges.points);
+            for w in part.edges.starts.windows(2) {
+                out.edges.starts.push(w[0] + point_base);
+            }
+            out.edges.starts.push(out.edges.points.len() as u32);
+        }
+        out
+    }
+}
+
 impl TriMesh {
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
@@ -74,6 +98,34 @@ impl TriMesh {
             min: std::array::from_fn(|i| b.min[i].min(p[i])),
             max: std::array::from_fn(|i| b.max[i].max(p[i])),
         }))
+    }
+
+    /// Shared-vertex form for export (3MF needs indexed, manifold meshes):
+    /// vertices within [`WELD_TOLERANCE_MM`] are merged, collapsed triangles
+    /// dropped. Returns (positions, triangles).
+    pub fn welded(&self) -> (Vec<[f32; 3]>, Vec<[u32; 3]>) {
+        let quantize = |p: [f32; 3]| p.map(|c| (f64::from(c) / WELD_TOLERANCE_MM).round() as i64);
+        let mut index: HashMap<[i64; 3], u32> = HashMap::new();
+        let mut positions = Vec::new();
+        let remap: Vec<u32> = self
+            .positions
+            .iter()
+            .map(|&p| {
+                *index.entry(quantize(p)).or_insert_with(|| {
+                    positions.push(p);
+                    positions.len() as u32 - 1
+                })
+            })
+            .collect();
+        let triangles = self
+            .indices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|t| t.map(|i| remap[i as usize]))
+            .filter(|t| t[0] != t[1] && t[1] != t[2] && t[2] != t[0])
+            .collect();
+        (positions, triangles)
     }
 
     /// Topological and volumetric quality check (ADR-0013).
@@ -223,7 +275,7 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 }
 
 /// Axis-aligned bounding box.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Aabb {
     pub min: [f32; 3],
     pub max: [f32; 3],
@@ -244,6 +296,22 @@ impl Aabb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merging_offsets_indices_faces_and_edges() {
+        let mut a = ShapeMesh::default();
+        a.faces.positions = vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        a.faces.normals = vec![[0.0, 0.0, 1.0]; 3];
+        a.faces.indices = vec![0, 1, 2];
+        a.faces.face_ids = vec![0];
+        a.edges = Polylines { points: vec![[0.0; 3], [1.0, 0.0, 0.0]], starts: vec![0, 2] };
+        let m = ShapeMesh::merge([&a, &a]);
+        assert_eq!(m.faces.indices, [0, 1, 2, 3, 4, 5]);
+        assert_eq!(m.faces.face_ids, [0, 1]);
+        assert_eq!(m.edges.starts, [0, 2, 4]);
+        assert_eq!(m.edges.len(), 2);
+        assert_eq!(ShapeMesh::merge([]).edges.starts, [0]);
+    }
 
     #[test]
     fn bounds_of_empty_mesh_is_none() {

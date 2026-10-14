@@ -1,0 +1,17 @@
+{
+  "why": "Platte 60×40×5 + Zapfen Ø10×8 (Join) − Bohrung Ø6 durch beides (Cut): V = 12000 + π·25·8 − π·9·13",
+  "bodies": 1,
+  "volume_mm3": 12260.752190247953,
+  "volume_rel_tol": 1e-05,
+  "bbox_min": [
+    -30,
+    -20,
+    0
+  ],
+  "bbox_max": [
+    30,
+    20,
+    13
+  ],
+  "bbox_tol": 0.01
+}

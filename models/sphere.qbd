@@ -1,0 +1,77 @@
+{
+  "format": "qoob3d",
+  "format_version": 2,
+  "document": {
+    "features": [
+      {
+        "id": 1,
+        "name": "Sketch1",
+        "kind": {
+          "type": "Sketch",
+          "plane": {
+            "Origin": "XZ"
+          },
+          "points": [
+            {
+              "id": 1,
+              "x": 0.0,
+              "y": 0.0
+            },
+            {
+              "id": 2,
+              "x": 15.0,
+              "y": 0.0
+            },
+            {
+              "id": 3,
+              "x": -15.0,
+              "y": 0.0
+            }
+          ],
+          "curves": [
+            {
+              "id": 4,
+              "type": "Arc",
+              "center": 1,
+              "start": 2,
+              "end": 3
+            },
+            {
+              "id": 5,
+              "type": "Line",
+              "start": 3,
+              "end": 2
+            }
+          ],
+          "next_id": 6,
+          "visible": true
+        }
+      },
+      {
+        "id": 2,
+        "name": "Revolve1",
+        "kind": {
+          "type": "Revolve",
+          "profiles": [
+            {
+              "sketch": 1,
+              "key": [
+                4,
+                5
+              ]
+            }
+          ],
+          "axis": {
+            "SketchLine": {
+              "sketch": 1,
+              "line": 5
+            }
+          },
+          "angle_deg": 360.0,
+          "operation": "new_body"
+        }
+      }
+    ],
+    "next_feature_id": 3
+  }
+}

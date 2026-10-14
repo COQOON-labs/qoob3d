@@ -1,0 +1,17 @@
+[package]
+name = "qoob3d-sketch"
+description = "QOOB3D sketch logic: tools, snapping, hit tests, editing (pure, ADR-0036)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+qoob3d-core.workspace = true
+glam = { workspace = true, features = ["bytemuck"] }
+
+[dev-dependencies]
+proptest = "1.12"
+
+[lints]
+workspace = true
