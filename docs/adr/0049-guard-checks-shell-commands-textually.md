@@ -50,8 +50,12 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    every construct of the command. A command that contains anywhere a backtick, ANSI-C
    quoting `$'`, a redirection with `&` (`|&`, `>&`, `&>`, `<&`, so also `2>&1` and `>&2`), or
    arithmetic `((` (also `$((`, whose `<<` is a shift and whose `$(…)` runs) keeps its prose:
-   every word is checked, as if there were no comments or heredocs. Rare spellings are
-   denied rather than parsed; the word rules (`xtask:`, the cargo exceptions) still apply.
+   every word is checked, as if there were no comments or heredocs. The same holds when a
+   compound command closes after a removed heredoc body: a simple command starting with
+   `}`, `done`, `fi`, `esac` or a `)` that does not close a `$(…)` (`{` newline `cat <<EOF`
+   … `}` `| bash`), because the group's output may go to a shell. Closing words inside a
+   removed body do not count. Rare spellings are denied rather than parsed; the word rules
+   (`xtask:`, the cargo exceptions) still apply.
 
 ## Consequences
 
@@ -59,9 +63,9 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
 - `bash <<EOF`, `cat <<EOF | sh`, `{ bash; } <<EOF`, `while read … done <<EOF` and friends
   cannot hide a harness write in the body.
 - The heuristic stays a heuristic: a body read through an indirection the guard does not
-  see is not checked. Examples are a reader inside a compound command opened on an earlier
-  line whose output goes on (`{` newline `cat <<EOF` … `}` `| bash`), and a script written
-  first and run later. Heredocs of a reader inside `$(…)` stay data, because the commit and
+  see is not checked. Examples are a script written first and run later, also in the same
+  command (`cat > /tmp/x.sh <<EOF` … `bash /tmp/x.sh`), and a commit message run as code
+  afterwards. Heredocs of a reader inside `$(…)` stay data, because the commit and
   PR body forms `git commit -m "$(cat <<'EOF' …)"` and `gh pr create --body "$(cat <<'EOF'
   …)"` must pass; an unknown command in front of the `$(` (`rm -rf $(cat <<EOF`) keeps the
   body. CI and CODEOWNERS remain the wall (ADR-0037).

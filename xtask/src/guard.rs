@@ -14,8 +14,9 @@
 //!   `tee`, `git`, `gh`) as the heredoc's command, with nothing but its words
 //!   before the marker and nothing after it but one file redirection. A
 //!   command with a construct the guard does not model (backticks, `$'`,
-//!   redirections with `&`, arithmetic `((`) keeps its comments and heredoc
-//!   bodies: fail closed (ADR-0049).
+//!   redirections with `&`, arithmetic `((`), or a compound command closing
+//!   after a heredoc body (`}`, `done`, `fi`, `esac`, `)`), keeps its comments
+//!   and heredoc bodies: fail closed (ADR-0049).
 //!
 //! Edit/Write paths are collapsed (`.`, `..`) before any check. Shell commands
 //! are checked as text, at the three anchors of ADR-0043 (token start, `./`,
@@ -225,7 +226,13 @@ pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Resu
     if session.unlocked || !writes {
         return Ok(());
     }
-    let shell = if models_prose(command) { without_prose(command) } else { command.to_owned() };
+    let shell = if models_prose(command)
+        && let Some(shell) = without_prose(command)
+    {
+        shell
+    } else {
+        command.to_owned()
+    };
     let shell_forms = [shell.to_lowercase(), unquoted(&shell).to_lowercase()];
     if let Some(path) =
         forms.iter().zip(&shell_forms).find_map(|(form, shell)| harness_in_shell(root, form, shell))
@@ -259,28 +266,35 @@ fn models_prose(command: &str) -> bool {
 /// shape: the only heredoc of its line, read by a known data reader
 /// ([`reads_data`]), with nothing after the marker but one file redirection
 /// ([`only_redirects_to_file`]; ADR-0049). A backslash-newline continues the
-/// line. Only for commands that [`models_prose`].
-fn without_prose(command: &str) -> String {
+/// line. None if a compound command closes after a removed body
+/// ([`closes_compound`]): its output may go to a shell, so the caller checks
+/// the whole command (fail closed). Only for commands that [`models_prose`].
+fn without_prose(command: &str) -> Option<String> {
     let mut out = String::with_capacity(command.len());
-    // Open quotes and parentheses, innermost last.
+    // Open quotes, parentheses `(` and substitutions `$(` (as `$`), innermost last.
     let mut open: Vec<char> = Vec::new();
     let mut markers: Vec<(String, bool)> = Vec::new();
     // Where the current line starts in `out`, where the text after the last
-    // heredoc marker starts; whether the next character starts a word.
-    let (mut line_start, mut after_marker, mut word_start) = (0, 0, true);
+    // heredoc marker starts; whether the next character starts a word or a
+    // simple command; whether a heredoc body was removed.
+    let (mut line_start, mut after_marker) = (0, 0);
+    let (mut word_start, mut command_start, mut stripped) = (true, true, false);
     let mut i = 0;
     while let Some(c) = command[i..].chars().next() {
         let rest = &command[i..];
+        if stripped && command_start && closes_compound(rest, open.last().copied()) {
+            return None;
+        }
         let mut end = i + c.len_utf8();
         let heredocs = markers.len();
         match (open.last().copied(), c) {
-            (Some('\''), '\'') | (Some('"'), '"') | (Some('('), ')') => {
+            (Some('\''), '\'') | (Some('"'), '"') | (Some('(' | '$'), ')') => {
                 open.pop();
             }
             (Some('\''), _) => {}
             (_, '\\') => end += rest[1..].chars().next().map_or(0, char::len_utf8),
-            (Some('"'), '$') if rest.starts_with("$(") => {
-                open.push('(');
+            (_, '$') if rest.starts_with("$(") => {
+                open.push('$');
                 end += 1;
             }
             (Some('"'), _) => {}
@@ -304,14 +318,16 @@ fn without_prose(command: &str) -> String {
                     && only_redirects_to_file(&out[after_marker..])
                     && reads_data(
                         &out[line_start..after_marker],
-                        open.iter().filter(|&&o| o == '(').count(),
+                        open.iter().filter(|&&o| matches!(o, '(' | '$')).count(),
                     )
+                    && let Some(len) = heredoc_bodies(&command[end..], &markers)
                 {
-                    end += heredoc_bodies(&command[end..], &markers).unwrap_or(0);
+                    end += len;
+                    stripped = true;
                 }
                 markers.clear();
                 out.push('\n');
-                (line_start, word_start) = (out.len(), true);
+                (line_start, word_start, command_start) = (out.len(), true, true);
                 i = end;
                 continue;
             }
@@ -321,14 +337,28 @@ fn without_prose(command: &str) -> String {
         if markers.len() > heredocs {
             after_marker = out.len();
         }
-        let outside_quotes = matches!(open.last(), None | Some('('));
+        let outside_quotes = matches!(open.last(), None | Some('(' | '$'));
         if outside_quotes && c == '\n' {
             line_start = out.len();
         }
         word_start = outside_quotes && (c.is_whitespace() || COMMENT_STARTS.contains(c));
+        command_start = outside_quotes
+            && (c == '\n' || COMMENT_STARTS.contains(c) || (command_start && c.is_whitespace()));
         i = end;
     }
-    out
+    Some(out)
+}
+
+/// `rest`, at the start of a simple command after a removed heredoc body,
+/// closes a compound command (`}`, `done`, `fi`, `esac`, or a `)` that does
+/// not close a `$(…)`, `top` being the innermost open quote or parenthesis),
+/// whose output may go to a shell (`{` … `cat <<EOF` … `} | bash`).
+fn closes_compound(rest: &str, top: Option<char>) -> bool {
+    let word =
+        rest.split(|c: char| c.is_whitespace() || ";|&)<>".contains(c)).next().unwrap_or_default();
+    rest.starts_with('}')
+        || matches!(word, "done" | "fi" | "esac")
+        || (rest.starts_with(')') && top != Some('$'))
 }
 
 /// `tail`, the rest of a heredoc line after its marker (comments removed),
