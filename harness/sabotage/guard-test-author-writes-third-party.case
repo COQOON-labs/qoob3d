@@ -1,0 +1,4 @@
+# The test author changes the build script of the vendored opencascade-sys fork (ADR-0039, K-13)
+command: cargo xtask guard
+expect: This agent context already writes tests
+stdin: {"session_id": "selftest", "tool_name": "Edit", "tool_input": {"file_path": "third_party/opencascade-sys/build.rs", "old_string": "a", "new_string": "b"}, "hook_event_name": "PreToolUse", "agent_type": "test-author", "agent_id": "a1"}

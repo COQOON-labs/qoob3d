@@ -51,9 +51,82 @@ fn cxx_header_hxx_is_code() {
         assert_eq!(kind(path), Kind::Code, "{path}");
     }
     // The extension does not make a test-tree file code, and outside the
-    // source tree it stays `Other` (same rules as for `.cpp`).
+    // source trees it stays `Other` (same rules as for `.cpp`). The vendored
+    // forks in `third_party/` are a source tree since critic finding K-13 on
+    // da69604 (see `vendored_third_party_sources_are_code`); this assertion
+    // used to expect `third_party/occt/include/gp_Pnt.hxx` to be `Other`.
     assert_eq!(kind("crates/qoob3d-kernel/tests/support/fake.hxx"), Kind::Test);
-    assert_eq!(kind("third_party/occt/include/gp_Pnt.hxx"), Kind::Other);
+    assert_eq!(kind("third_party/occt/include/gp_Pnt.hxx"), Kind::Code);
+    assert_eq!(kind("docs/include/gp_Pnt.hxx"), Kind::Other);
+}
+
+// ADR-0039, ADR-0014, ADR-0047, critic finding K-13 on da69604: the vendored
+// forks in `third_party/` are compiled into the product (`opencascade-sys`
+// with its build script, cxx bridges and C++ headers, `opencascade` with its
+// Rust API). Their code files (same extension list as below `crates/`) are
+// production code, otherwise role separation, the mixed-commit check and the
+// critic record (ADR-0041) skip them. Paths are real ones from
+// `git ls-files third_party`.
+#[test]
+fn vendored_third_party_sources_are_code() {
+    for path in [
+        "third_party/opencascade-sys/build.rs",
+        "third_party/opencascade-sys/src/lib.rs",
+        "third_party/opencascade-sys/src/b_rep_algo_api.rs",
+        "third_party/opencascade-sys/include/b_rep_algo_api.hxx",
+        "third_party/opencascade-sys/include/bindings_common.hxx",
+        "third_party/opencascade/src/lib.rs",
+        "third_party/opencascade/src/primitives/solid.rs",
+        "third_party/opencascade/src/primitives/boolean_shape.rs",
+    ] {
+        assert_eq!(kind(path), Kind::Code, "{path}");
+    }
+}
+
+// ADR-0039, K-13: docs, licenses and manifests of the vendored forks stay
+// `Other`, exactly like `crates/*/Cargo.toml` and `crates/*/README.md`.
+// Real paths from `git ls-files third_party`.
+#[test]
+fn vendored_third_party_docs_and_manifests_are_other() {
+    for path in [
+        "third_party/opencascade-sys/Cargo.toml",
+        "third_party/opencascade-sys/LICENSE",
+        "third_party/opencascade-sys/README.md",
+        "third_party/opencascade-sys/OCCT/CMakeLists.txt",
+        "third_party/opencascade/Cargo.toml",
+        "third_party/opencascade/LICENSE",
+        "third_party/opencascade/README.md",
+    ] {
+        assert_eq!(kind(path), Kind::Other, "{path}");
+    }
+}
+
+// ADR-0039, K-13: `git ls-files third_party` has no `tests/` directory and
+// no `tests.rs` today (upstream tests are inline in the source files). If a
+// fork gains one, the existing rule for source trees applies: it is a test.
+#[test]
+fn vendored_third_party_test_files_are_tests() {
+    for path in [
+        "third_party/opencascade/tests/boolean.rs",
+        "third_party/opencascade/src/primitives/tests.rs",
+        "third_party/opencascade-sys/tests/include/fake.hxx",
+    ] {
+        assert_eq!(kind(path), Kind::Test, "{path}");
+    }
+}
+
+// ADR-0039: only the directory `third_party/` itself is a source tree;
+// look-alike prefixes and nested `third_party` directories elsewhere are not.
+#[test]
+fn third_party_prefix_is_exact() {
+    for path in [
+        "third_partyX/opencascade-sys/build.rs",
+        "third-party/opencascade-sys/build.rs",
+        "docs/third_party/opencascade-sys/build.rs",
+        "third_party.rs",
+    ] {
+        assert_eq!(kind(path), Kind::Other, "{path}");
+    }
 }
 
 // ADR-0039: only a whole path component `tests` or the file name `tests.rs`
