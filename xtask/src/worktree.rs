@@ -5,9 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Variables a git hook may export; they would point git at another
-/// repository, work tree or index than the one the command runs in.
-const GIT_ENV: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
+use crate::GIT_ENV;
+use crate::git;
 
 /// Calls `run` with a detached worktree of `rev` in the system temp dir and
 /// removes the worktree afterwards, also when `run` panics.
@@ -20,9 +19,10 @@ pub(crate) fn with_worktree<T>(
     let commit = format!("{rev}^{{commit}}");
     let sha = git(root, &["rev-parse", "--verify", "--quiet", &commit])
         .map_err(|_| format!("unknown revision `{rev}`"))?;
+    let sha = sha.trim();
     let unique = format!("{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
     let dir = std::env::temp_dir().join(format!("qoob3d-check-{unique}"));
-    git(root, &["worktree", "add", "--detach", &dir.to_string_lossy(), &sha])?;
+    git(root, &["worktree", "add", "--detach", &dir.to_string_lossy(), sha])?;
     let worktree = Worktree { root, dir };
     Ok(run(&worktree.dir))
 }
@@ -63,27 +63,10 @@ pub(crate) fn check_rev_target_dir(root: &Path, cargo_target_dir: Option<&str>) 
 pub(crate) fn check_command(worktree: &Path, target_dir: &Path) -> Command {
     let mut command = Command::new("cargo");
     command.args(["xtask", "check"]).current_dir(worktree).env("CARGO_TARGET_DIR", target_dir);
-    without_git_env(&mut command);
-    command
-}
-
-fn without_git_env(command: &mut Command) -> &mut Command {
     for key in GIT_ENV {
         command.env_remove(key);
     }
     command
-}
-
-/// Trimmed output of a git command in `root`, or its error message.
-fn git(root: &Path, args: &[&str]) -> Result<String, String> {
-    let out = without_git_env(Command::new("git").args(args).current_dir(root))
-        .output()
-        .map_err(|e| format!("git: {e}"))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
-    } else {
-        Err(format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()))
-    }
 }
 
 #[cfg(test)]

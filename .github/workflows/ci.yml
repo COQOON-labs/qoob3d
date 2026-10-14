@@ -71,7 +71,7 @@ jobs:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          changed=$(git diff --name-only "$PR_BASE" "$PR_HEAD" | grep -E '^(\.claude/|\.githooks/|\.github/|\.cargo/|xtask/|harness/|Cargo\.toml$|clippy\.toml$|deny\.toml$|rustfmt\.toml$|rust-toolchain\.toml$)' || true)
+          changed=$(cargo xtask harness-changes "$PR_BASE" "$PR_HEAD")
           if [ -n "$changed" ]; then
             { echo "### ⚠️ Harness changed – owner review required (ADR-0037)"; echo; echo '```'; echo "$changed"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi

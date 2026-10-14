@@ -31,8 +31,9 @@ const BYPASSES: &[&str] =
 /// The shortest abbreviation of `--no-verify` git accepts (`--no-ver` is
 /// ambiguous with `--no-verbose`).
 const NO_VERIFY_MIN: &str = "--no-veri";
-/// Shell fragments that (may) write files; also `dd` and `install` as words
-/// and the programs with an output option in [`writes`] and [`edits_in_place`].
+/// Shell fragments that (may) write files; also `dd` and `install` as words,
+/// the programs with an output option in [`writes`], and the in-place editors
+/// and inline-code interpreters of [`runs_with_flag`].
 const WRITES: &[&str] = &[
     ">",
     "of=",
@@ -54,7 +55,7 @@ const WRITES: &[&str] = &[
     "ditto",
     "wget",
 ];
-/// Programs that rewrite the files they name ([`edits_in_place`]): names,
+/// Programs that rewrite the files they name ([`runs_with_flag`]): names,
 /// in-place short flags, short flags taking the rest of the group as
 /// argument, long options. sed: `-i[ext]`, BSD `-I ext`, GNU `--in-place`;
 /// perl/ruby: `-i[ext]`; awk: `-i inplace` or `--include=inplace` loads gawk's
@@ -63,6 +64,19 @@ const IN_PLACE: &[(&[&str], &str, &str, &[&str])] = &[
     (&["sed", "gsed"], "iI", "ef", &["--in-place"]),
     (&["perl", "ruby"], "i", "IMmr", &[]),
     (&["awk", "gawk"], "i", "vFfeE", &["--include"]),
+];
+/// Interpreters running code from the command line, which can write any file
+/// ([`runs_with_flag`]), in the shape of [`IN_PLACE`]. ruby: `-e`; perl:
+/// `-e`/`-E`; node: `-e`/`--eval`, `-p`/`--print`; deno: the subcommand
+/// `eval`, matched like a long option; sh/bash/zsh: `-c`. The argument
+/// letters are the options taking an attached argument (`-rdigest`,
+/// `-I/usr/share/perl5`, ruby's `-Ke`). python is a writer in [`WRITES`].
+const INLINE_CODE: &[(&[&str], &str, &str, &[&str])] = &[
+    (&["ruby"], "e", "CEFIKrTWx", &[]),
+    (&["perl"], "eE", "CFIMmVx", &[]),
+    (&["node"], "ep", "", &["--eval", "--print"]),
+    (&["deno"], "", "", &["eval"]),
+    (&["sh", "bash", "zsh"], "c", "", &[]),
 ];
 /// Path fragments of the harness as they appear in shell commands.
 const HARNESS_IN_SHELL: &[&str] = &[
@@ -176,7 +190,9 @@ pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Resu
     }
     check_git_dir_in_shell(&forms, &normalised, read)?;
     let writes = forms.iter().any(|form| writes(&without_null_redirections(form)))
-        || [command, normalised.as_str()].into_iter().any(edits_in_place);
+        || [command, normalised.as_str()]
+            .into_iter()
+            .any(|form| runs_with_flag(form, IN_PLACE) || runs_with_flag(form, INLINE_CODE));
     if session.unlocked || !writes {
         return Ok(());
     }
@@ -252,8 +268,8 @@ fn file_name_positions<'a>(command: &'a str, name: &'a str) -> impl Iterator<Ite
     })
 }
 
-/// A lower-cased command that (may) write files; in-place editors in
-/// [`edits_in_place`] need the case.
+/// A lower-cased command that (may) write files; in-place editors and
+/// inline-code interpreters in [`runs_with_flag`] need the case.
 fn writes(command: &str) -> bool {
     WRITES.iter().any(|w| command.contains(w))
         || command
@@ -270,14 +286,15 @@ fn writes(command: &str) -> bool {
         })
 }
 
-/// A program of [`IN_PLACE`], also by path, followed by a short-flag group
-/// with one of its in-place letters before any letter whose argument is the
-/// rest of the group (`-pi`, `-Ei.bak`, but not `-es/i/j/`), or by its long
-/// option, also abbreviated (`--in`). `command` keeps its case: lower-cased,
-/// sed's `-E -i` would read as `-e` with the script `-i`.
-fn edits_in_place(command: &str) -> bool {
+/// A program of `table` ([`IN_PLACE`], [`INLINE_CODE`]), also by path,
+/// followed by a short-flag group with one of its flag letters before any
+/// letter whose argument is the rest of the group (`-pi`, `-Ei.bak`, but not
+/// `-es/i/j/`), or by its long option, also abbreviated (`--in`). `command`
+/// keeps its case: lower-cased, sed's `-E -i` would read as `-e` with the
+/// script `-i`.
+fn runs_with_flag(command: &str, table: &[(&[&str], &str, &str, &[&str])]) -> bool {
     segments(command).any(|segment| {
-        IN_PLACE.iter().any(|(programs, in_place, argument, long)| {
+        table.iter().any(|(programs, flags, argument, long)| {
             let mut words = segment.split_whitespace();
             words.any(|w| {
                 w.rsplit('/')
@@ -285,11 +302,8 @@ fn edits_in_place(command: &str) -> bool {
                     .is_some_and(|name| programs.iter().any(|p| name.eq_ignore_ascii_case(p)))
             }) && words.any(|word| {
                 let name = word.split_once('=').map_or(word, |(name, _)| name);
-                short_flags(name).is_some_and(|flags| {
-                    flags
-                        .chars()
-                        .take_while(|c| !argument.contains(*c))
-                        .any(|c| in_place.contains(c))
+                short_flags(name).is_some_and(|group| {
+                    group.chars().take_while(|c| !argument.contains(*c)).any(|c| flags.contains(c))
                 }) || (name.len() > 2
                     && long.iter().any(|o| name.starts_with(o) || o.starts_with(name)))
             })

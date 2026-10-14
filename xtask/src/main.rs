@@ -17,6 +17,7 @@
 //! cargo xtask rules            every rule in harness/rules.md has existing checks (ADR-0040)
 //! cargo xtask selftest         the harness rejects every sabotage in harness/sabotage/ (ADR-0042)
 //! cargo xtask guard            Claude Code PreToolUse hook: JSON on stdin, exit 2 = deny (ADR-0043)
+//! cargo xtask harness-changes <base> <head>  harness files changed in between, for CI (ADR-0037)
 //! ```
 
 mod arch;
@@ -60,6 +61,14 @@ fn main() -> ExitCode {
         Some("commits") => commits_step(&root, &args[1..]),
         Some("setup") => setup(&root),
         Some("guard") => return guard_hook(&root),
+        Some("harness-changes") => {
+            if let [base, head] = &args[1..] {
+                harness_changes(&root, base, head)
+            } else {
+                eprintln!("usage: cargo xtask harness-changes <base> <head>");
+                false
+            }
+        }
         Some("rules") => report("rules", rules::check(&root)),
         Some("selftest") => report("selftest", selftest::run(&root)),
         Some("review") => match &args[1..] {
@@ -83,7 +92,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask <check [--fast] | check-rev <rev> | arch | docs [--fix] | i18n | hygiene | rules | selftest | commits <revs> | review <tip> <revs> | guard | setup | models [--write] | screenshot [dir]>"
+                "usage: cargo xtask <check [--fast] | check-rev <rev> | arch | docs [--fix] | i18n | hygiene | rules | selftest | commits <revs> | review <tip> <revs> | guard | harness-changes <base> <head> | setup | models [--write] | screenshot [dir]>"
             );
             return ExitCode::from(2);
         }
@@ -237,6 +246,25 @@ fn guard_hook(root: &Path) -> ExitCode {
     }
 }
 
+/// Prints the harness files changed between `base` and `head`, one per line,
+/// for the owner review in CI (ADR-0037). A rename counts as deletion and
+/// addition, so moving a file out of the harness is flagged, too; `-z` keeps
+/// unusual names unquoted, so they start their line.
+fn harness_changes(root: &Path, base: &str, head: &str) -> bool {
+    match git(root, &["diff", "--name-only", "--no-renames", "-z", base, head]) {
+        Ok(names) => {
+            for file in paths::harness_files(&names.replace('\0', "\n")) {
+                println!("{file}");
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("harness-changes: {e}");
+            false
+        }
+    }
+}
+
 const HOOKS_DIR: &str = ".githooks";
 
 /// Points git at the versioned hooks in `.githooks/` (ADR-0037).
@@ -253,11 +281,8 @@ fn hooks_installed(root: &Path) -> bool {
     if std::env::var_os("CI").is_some() {
         return true;
     }
-    let configured = Command::new("git")
-        .args(["config", "--get", "core.hooksPath"])
-        .current_dir(root)
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == HOOKS_DIR);
+    let configured = git(root, &["config", "--get", "core.hooksPath"])
+        .is_ok_and(|hooks_path| hooks_path.trim() == HOOKS_DIR);
     if !configured {
         eprintln!("hooks: git hooks not active → `cargo xtask setup` (ADR-0037)");
     }
@@ -347,16 +372,30 @@ fn run(root: &Path, program: &str, args: &[&str]) -> bool {
     }
 }
 
-/// Output of a git command, or its error message.
+/// Output of a git command in `root`, or its error message.
 pub(crate) fn git(root: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("git: {e}"))?;
+    let out = git_command(root, args).output().map_err(|e| format!("git: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
         Err(format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()))
     }
 }
+
+/// Variables a git hook exports; they would point git at another repository,
+/// work tree or index than the one the command runs in (ADR-0048).
+pub(crate) const GIT_ENV: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
+
+/// `git` with `args` in `root`, without the hook's [`GIT_ENV`]: xtask always
+/// means the repository at `root`.
+pub(crate) fn git_command(root: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(root);
+    for key in GIT_ENV {
+        command.env_remove(key);
+    }
+    command
+}
+
+#[cfg(test)]
+mod tests;

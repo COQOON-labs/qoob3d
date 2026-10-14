@@ -46,6 +46,12 @@ pub(crate) fn is_harness(path: &str) -> bool {
         .any(|h| if h.ends_with(['/', '-']) { path.starts_with(&h) } else { path == h })
 }
 
+/// The harness paths among newline-separated file names, in order (CI flags
+/// them, ADR-0037).
+pub(crate) fn harness_files(names: &str) -> Vec<&str> {
+    names.lines().filter(|name| is_harness(name)).collect()
+}
+
 /// Source trees are `crates/`, `xtask/` and the vendored forks in
 /// `third_party/`, which are compiled into the product (ADR-0014, ADR-0047).
 pub(crate) fn kind(path: &str) -> Kind {

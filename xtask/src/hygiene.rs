@@ -2,8 +2,8 @@
 //! - unit tests live in their own `tests.rs` file, so that test code and
 //!   production code are separate files (ADR-0039),
 //! - every crate inherits the workspace lints (ADR-0040),
-//! - the number of lint suppressions (`#[expect(…)]`) never grows beyond
-//!   `harness/ratchet.txt` (ADR-0040),
+//! - the number of suppressed lints (each lint in an `#[expect(…)]`, also
+//!   inside `cfg_attr`) never grows beyond `harness/ratchet.txt` (ADR-0040),
 //! - the repository is English: no German umlauts or sharp s outside
 //!   `harness/language-allowlist.txt` (ADR-0045),
 //! - `.github/CODEOWNERS` names an owner for every harness path (ADR-0044).
@@ -87,12 +87,179 @@ pub(crate) fn check_source(rel: &str, text: &str) -> Vec<String> {
     problems
 }
 
-/// Lint suppressions; plain `allow` is already rejected by clippy (ADR-0040).
+/// Suppressed lints: every lint of an `expect` attribute, also inside
+/// (nested) `cfg_attr`, wherever the attribute stands and however it is
+/// spread over lines; plain `allow` is already rejected by clippy (ADR-0040).
 pub(crate) fn count_suppressions(text: &str) -> usize {
-    text.lines()
-        .map(str::trim_start)
-        .filter(|l| l.starts_with("#[expect(") || l.starts_with("#![expect("))
-        .count()
+    let tokens = tokens(text);
+    let attribute = |i: usize| {
+        let rest = &tokens[i + 1..];
+        let rest = rest.strip_prefix(&[Token::Punct(b'!')]).unwrap_or(rest);
+        if rest.first() == Some(&Token::Punct(b'[')) {
+            group_parts(rest).iter().map(|meta| meta_lints(meta)).sum()
+        } else {
+            0
+        }
+    };
+    (0..tokens.len()).filter(|&i| tokens[i] == Token::Punct(b'#')).map(attribute).sum()
+}
+
+/// The lints an attribute's content suppresses: the arguments of `expect`
+/// except `reason = …`, or those of the attributes in a `cfg_attr`.
+fn meta_lints(meta: &[Token<'_>]) -> usize {
+    match meta {
+        [Token::Ident("expect"), args @ ..] => group_parts(args)
+            .iter()
+            .filter(|lint| {
+                !lint.is_empty()
+                    && !matches!(lint, [Token::Ident("reason"), Token::Punct(b'='), ..])
+            })
+            .count(),
+        // The first part is the predicate.
+        [Token::Ident("cfg_attr"), args @ ..] => {
+            group_parts(args).iter().skip(1).map(|attribute| meta_lints(attribute)).sum()
+        }
+        _ => 0,
+    }
+}
+
+/// The comma-separated parts of the bracket group `tokens` starts with
+/// (`(a, b(c, d))` → `a`, `b(c, d)`), none if it starts with no bracket.
+fn group_parts<'t, 'a>(tokens: &'t [Token<'a>]) -> Vec<&'t [Token<'a>]> {
+    let mut parts = Vec::new();
+    if !matches!(tokens.first(), Some(Token::Punct(b'(' | b'[' | b'{'))) {
+        return parts;
+    }
+    let (mut depth, mut start) = (0, 1);
+    for (i, token) in tokens.iter().enumerate() {
+        match token {
+            Token::Punct(b'(' | b'[' | b'{') => depth += 1,
+            Token::Punct(b')' | b']' | b'}') => depth -= 1,
+            Token::Punct(b',') if depth == 1 => {
+                parts.push(&tokens[start..i]);
+                start = i + 1;
+                continue;
+            }
+            _ => continue,
+        }
+        if depth == 0 {
+            parts.push(&tokens[start..i]);
+            break;
+        }
+    }
+    parts
+}
+
+/// What the suppression count sees of Rust source: comments are gone,
+/// string and char literals are opaque.
+#[derive(Debug, PartialEq)]
+enum Token<'a> {
+    Ident(&'a str),
+    Punct(u8),
+    Literal,
+}
+
+fn tokens(text: &str) -> Vec<Token<'_>> {
+    let bytes = text.as_bytes();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while let Some(&byte) = bytes.get(i) {
+        let rest = &bytes[i..];
+        if byte.is_ascii_whitespace() {
+            i += 1;
+        } else if rest.starts_with(b"//") {
+            i += rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
+        } else if rest.starts_with(b"/*") {
+            i += block_comment_len(rest);
+        } else if byte == b'"' {
+            i += quoted_len(rest);
+            tokens.push(Token::Literal);
+        } else if byte == b'\'' {
+            // A lifetime or label: its name follows as an identifier.
+            let len = char_literal_len(&text[i..]);
+            i += len.unwrap_or(1);
+            tokens.extend(len.map(|_| Token::Literal));
+        } else if byte.is_ascii_alphanumeric() || byte == b'_' {
+            let len = rest
+                .iter()
+                .position(|&b| !(b.is_ascii_alphanumeric() || b == b'_'))
+                .unwrap_or(rest.len());
+            let word = &text[i..i + len];
+            let after = &rest[len..];
+            let literal = match (word, after.first()) {
+                ("r" | "br" | "cr", Some(b'"' | b'#')) => raw_string_len(after),
+                ("b" | "c", Some(b'"')) | ("b", Some(b'\'')) => Some(quoted_len(after)),
+                _ => None,
+            };
+            i += len + literal.unwrap_or(0);
+            tokens.push(if literal.is_some() { Token::Literal } else { Token::Ident(word) });
+        } else {
+            i += 1;
+            tokens.push(Token::Punct(byte));
+        }
+    }
+    tokens
+}
+
+/// Length of the (nested) block comment `rest` starts with.
+fn block_comment_len(rest: &[u8]) -> usize {
+    let (mut depth, mut i) = (0, 0);
+    while i < rest.len() {
+        if rest[i..].starts_with(b"/*") {
+            depth += 1;
+            i += 2;
+        } else if rest[i..].starts_with(b"*/") {
+            depth -= 1;
+            i += 2;
+            if depth == 0 {
+                return i;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    rest.len()
+}
+
+/// Length of the literal `rest` starts with, up to the unescaped quote that
+/// matches its first byte (`"…"`, `'…'`).
+fn quoted_len(rest: &[u8]) -> usize {
+    let mut i = 1;
+    while let Some(&byte) = rest.get(i) {
+        if byte == b'\\' {
+            i += 2;
+        } else if byte == rest[0] {
+            return i + 1;
+        } else {
+            i += 1;
+        }
+    }
+    rest.len()
+}
+
+/// Length of a raw string after its `r`/`br`/`cr` (`#"…"#`), `None` for a
+/// raw identifier (`r#type`).
+fn raw_string_len(after: &[u8]) -> Option<usize> {
+    let hashes = after.iter().take_while(|&&b| b == b'#').count();
+    if after.get(hashes) != Some(&b'"') {
+        return None;
+    }
+    let body = &after[hashes + 1..];
+    let close = body
+        .windows(hashes + 1)
+        .position(|w| w[0] == b'"' && w[1..].iter().all(|&b| b == b'#'))
+        .map_or(body.len(), |at| at + hashes + 1);
+    Some(hashes + 1 + close)
+}
+
+/// Length of the char literal `rest` starts with (`'a'`, `'"'`, `'\''`),
+/// `None` for a lifetime or label (`'a`, `'static`).
+fn char_literal_len(rest: &str) -> Option<usize> {
+    let mut chars = rest[1..].chars();
+    match chars.next()? {
+        '\\' => Some(quoted_len(rest.as_bytes())),
+        c => (chars.next() == Some('\'')).then_some(2 + c.len_utf8()),
+    }
 }
 
 const RATCHET: &str = "harness/ratchet.txt";
