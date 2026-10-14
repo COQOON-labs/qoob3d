@@ -34,18 +34,24 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
 3. **Unless an interpreter reads the body:** when a pipeline with the heredoc names a shell
    or interpreter (sh, bash, zsh, python with any version, perl, ruby, node, deno, also by path),
    or `xargs`, `eval`, `source`, `.`, the body is checked like inline code, with the cargo
-   exceptions (`cargo xtask …`, `-p xtask`) as elsewhere. The pipeline is read as the shell
-   reads it: a backslash-newline joins lines, and a `|` that ends the heredoc line continues
-   with the command after the terminator line, whose stages count by their program
-   (`cat <<EOF |` … `EOF` / `bash`, but not `grep -c bash`).
+   exceptions (`cargo xtask …`, `-p xtask`) as elsewhere. Any word of the pipeline counts,
+   not only a program (`env bash`, `FOO=1 bash`). The pipeline is read as the shell reads it:
+   a backslash-newline joins lines, and a `|` that ends the heredoc line continues with the
+   command after the terminator line, joined over further lines while one ends in `|` or a
+   backslash (`cat <<EOF |` … `EOF` / `tee /tmp/y |` / `bash`).
 
 ## Consequences
 
 - Commit messages, PR bodies and notes through a heredoc no longer trip the guard.
 - `bash <<EOF`, `cat <<EOF | sh` and friends cannot hide a harness write in the body.
 - The heuristic stays a heuristic: a body read through an indirection the guard does not
-  see (`while read f; do rm -rf "$f"; done <<EOF`, a script written first and run later) is
-  not checked. CI and CODEOWNERS remain the wall (ADR-0037).
+  see is not checked. Examples are `while read f; do rm -rf "$f"; done <<EOF`, a command
+  substitution that turns the body into arguments (`rm -rf $(cat <<EOF` …), and a script
+  written first and run later. Heredocs inside `$(…)` stay data, because the PR body form
+  `gh pr create --body "$(cat <<'EOF' …)"` must pass. CI and CODEOWNERS remain the wall
+  (ADR-0037).
+- A word naming an interpreter anywhere in a continued pipeline makes the body code, also as
+  a mere argument (`grep -c bash`); the guard denies rather than guesses.
 - Clarifies ADR-0043 decision 4 without changing it for Edit/Write.
 
 ## Rejected alternatives

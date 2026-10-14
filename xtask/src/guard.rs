@@ -10,8 +10,8 @@
 //! - shell commands must not bypass the git hooks or write harness files; a
 //!   harness directory counts also when named without its trailing slash, as a
 //!   whole shell argument outside comments (from a `#` that starts a word) and
-//!   outside heredoc bodies that no shell or interpreter reads, also through a
-//!   pipeline continued over lines (ADR-0049).
+//!   outside heredoc bodies that no shell or interpreter reads; any word of the
+//!   heredoc's pipeline, also continued over lines, can name it (ADR-0049).
 //!
 //! Edit/Write paths are collapsed (`.`, `..`) before any check. Shell commands
 //! are checked as text, at the three anchors of ADR-0043 (token start, `./`,
@@ -302,23 +302,40 @@ fn without_prose(command: &str) -> String {
 }
 
 /// The heredoc `line` (comments removed) feeds a shell or interpreter, so its
-/// heredoc bodies are code, not data: a pipeline of `line` with a heredoc has
-/// a word that [`is_interpreter`] (`bash <<EOF`, `cat <<EOF | /bin/sh`; any
-/// word counts, `env bash <<EOF`), or `line` ends in a pipe that continues in
-/// `after`, the text after the terminator line, into an interpreter
-/// ([`pipes_into_interpreter`]).
+/// heredoc bodies are code, not data: a pipeline of `line` with a heredoc
+/// [`names_interpreter`] (`bash <<EOF`, `cat <<EOF | /bin/sh`), or `line`
+/// [`continues_pipeline`] in `after`, the text after the terminator line,
+/// into an interpreter ([`pipes_into_interpreter`]).
 fn feeds_interpreter(line: &str, after: &str) -> bool {
-    line.split([';', '&']).filter(|pipeline| pipeline.contains("<<")).any(|pipeline| {
-        pipeline.split(|c: char| c.is_whitespace() || "|()`".contains(c)).any(is_interpreter)
-    }) || (line.trim_end().trim_end_matches('&').ends_with('|') && pipes_into_interpreter(after))
+    line.split([';', '&']).filter(|pipeline| pipeline.contains("<<")).any(names_interpreter)
+        || (continues_pipeline(line) && pipes_into_interpreter(after))
 }
 
-/// The pipeline at the start of `text` has a stage whose program
-/// [`is_interpreter`] (`bash`, `grep x | sh`); an argument does not count
-/// (`grep -c bash`).
+/// The pipeline at the start of `text`, joined over lines while one
+/// [`continues_pipeline`], [`names_interpreter`] (`bash`, `env bash`,
+/// `tee /tmp/y |` newline `bash`).
 fn pipes_into_interpreter(text: &str) -> bool {
-    let pipeline = text.trim_start().split([';', '&', '\n']).next().unwrap_or_default();
-    pipeline.split('|').any(|stage| stage.split_whitespace().next().is_some_and(is_interpreter))
+    let text = text.trim_start();
+    let mut len = 0;
+    for line in text.split_inclusive('\n') {
+        len += line.len();
+        if !continues_pipeline(line) {
+            break;
+        }
+    }
+    text[..len].split(';').next().is_some_and(names_interpreter)
+}
+
+/// `line` ends in a pipe (`|`, `|&`) or a backslash, so the pipeline goes on
+/// in the next line.
+fn continues_pipeline(line: &str) -> bool {
+    line.trim_end().trim_end_matches('&').ends_with(['|', '\\'])
+}
+
+/// A word of `pipeline` [`is_interpreter`]; any word counts, not only a
+/// program (`env bash`, `FOO=1 bash`).
+fn names_interpreter(pipeline: &str) -> bool {
+    pipeline.split(|c: char| c.is_whitespace() || "|()`".contains(c)).any(is_interpreter)
 }
 
 /// `word`, also by path or quoted, names a program that runs the text it
