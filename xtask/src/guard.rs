@@ -10,8 +10,9 @@
 //! - shell commands must not bypass the git hooks or write harness files; a
 //!   harness directory counts also when named without its trailing slash, as a
 //!   whole shell argument outside comments (from a `#` that starts a word) and
-//!   outside heredoc bodies that no shell or interpreter reads; any word of the
-//!   heredoc's pipeline, also continued over lines, can name it (ADR-0049).
+//!   outside heredoc bodies that no shell or interpreter on the heredoc line
+//!   reads. A command with a construct the guard does not model keeps its
+//!   comments and heredoc bodies: fail closed (ADR-0049).
 //!
 //! Edit/Write paths are collapsed (`.`, `..`) before any check. Shell commands
 //! are checked as text, at the three anchors of ADR-0043 (token start, `./`,
@@ -114,6 +115,10 @@ const TOKEN_SEPARATORS: &str = "\"'=(;|&><`";
 /// separators and redirections end it, a glob expands it to the directory
 /// itself (`xtask*`). Not `:` or `,`, which make it prose (`xtask: fix`).
 const ARGUMENT_ENDS: &str = ";|&)<>`*?[";
+/// Shell constructs [`without_prose`] does not model: command substitution
+/// with backticks, ANSI-C quoting, and redirections with `&` (`|&`, `2>&1`,
+/// `&>`, `<&0`). A command with one keeps its prose (fail closed, ADR-0049).
+const UNMODELLED: &[&str] = &["`", "$'", "|&", ">&", "&>", "<&"];
 /// Unquoted, unescaped characters after which a `#` starts a comment. Not `)`:
 /// after `$(…)` or `$((…))` the word goes on (`$(true)#`).
 const COMMENT_STARTS: &str = ";|&(";
@@ -213,7 +218,7 @@ pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Resu
     if session.unlocked || !writes {
         return Ok(());
     }
-    let shell = without_prose(command);
+    let shell = if models_prose(command) { without_prose(command) } else { command.to_owned() };
     let shell_forms = [shell.to_lowercase(), unquoted(&shell).to_lowercase()];
     if let Some(path) =
         forms.iter().zip(&shell_forms).find_map(|(form, shell)| harness_in_shell(root, form, shell))
@@ -231,6 +236,17 @@ fn unquoted(command: &str) -> String {
     command.chars().filter(|c| !matches!(c, '\'' | '"' | '\\')).collect()
 }
 
+/// The guard models every construct of `command` that could start or end
+/// prose, so [`without_prose`] may remove it: none of [`UNMODELLED`], and no
+/// heredoc line ending in `|` or `\` (a pipeline continued after the body).
+/// Otherwise every word is checked (fail closed, ADR-0049).
+fn models_prose(command: &str) -> bool {
+    !UNMODELLED.iter().any(|construct| command.contains(construct))
+        && !command
+            .lines()
+            .any(|line| line.contains("<<") && line.trim_end().ends_with(['|', '\\']))
+}
+
 /// `command` without what the shell reads as no words: heredoc bodies (from
 /// the line after `<<MARKER` through the line `MARKER`) and comments (from an
 /// unquoted, unescaped `#` that starts a word to the end of its line).
@@ -238,7 +254,8 @@ fn unquoted(command: &str) -> String {
 /// `#` or `<<` starts neither; a `#` after a closing quote, `)` or an escaped
 /// character is part of a word. A heredoc without its terminator line stays,
 /// and so do the bodies of a line that [`feeds_interpreter`] (ADR-0049); a
-/// backslash-newline continues the line.
+/// backslash-newline continues the line. Only for commands that
+/// [`models_prose`].
 fn without_prose(command: &str) -> String {
     let mut out = String::with_capacity(command.len());
     // Open quotes and parentheses, innermost last.
@@ -277,10 +294,8 @@ fn without_prose(command: &str) -> String {
                 }
             }
             (_, '\n') if !markers.is_empty() => {
-                if let Some(len) = heredoc_bodies(&command[end..], &markers)
-                    && !feeds_interpreter(&out[line_start..], &command[end + len..])
-                {
-                    end += len;
+                if !feeds_interpreter(&out[line_start..]) {
+                    end += heredoc_bodies(&command[end..], &markers).unwrap_or(0);
                 }
                 markers.clear();
                 out.push('\n');
@@ -302,40 +317,13 @@ fn without_prose(command: &str) -> String {
 }
 
 /// The heredoc `line` (comments removed) feeds a shell or interpreter, so its
-/// heredoc bodies are code, not data: a pipeline of `line` with a heredoc
-/// [`names_interpreter`] (`bash <<EOF`, `cat <<EOF | /bin/sh`), or `line`
-/// [`continues_pipeline`] in `after`, the text after the terminator line,
-/// into an interpreter ([`pipes_into_interpreter`]).
-fn feeds_interpreter(line: &str, after: &str) -> bool {
-    line.split([';', '&']).filter(|pipeline| pipeline.contains("<<")).any(names_interpreter)
-        || (continues_pipeline(line) && pipes_into_interpreter(after))
-}
-
-/// The pipeline at the start of `text`, joined over lines while one
-/// [`continues_pipeline`], [`names_interpreter`] (`bash`, `env bash`,
-/// `tee /tmp/y |` newline `bash`).
-fn pipes_into_interpreter(text: &str) -> bool {
-    let text = text.trim_start();
-    let mut len = 0;
-    for line in text.split_inclusive('\n') {
-        len += line.len();
-        if !continues_pipeline(line) {
-            break;
-        }
-    }
-    text[..len].split(';').next().is_some_and(names_interpreter)
-}
-
-/// `line` ends in a pipe (`|`, `|&`) or a backslash, so the pipeline goes on
-/// in the next line.
-fn continues_pipeline(line: &str) -> bool {
-    line.trim_end().trim_end_matches('&').ends_with(['|', '\\'])
-}
-
-/// A word of `pipeline` [`is_interpreter`]; any word counts, not only a
-/// program (`env bash`, `FOO=1 bash`).
-fn names_interpreter(pipeline: &str) -> bool {
-    pipeline.split(|c: char| c.is_whitespace() || "|()`".contains(c)).any(is_interpreter)
+/// heredoc bodies are code, not data: a pipeline of `line` with a heredoc has
+/// a word that [`is_interpreter`] (`bash <<EOF`, `cat <<EOF | /bin/sh`; any
+/// word counts, `env bash <<EOF`).
+fn feeds_interpreter(line: &str) -> bool {
+    line.split([';', '&']).filter(|pipeline| pipeline.contains("<<")).any(|pipeline| {
+        pipeline.split(|c: char| c.is_whitespace() || "|()".contains(c)).any(is_interpreter)
+    })
 }
 
 /// `word`, also by path or quoted, names a program that runs the text it
