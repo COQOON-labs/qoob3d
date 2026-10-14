@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! cargo xtask check [--fast]   definition of done
+//! cargo xtask check-rev <rev>  the full check of a commit in a temporary worktree (ADR-0048)
 //! cargo xtask arch             crate dependency rules (ADR-0036)
 //! cargo xtask docs [--fix]     documentation lint, regenerates the ADR index (ADR-0001)
 //! cargo xtask screenshot [dir] UI screenshot + scene renders for visual review (ADR-0018)
@@ -30,6 +31,7 @@ mod printers;
 mod review;
 mod rules;
 mod selftest;
+mod worktree;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -42,6 +44,14 @@ fn main() -> ExitCode {
 
     let result = match args.first().map(String::as_str) {
         Some("check") => check(&root, flag("--fast")),
+        Some("check-rev") => {
+            if let Some(rev) = args.get(1) {
+                check_rev(&root, rev)
+            } else {
+                eprintln!("usage: cargo xtask check-rev <rev>");
+                false
+            }
+        }
         Some("arch") => report("arch", arch::check(&root)),
         Some("docs") => report("docs", docs::check(&root, flag("--fix"))),
         Some("screenshot") => screenshot(&root, args.get(1).map(PathBuf::from)),
@@ -73,7 +83,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask <check [--fast] | arch | docs [--fix] | i18n | hygiene | rules | selftest | commits <revs> | review <tip> <revs> | guard | setup | models [--write] | screenshot [dir]>"
+                "usage: cargo xtask <check [--fast] | check-rev <rev> | arch | docs [--fix] | i18n | hygiene | rules | selftest | commits <revs> | review <tip> <revs> | guard | setup | models [--write] | screenshot [dir]>"
             );
             return ExitCode::from(2);
         }
@@ -83,6 +93,13 @@ fn main() -> ExitCode {
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask lives in the workspace").into()
+}
+
+/// The cargo target directory the binaries are built into, from
+/// `CARGO_TARGET_DIR`; in a `check-rev` worktree that is the check-rev
+/// directory (ADR-0048).
+pub(crate) fn cargo_target(root: &Path) -> PathBuf {
+    worktree::target_dir(root, std::env::var("CARGO_TARGET_DIR").ok().as_deref())
 }
 
 /// Prints a list of rule violations; returns true if there were none.
@@ -152,6 +169,31 @@ fn check(root: &Path, fast: bool) -> bool {
         if all_ok { if fast { "CHECK (fast) GREEN" } else { "CHECK GREEN" } } else { "CHECK RED" }
     );
     all_ok
+}
+
+/// The full check of the committed state of `rev` in a temporary worktree,
+/// independent of the working tree (ADR-0048).
+fn check_rev(root: &Path, rev: &str) -> bool {
+    let cargo_target_dir = std::env::var("CARGO_TARGET_DIR").ok();
+    let target = worktree::check_rev_target_dir(root, cargo_target_dir.as_deref());
+    let result = worktree::with_worktree(root, rev, |dir| {
+        println!("check-rev: checking {rev} in {}", dir.display());
+        match worktree::check_command(dir, &target).status() {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => Err(format!("check of {rev} in {} failed ({status})", dir.display())),
+            Err(e) => Err(format!("could not start cargo in {}: {e}", dir.display())),
+        }
+    });
+    match result.flatten() {
+        Ok(()) => {
+            println!("check-rev: {rev} green");
+            true
+        }
+        Err(e) => {
+            eprintln!("check-rev: {e}");
+            false
+        }
+    }
 }
 
 /// `commits --message <file>` checks one message, anything else is a rev range.
@@ -245,7 +287,7 @@ fn screenshot(root: &Path, dir: Option<PathBuf>) -> bool {
     if !ok {
         return false;
     }
-    let binary = root.join("target/debug/qoob3d");
+    let binary = cargo_target(root).join("debug/qoob3d");
     for view in ["iso", "front", "top"] {
         let out = dir.join(format!("scene-{view}.png"));
         let args = ["--render", &out.to_string_lossy(), "--view", view, "--size", "1200x800"];
@@ -283,7 +325,7 @@ fn models_step(root: &Path) -> bool {
 
 fn smoke(root: &Path) -> bool {
     run(root, "cargo", &["build", "--quiet", "--package", "qoob3d-app"])
-        && run(root, &root.join("target/debug/qoob3d").to_string_lossy(), &["--smoke-test"])
+        && run(root, &cargo_target(root).join("debug/qoob3d").to_string_lossy(), &["--smoke-test"])
 }
 
 fn run(root: &Path, program: &str, args: &[&str]) -> bool {

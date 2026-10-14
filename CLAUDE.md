@@ -123,9 +123,10 @@ Crate-specific pitfalls are in the respective `crates/<crate>/CLAUDE.md`.
 - **Unit tests live in `<module>/tests.rs`** (`#[cfg(test)] mod tests;`), never inline
   (ADR-0039, `xtask hygiene`).
 - **The guard blocks shell commands** that name a harness path of this repository (token
-  start, `./`, repo root) and could write (`>`, `sed -i`, `cp` …), even for harmless
-  redirections; also any command naming `QOOB3D_HARNESS_UNLOCK`/`QOOB3D_SKIP_REVIEW`. Then run
-  the command without the redirection or with a different target, or edit with Edit/Write.
+  start, `./`, repo root) and could write (`>`, `sed -i`, `cp` …; `2>/dev/null`, `>/dev/null`,
+  `&>/dev/null` and `2>&1` do not count); also any command naming
+  `QOOB3D_HARNESS_UNLOCK`/`QOOB3D_SKIP_REVIEW`. Then run the command with a different target,
+  or edit with Edit/Write.
 - **Never change fixtures** under `crates/qoob3d-core/tests/fixtures/`. New format version →
   new fixture + migration (ADR-0030).
 - **kittest time:** the default is 0.25 s per step; double-clicks need

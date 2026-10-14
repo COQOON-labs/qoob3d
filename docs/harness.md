@@ -25,7 +25,7 @@ flowchart LR
     G --> E[Edit]
     E --> S{Stop hook<br/>check --fast}
     S --> C[commit-msg<br/>identity · AI attribution]
-    C --> P{pre-push<br/>policy · gitleaks ·<br/>critic record · check}
+    C --> P{pre-push<br/>policy · gitleaks ·<br/>critic record ·<br/>check of each pushed commit}
     P --> CI{CI<br/>policy · selftest ·<br/>check macOS · mutants}
     CI --> M[(main<br/>branch protection)]
 ```
@@ -33,7 +33,7 @@ flowchart LR
 | Check | Local brake | Wall in CI |
 | --- | --- | --- |
 | fmt, clippy (strict lints), tests, reference models | stop hook, pre-push | `check (macOS)` |
-| Smoke test, supply chain (cargo-deny) | pre-push (`check` without `--fast`) | `check (macOS)`, `policy` |
+| Smoke test, supply chain (cargo-deny) | pre-push (`check-rev`: full `check` of each pushed commit in a temporary worktree, ADR-0048) | `check (macOS)`, `policy` |
 | Hygiene (tests in their own files, lint suppressions capped, English only, CODEOWNERS covers the harness) | stop hook, pre-push | `policy`, `check` |
 | Rule register complete | stop hook, pre-push | `check` |
 | Commit policy (identity, no AI attribution, tests/code separate, fixtures) | commit-msg, pre-push | `policy` |

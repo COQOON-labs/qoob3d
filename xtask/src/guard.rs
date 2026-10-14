@@ -109,10 +109,10 @@ const GIT_DIR_OPTIONS: &[&str] =
 const GIT_DIR_EXCLUSIONS: &[&str] = &["--exclude=", "--exclude-dir=", "--exclude ", "!"];
 /// Programs that only read; a command made of them may name a hook-environment
 /// file or `.git`. Not `less`/`more`: their `-o`/`--log-file` writes a file.
-/// `sort`, `uniq`, `find` and `git rev-parse` in [`reads_only`].
+/// `sort`, `uniq`, `rg`, `find` and `git rev-parse` in [`reads_only`].
 const READ_ONLY: &[&str] = &[
-    "cat", "head", "tail", "grep", "rg", "ls", "stat", "wc", "diff", "file", "test", "[", "du",
-    "cut", "tr", "nl", "basename", "dirname", "realpath", "md5", "shasum",
+    "cat", "head", "tail", "grep", "ls", "stat", "wc", "diff", "file", "test", "[", "du", "cut",
+    "tr", "nl", "basename", "dirname", "realpath", "md5", "shasum",
 ];
 /// Prefixes of the `find` primaries that write or run something.
 const FIND_ACTIONS: &[&str] = &["-exec", "-ok", "-delete", "-fprint", "-fls"];
@@ -166,7 +166,7 @@ pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Resu
         return Err(self_unlock_message(&file));
     }
     check_git_dir_in_shell(&forms, &normalised, read)?;
-    let writes = forms.iter().any(|form| writes(form))
+    let writes = forms.iter().any(|form| writes(&without_null_redirections(form)))
         || [command, normalised.as_str()].into_iter().any(edits_in_place);
     if session.unlocked || !writes {
         return Ok(());
@@ -342,12 +342,18 @@ fn is_pure_read(command: &str) -> bool {
 }
 
 /// A simple command that starts with a read-only program (a leading
-/// `VAR=value` is not one): `sort` without an output file, `uniq` without an
-/// output operand, `find` without actions, `git rev-parse`.
+/// `VAR=value` is not one): `sort` without an output file or compress program
+/// (GNU accepts it abbreviated to `--co`), `uniq` without an output operand,
+/// `rg` without a preprocessor, `find` without actions, `git rev-parse`.
 fn reads_only(segment: &str) -> bool {
     let mut words = segment.split_whitespace();
     match words.next() {
-        Some("sort") => !runs_with_option(segment, &["sort"], 'o', &["--output"]),
+        Some("sort") => {
+            !runs_with_option(segment, &["sort"], 'o', &["--output", "--compress-program"])
+        }
+        Some("rg") => !words.any(|w| {
+            matches!(w.split_once('=').map_or(w, |(name, _)| name), "--pre" | "--pre-glob")
+        }),
         Some("uniq") => words.filter(|w| !w.starts_with('-')).count() <= 1,
         Some("find") => !words.any(|w| FIND_ACTIONS.iter().any(|a| w.starts_with(a))),
         Some("git") => words.next() == Some("rev-parse"),

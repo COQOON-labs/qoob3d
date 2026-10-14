@@ -78,7 +78,7 @@ pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
     }
 
     // 3. Build every model through the real binary.
-    let binary = root.join("target/debug/qoob3d");
+    let binary = crate::cargo_target(root).join("debug/qoob3d");
     let out_dir = root.join("target/models");
     if let Err(e) = std::fs::create_dir_all(&out_dir) {
         return Err(vec![e.to_string()]);
