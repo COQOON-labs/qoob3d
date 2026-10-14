@@ -1,0 +1,16 @@
+# The guard no longer reads `-p xtask` / `--package xtask` after cargo as a
+# package name, so `cargo test -p xtask | tee /tmp/log` is denied as a harness
+# write (ADR-0037; critic K-15 on bd0fade: package names are no paths)
+command: cargo test -p xtask --quiet cargo_package_option_and_xtask_subcommand_pass
+expect: cargo_package_option_and_xtask_subcommand_pass
+--- patch
+diff --git a/xtask/src/guard.rs b/xtask/src/guard.rs
+--- a/xtask/src/guard.rs
++++ b/xtask/src/guard.rs
+@@ -629,5 +629,5 @@
+     let words = command_words(segment);
+     let Some((program, arguments)) = words.split_first() else { return false };
+     program.trim_start_matches(['\'', '"']).rsplit('/').next() == Some("cargo")
+-        && arguments.last().is_none_or(|w| matches!(*w, "-p" | "--package" | "--package="))
++        && arguments.is_empty()
+ }

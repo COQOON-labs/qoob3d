@@ -1,7 +1,7 @@
 # selftest.rs spawns git itself again instead of using the shared git helper,
 # so a GIT_DIR exported by a hook would point it at another repository (one
 # git helper, ADR-0048)
-command: cargo test -p xtask --quiet selftest_uses_the_shared_git_helper
+command: cargo test -p xtask --quiet no_module_but_main_spawns_git_itself
 expect: selftest.rs builds its own git command
 --- patch
 diff --git a/xtask/src/selftest.rs b/xtask/src/selftest.rs

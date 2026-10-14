@@ -117,35 +117,91 @@ fn git_child_reads_the_repository_at_root() {
     assert_eq!(fs::canonicalize(top.trim()).unwrap(), fs::canonicalize(&root).unwrap());
 }
 
-// One git helper: worktree.rs has no git helper of its own and builds no git
-// command itself; it calls `crate::git`.
+/// The production part of an xtask source file: everything before the
+/// out-of-line `#[cfg(test)] mod tests;` (`xtask hygiene` allows no other
+/// test code in it).
+fn production_part(source: &str) -> &str {
+    source.split("#[cfg(test)]\nmod tests;").next().unwrap_or_default()
+}
+
+/// `source` without whitespace, so `Command::new( "git" )` and
+/// `fn git (` read like their formatted forms.
+fn compact(source: &str) -> String {
+    source.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// `source` spawns git itself: a `Command::new` whose program is the string
+/// literal `"git"`, also by path (`"/usr/bin/git"`).
+fn spawns_git(source: &str) -> bool {
+    let source = compact(source);
+    source.match_indices("Command::new(\"").any(|(i, call)| {
+        source[i + call.len()..]
+            .split_once('"')
+            .is_some_and(|(program, _)| program.rsplit('/').next() == Some("git"))
+    })
+}
+
+/// The `.rs` files below `dir`, relative to `src` with `/`, recursively.
+fn rust_files(src: &Path, dir: &Path, files: &mut Vec<String>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            rust_files(src, &path, files);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            let rel = path.strip_prefix(src).unwrap().to_string_lossy().replace('\\', "/");
+            files.push(rel);
+        }
+    }
+}
+
+// One git helper (critic K-13 on bd0fade, ADR-0048): `git` / `git_command` in
+// main.rs are the only place that spawns git, so every git call drops the
+// variables a hook exports. Every other module under xtask/src, also nested
+// ones, has a production part (before `#[cfg(test)] mod tests;`; `tests.rs`
+// files are test code) without a `Command::new("git")` (also by path) and
+// without a `fn git(` of its own. The walk must reach the known modules, and
+// the detector must see main.rs's own spawn, or the test proves nothing. One
+// message per offender: `<file> builds its own git command` /
+// `<file> defines its own `git``.
 #[test]
-fn worktree_uses_the_shared_git_helper() {
-    let source =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/worktree.rs")).unwrap();
-    assert!(!source.contains("fn git("), "worktree.rs defines its own `git`");
-    assert!(!source.contains("Command::new(\"git\")"), "worktree.rs builds its own git command");
+fn no_module_but_main_spawns_git_itself() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rust_files(&src, &src, &mut files);
+    for known in ["main.rs", "selftest.rs", "worktree.rs", "printers.rs", "guard/tests.rs"] {
+        assert!(files.iter().any(|f| f == known), "{known} was not scanned: {files:?}");
+    }
+    let main = fs::read_to_string(src.join("main.rs")).unwrap();
+    assert!(spawns_git(production_part(&main)), "the detector misses main.rs's `git_command`");
+    let mut offenders = Vec::new();
+    for file in files.iter().filter(|f| *f != "main.rs" && f.rsplit('/').next() != Some("tests.rs"))
+    {
+        let source = fs::read_to_string(src.join(file)).unwrap();
+        let production = production_part(&source);
+        if spawns_git(production) {
+            offenders.push(format!("{file} builds its own git command"));
+        }
+        if compact(production).contains("fngit(") {
+            offenders.push(format!("{file} defines its own `git`"));
+        }
+    }
     assert!(
-        source.contains("crate::git") || source.contains("use crate::{git"),
-        "worktree.rs does not use `crate::git`"
+        offenders.is_empty(),
+        "{}; use `crate::git` / `crate::git_command`",
+        offenders.join("; ")
     );
 }
 
-// One git helper (critic K-01 on ef1aa48): selftest.rs spawns no git process
-// of its own. Its production part (before `#[cfg(test)] mod tests;`) builds
-// no `Command::new("git")` and passes the program name `"git"` to no runner
-// of its own (`sh(work, "git", …)` inherits GIT_DIR, GIT_WORK_TREE and
-// GIT_INDEX_FILE from a hook); it calls `crate::git` / `crate::git_command`.
+// One git helper (critic K-01 on ef1aa48): selftest.rs passes the program
+// name `"git"` to no runner of its own (`sh(work, "git", …)` inherits
+// GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE from a hook) and calls
+// `crate::git` / `crate::git_command`. Its own `Command::new("git")` is
+// caught by `no_module_but_main_spawns_git_itself`.
 #[test]
 fn selftest_uses_the_shared_git_helper() {
     let source =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/selftest.rs")).unwrap();
-    let production = source.split("#[cfg(test)]\nmod tests;").next().unwrap();
-    assert!(!production.contains("fn git("), "selftest.rs defines its own `git`");
-    assert!(
-        !production.contains("Command::new(\"git\")"),
-        "selftest.rs builds its own git command"
-    );
+    let production = production_part(&source);
     assert!(
         !production.contains("\"git\""),
         "selftest.rs passes the program `\"git\"` to a runner of its own"

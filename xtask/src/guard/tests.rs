@@ -2863,3 +2863,233 @@ fn harness_list_drift_every_directory_is_guarded_without_slash() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// A bare harness directory name is a path only as a whole shell argument
+// (critic K-15 on bd0fade, decided by the user): before it a token start
+// (whitespace, line start, `;|&()`, `./`, the root), after it the end,
+// whitespace or `;|&)`. Heredoc bodies (between `<<MARKER` and the line
+// `MARKER`, also `<<'EOF'`, `<<"EOF"`, `<<-EOF`), comments (from a `#` at a
+// token start to the end of its line) and words followed by `:` or `,` are
+// prose. `-p xtask`/`--package xtask`/`--package=xtask` and the subcommand
+// `xtask` are package and subcommand names, but only when cargo is the
+// program of the segment.
+// ---------------------------------------------------------------------------
+
+/// Commands that write outside the harness and name a harness directory only
+/// in prose: a heredoc body, a comment, a word with `:` or `,` after it. Each
+/// one writes (`<<`, `>`, `tee`), so only the harness detection decides. Must
+/// pass in a locked session (critic K-15 on bd0fade).
+const HARNESS_WORDS_IN_PROSE: &[&str] = &[
+    // The finding's examples: heredoc commit messages with the subject
+    // `xtask: …` or a body naming the harness, a note, a comment, the PR body
+    // form of Claude Code (`--body "$(cat <<'EOF' … EOF\n)"`).
+    "git commit -F - <<'EOF'\nxtask: fix the guard\nEOF",
+    "git commit -F - <<'EOF'\ntests: cover the harness guard\n\nThe harness denies writes.\nEOF",
+    "cat > /tmp/note <<EOF\nupdate the harness docs\nEOF",
+    "echo done > /tmp/x # harness",
+    "gh pr create --title \"Guard prose\" --body \"$(cat <<'EOF'\n## Summary\n- the harness \
+     guard skips prose\n- xtask guard: heredoc bodies\n\n## Test plan\n- cargo xtask \
+     selftest\nEOF\n)\"",
+    // Derived: every heredoc spelling of the spec, every bare directory as a
+    // whole body line, a body line that looks like a command, `<<-` with a
+    // tab-indented terminator, another marker (`EOF` inside is no
+    // terminator), a line that only starts with the marker.
+    "cat > /tmp/n <<\"EOF\"\nxtask\nEOF",
+    "cat > /tmp/n <<EOF\nharness\n.claude\n.github\n.cargo\n.githooks\nEOF",
+    "cat > /tmp/n <<EOF\nrm -rf xtask\nEOF",
+    "cat > /tmp/n <<-EOF\n\tthe harness\n\tEOF",
+    "cat > /tmp/n <<END\nEOF\n.github and .cargo\nEND",
+    "cat > /tmp/n <<EOF\nEOF is not alone on this line\nharness\nEOF",
+    "git commit -F - <<'EOF'\nxtask: guard\n\n.githooks and .github stay protected\nEOF",
+    // Derived: a comment at line start, after a separator, glued to the `#`.
+    "# clean up the harness notes\necho done > /tmp/x",
+    "echo done > /tmp/x; # xtask and harness",
+    "echo done > /tmp/x #harness",
+    // Derived: words with `:` or `,` directly after are no whole argument.
+    "git commit -m \"xtask: fix the guard\" 2>&1 | tee /tmp/log",
+    "echo xtask, harness, .claude: noted > /tmp/x",
+    // Derived: `.githooks` is a directory like the others, so a longer word
+    // is no path (as `.github2` in NOT_BARE_HARNESS_DIRS).
+    "rm -rf .githooks-old",
+];
+
+/// Commands where a heredoc, a comment or prose stands next to a real harness
+/// path, with the directory the denial must name. A heredoc body starts on
+/// the line after `<<MARKER` and ends at the line `MARKER`; a comment ends at
+/// its line; a `#` inside a word starts none; `:`/`,` exempt only the word
+/// they follow. Must be denied in a locked session (critic K-15 on bd0fade).
+const HARNESS_PATHS_NEXT_TO_PROSE: &[(&str, &str)] = &[
+    // The spec's examples (with a slash, around a heredoc).
+    ("cat > xtask/x <<EOF\nbody\nEOF", "xtask"),
+    ("echo x > harness/rules.md", "harness"),
+    ("cp -r x .claude", ".claude"),
+    // Derived: shell after the terminator, the rest of the `<<EOF` line,
+    // `<<-` with a tab-indented terminator, a quoted marker, a body line that
+    // only starts with the marker.
+    ("cat > /tmp/n <<EOF\nthe harness\nEOF\nrm -rf xtask", "xtask"),
+    ("cat <<EOF > /tmp/n; rm -rf harness\nbody\nEOF", "harness"),
+    ("cat > /tmp/n <<-EOF\n\tthe harness\n\tEOF\nrm -rf .claude", ".claude"),
+    ("cat > /tmp/n <<'EOF'\nxtask\nEOF\nmv harness /tmp", "harness"),
+    ("cat > /tmp/n <<EOF\nEOF is the marker\nEOF\nrm -rf .github", ".github"),
+    // Derived: a comment ends at its line, the path before a comment counts,
+    // a `#` inside a word is no comment.
+    ("echo done > /tmp/x # note\nrm -rf xtask", "xtask"),
+    ("rm -rf xtask # clean up", "xtask"),
+    ("rm -rf a#b harness", "harness"),
+    // Derived: `:` exempts only its own word.
+    ("echo xtask: > /tmp/x; rm -rf .cargo", ".cargo"),
+    // Decided by the user (follow-up to K-15): a glob character `*?[` right
+    // after a bare directory name keeps it a harness path (the shell expands
+    // it to the directory). `{xtask,harness}` stays unasserted, a known gap of
+    // the heuristic.
+    ("rm -rf xtask*", "xtask"),
+    ("rm -rf harness?", "harness"),
+    ("mv .claude* /tmp", ".claude"),
+    // Decided by the user: a quoted or escaped `#` starts no comment, and a
+    // quoted `<<EOF` starts no heredoc; the shell runs what follows.
+    ("echo '#' > /tmp/x; rm -rf xtask", "xtask"),
+    ("echo \"#\" > /tmp/x; rm -rf xtask", "xtask"),
+    ("echo \\# > /tmp/x; rm -rf xtask", "xtask"),
+    ("echo \"<<EOF\" > /tmp/x; rm -rf xtask", "xtask"),
+];
+
+/// cargo's package option and subcommand name `xtask`, a package and a
+/// subcommand, not the directory; cargo is the program of the segment, also
+/// by path. Each command writes (`>`, `tee`). Must pass in a locked session
+/// (critic K-15 on bd0fade). `bash -c 'cargo xtask check'` stays in
+/// INLINE_CODE_HARMLESS.
+const CARGO_PACKAGE_AND_SUBCOMMAND: &[&str] = &[
+    // The spec's examples.
+    "cargo test -p xtask 2>&1 | tee /tmp/log",
+    "cargo test -p xtask > /tmp/log",
+    "cargo test --package xtask | tee /tmp/log",
+    "cargo clippy --package=xtask > /tmp/log",
+    "cargo xtask check > /tmp/log",
+    "~/.cargo/bin/cargo xtask check > /tmp/log",
+    "/opt/homebrew/bin/cargo xtask check > /tmp/log",
+    // Derived: the package option by path, among other options, after a
+    // separator and after the PATH export of the project instructions.
+    "/opt/homebrew/bin/cargo test -p xtask > /tmp/log",
+    "$HOME/.cargo/bin/cargo test --package xtask 2>&1 | tee /tmp/log",
+    "cargo test --quiet -p xtask guard -- --nocapture > /tmp/log",
+    "cd /tmp && cargo test -p xtask | tee /tmp/log",
+    "export PATH=\"/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH\"; cargo test -p xtask \
+     2>&1 | tee /tmp/log",
+];
+
+/// A word `cargo` that is not the program of the segment, cargo's
+/// subcommand name that is not `xtask`, `-p` of another program, and a cargo
+/// segment followed by a real write: no exception applies, with the directory
+/// the denial must name (critic K-15 on bd0fade).
+const NOT_CARGO_EXCEPTIONS: &[(&str, &str)] = &[
+    // The spec's examples.
+    ("rm -rf cargo xtask", "xtask"),
+    ("rm -rf cargo harness", "harness"),
+    ("cargo harness > /tmp/x", "harness"),
+    // Derived: `-p` of cp, a cargo path as an argument of rm, cargo in
+    // another segment than the write.
+    ("cp -p /tmp/evil xtask", "xtask"),
+    ("rm -rf /usr/local/bin/cargo xtask", "xtask"),
+    ("cargo test -p xtask; rm -rf xtask", "xtask"),
+    ("cargo xtask check && cp -r /tmp/evil xtask", "xtask"),
+];
+
+// ADR-0037 (critic K-15 on bd0fade): harness directory names in heredoc
+// bodies, comments and prose are no paths. Locked and unlocked, spec root and
+// a temp repo.
+#[test]
+fn harness_words_in_heredocs_comments_and_prose_pass() {
+    let root = repo("harness_words_in_prose");
+    let unlocked = session(true, &unused_home());
+    for command in HARNESS_WORDS_IN_PROSE {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037/ADR-0043 (critic K-15 on bd0fade): a heredoc or comment does not
+// hide a real harness path before, after or next to it. A locked session
+// denies with the harness message naming the directory of the real path (not
+// a word of the body); an unlocked one allows. Spec root and a temp repo.
+#[test]
+fn heredocs_and_comments_do_not_hide_harness_paths() {
+    let root = repo("harness_paths_next_to_prose");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in HARNESS_PATHS_NEXT_TO_PROSE {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (critic K-15 on bd0fade): `-p xtask`, `--package xtask`,
+// `--package=xtask` and the subcommand `xtask` pass when cargo, also by path,
+// is the program of the segment. Spec root and a temp repo.
+#[test]
+fn cargo_package_option_and_xtask_subcommand_pass() {
+    let root = repo("cargo_package_and_subcommand");
+    for command in CARGO_PACKAGE_AND_SUBCOMMAND {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037/ADR-0043 (critic K-15 on bd0fade): the cargo exceptions need cargo
+// as the program of the segment and only cover `xtask`; `rm -rf cargo xtask`
+// removes the directory. Locked denied naming the directory, unlocked
+// allowed. Spec root and a temp repo.
+#[test]
+fn cargo_exceptions_need_cargo_as_the_program() {
+    let root = repo("not_cargo_exceptions");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in NOT_CARGO_EXCEPTIONS {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], command);
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], command);
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (critic K-01 on bd0fade, one abbreviation rule for long options):
+// the programs with an in-place or inline-code option (sed, node) and those
+// with a writer option (curl, tar) read a long option alike: more than `--`
+// that is a prefix of the option (`--i`, `--e`, `--o`, `--ex`), also with
+// `=value`, is the option; `--` alone abbreviates nothing (it ends the
+// options). This is the guard's documented rule (doc comments of
+// `runs_with_flag` and `runs_with_option`: "also abbreviated"), conservative
+// for programs that accept no abbreviations; the refactoring must keep it the
+// same for both tables.
+#[test]
+fn long_option_abbreviations_match_alike_for_every_program() {
+    let root = repo("long_option_abbreviations");
+    for (command, fragment) in [
+        ("sed --i s/a/b/ Cargo.toml", "Cargo.toml"),
+        ("sed --i=.bak s/a/b/ Cargo.toml", "Cargo.toml"),
+        ("node --e 1 xtask/tool.js", "xtask/"),
+        ("node --e=1 xtask/tool.js", "xtask/"),
+        ("curl --o Cargo.toml https://example.com/x", "Cargo.toml"),
+        ("curl --o=Cargo.toml https://example.com/x", "Cargo.toml"),
+        ("tar --ex -f /tmp/h.tar Cargo.toml", "Cargo.toml"),
+    ] {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}`");
+        assert_denied(spec_shell(false, command), &[&needle], command);
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], command);
+    }
+    for command in [
+        "sed -- s/a/b/ Cargo.toml",
+        "node -- xtask/tool.js",
+        "curl -- https://example.com/Cargo.toml",
+        "tar -- Cargo.toml",
+    ] {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
