@@ -3555,8 +3555,10 @@ const HEREDOC_DATA_READERS: &[&str] = &[
     // The task's examples.
     "tee /tmp/note <<EOF\nharness\nEOF",
     "/bin/cat > /tmp/n <<EOF\nxtask notes\nEOF",
-    // Derived: git and gh with options or by path, tee appending.
-    "git -C /tmp/repo commit -F - <<'EOF'\nxtask: fix\n\nThe harness denies writes.\nEOF",
+    // Derived: git by path, gh with options, tee appending. (`git -C
+    // /tmp/repo commit -F -` moved to HEREDOC_NON_MESSAGE_FORMS: since the
+    // exact message forms, a global option before the subcommand keeps the
+    // body; critic finding on cd258d4.)
     "/usr/bin/git commit -F - <<'EOF'\nfix the harness guard\nEOF",
     "gh issue create --title Guard --body-file - <<'EOF'\nharness notes\nEOF",
     "tee -a /tmp/note <<'EOF'\nxtask\nEOF",
@@ -3647,6 +3649,98 @@ fn heredocs_in_compound_commands_are_checked() {
 fn closing_words_in_prose_keep_data_heredocs_data() {
     let root = repo("prose_with_closing_words");
     for command in PROSE_WITH_CLOSING_WORDS {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Only the exact message forms make a heredoc body data (critic finding on
+// cd258d4, decided by the user), on top of every earlier condition:
+// - `git commit` / `git tag` reading it with `-F -` (`--file=-`, `--file
+//   -`) or as `-m "$(cat <<'EOF' …)"` / `--message="$(cat <<…)"`; git also
+//   by path, but no global option before the subcommand (`-C`, `-c`);
+// - `gh pr create|edit`, `gh issue create|edit` with `--body-file -` or
+//   `--body "$(cat <<'EOF' …)"`;
+// - `cat`/`tee` writing to a file: `cat > path <<EOF`, `cat <<EOF > path`,
+//   `cat >> path`, `tee path <<EOF`, `tee -a path <<EOF`.
+// Everything else keeps the body as shell text, checked word by word.
+// ---------------------------------------------------------------------------
+
+/// git, gh, cat and tee reading a heredoc in a form that is no message,
+/// with the directory the denial must name: pathspecs, config, aliases, API
+/// fields, a global option before `commit`, other subcommands, `cat`/`tee`
+/// without a file. Must be denied in a locked session.
+const HEREDOC_NON_MESSAGE_FORMS: &[(&str, &str)] = &[
+    // The finding's examples.
+    ("git rm -r --pathspec-from-file=- <<'EOF'\nxtask\nEOF", "xtask"),
+    ("git restore --source=HEAD~3 --pathspec-from-file=- <<'EOF'\n.claude\nEOF", ".claude"),
+    ("git checkout HEAD~3 -- \"$(cat <<'EOF'\nharness\nEOF\n)\"", "harness"),
+    ("git -c \"$(cat <<'EOF'\nalias.x=!rm -rf xtask\nEOF\n)\" x", "xtask"),
+    ("git add --pathspec-from-file=- <<'EOF'\n.githooks\nEOF", ".githooks"),
+    ("git -C /tmp/repo commit -F - <<'EOF'\nxtask notes\nEOF", "xtask"),
+    ("gh alias set x --shell \"$(cat <<'EOF'\nrm -rf xtask\nEOF\n)\"", "xtask"),
+    ("gh api -F body=@- <<'EOF'\nxtask\nEOF", "xtask"),
+    ("cat <<EOF\nxtask\nEOF", "xtask"),
+    // Derived: `-c` before `commit`, another subcommand with `-F -`, `-F`
+    // with a file (the heredoc is not the message), a gh subcommand outside
+    // the list, `tee` without a file.
+    ("git -c user.name=x commit -F - <<'EOF'\nharness notes\nEOF", "harness"),
+    ("git notes add -F - <<'EOF'\nxtask\nEOF", "xtask"),
+    ("git commit -F /tmp/msg <<'EOF'\nxtask notes\nEOF", "xtask"),
+    ("gh pr comment 12 --body-file - <<'EOF'\nxtask\nEOF", "xtask"),
+    ("tee <<EOF\nxtask\nEOF", "xtask"),
+    // Moved from HEREDOC_DATA_READERS (was must-pass); `xtask:` is exempt as
+    // a word, so the body's `harness` is named.
+    (
+        "git -C /tmp/repo commit -F - <<'EOF'\nxtask: fix\n\nThe harness denies writes.\nEOF",
+        "harness",
+    ),
+];
+
+/// The exact message forms. Must pass in a locked session. (More forms stay
+/// in HARNESS_WORDS_IN_PROSE, MULTI_LINE_DATA_HEREDOCS, HEREDOC_DATA_SHAPES,
+/// HEREDOC_DATA_READERS and PROSE_WITH_CLOSING_WORDS.)
+const HEREDOC_MESSAGE_FORMS: &[&str] = &[
+    // The task's examples not covered elsewhere.
+    "git commit -m \"$(cat <<'EOF'\nfix the harness guard\n\nxtask notes\nEOF\n)\"",
+    "git tag -a v1 -F - <<'EOF'\nharness release\nEOF",
+    "gh issue create --title X --body-file - <<'EOF'\nxtask notes\nEOF",
+    // Derived: the long spellings of `-F -` and `-m`, an option after the
+    // subcommand, `gh pr edit`/`gh issue edit`, `cat >>`.
+    "git commit --file=- <<'EOF'\nharness notes\nEOF",
+    "git commit --file - <<'EOF'\nxtask notes\nEOF",
+    "git commit --message=\"$(cat <<'EOF'\nfix the harness\nEOF\n)\"",
+    "git commit --amend -F - <<'EOF'\nharness notes\nEOF",
+    "gh pr edit 12 --body-file - <<'EOF'\nxtask notes\nEOF",
+    "gh issue edit 3 --body \"$(cat <<'EOF'\nharness\nEOF\n)\"",
+    "cat >> /tmp/note <<EOF\nharness\nEOF",
+];
+
+// ADR-0037/ADR-0043 (critic finding on cd258d4): a heredoc read by git, gh,
+// cat or tee in a form that is no message keeps its body as shell text.
+// Locked denied naming the directory, unlocked allowed; spec root and a temp
+// repo.
+#[test]
+fn heredoc_body_is_data_only_in_the_message_forms() {
+    let root = repo("heredoc_non_message_forms");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in HEREDOC_NON_MESSAGE_FORMS {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (critic finding on cd258d4): the exact message forms stay data.
+// Locked, spec root and a temp repo.
+#[test]
+fn heredoc_message_forms_stay_data() {
+    let root = repo("heredoc_message_forms");
+    for command in HEREDOC_MESSAGE_FORMS {
         assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
         assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
     }
