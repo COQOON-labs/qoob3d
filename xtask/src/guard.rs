@@ -10,9 +10,10 @@
 //! - shell commands must not bypass the git hooks or write harness files; a
 //!   harness directory counts also when named without its trailing slash, as a
 //!   whole shell argument outside comments (from a `#` that starts a word) and
-//!   outside heredoc bodies of the safe shape: a known data reader (`cat`,
-//!   `tee`, `git`, `gh`) as the heredoc's command, with nothing but its words
-//!   before the marker and nothing after it but one file redirection. A
+//!   outside heredoc bodies of the safe shape: an exact message form as the
+//!   heredoc's command (`git commit|tag -F -`, `gh pr|issue create|edit
+//!   --body-file -`, their `"$(cat <<EOF"` messages, `cat`/`tee` writing a
+//!   file), with nothing after the marker but one file redirection. A
 //!   command with a construct the guard does not model (backticks, `$'`,
 //!   redirections with `&`, arithmetic `((`), or a compound command closing
 //!   after a heredoc body (`}`, `done`, `fi`, `esac`, `)`), keeps its comments
@@ -124,9 +125,6 @@ const ARGUMENT_ENDS: &str = ";|&)<>`*?[";
 /// `&>`, `<&0`), and arithmetic, whose `<<` is a shift (`((`, `$((`). A
 /// command with one keeps its prose (fail closed, ADR-0049).
 const UNMODELLED: &[&str] = &["`", "$'", "|&", ">&", "&>", "<&", "(("];
-/// Programs that read a heredoc body as data: it ends up in a file, a commit
-/// message or a PR body, never runs (ADR-0049).
-const DATA_READERS: &[&str] = &["cat", "tee", "git", "gh"];
 /// Unquoted, unescaped characters after which a `#` starts a comment. Not `)`:
 /// after `$(…)` or `$((…))` the word goes on (`$(true)#`).
 const COMMENT_STARTS: &str = ";|&(";
@@ -263,8 +261,8 @@ fn models_prose(command: &str) -> bool {
 /// Quotes, backslashes and `$(…)` in double quotes are followed, so a quoted
 /// `#` or `<<` starts neither; a `#` after a closing quote, `)` or an escaped
 /// character is part of a word. A heredoc body is removed only in the safe
-/// shape: the only heredoc of its line, read by a known data reader
-/// ([`reads_data`]), with nothing after the marker but one file redirection
+/// shape: the only heredoc of its line, read as a message or written to a file
+/// ([`is_message_form`]), with nothing after the marker but one file redirection
 /// ([`only_redirects_to_file`]; ADR-0049). A backslash-newline continues the
 /// line. None if a compound command closes after a removed body
 /// ([`closes_compound`]): its output may go to a shell, so the caller checks
@@ -316,8 +314,9 @@ fn without_prose(command: &str) -> Option<String> {
             (_, '\n') if !markers.is_empty() => {
                 if markers.len() == 1
                     && only_redirects_to_file(&out[after_marker..])
-                    && reads_data(
+                    && is_message_form(
                         &out[line_start..after_marker],
+                        &out[after_marker..],
                         open.iter().filter(|&&o| matches!(o, '(' | '$')).count(),
                     )
                     && let Some(len) = heredoc_bodies(&command[end..], &markers)
@@ -374,23 +373,91 @@ fn only_redirects_to_file(tail: &str) -> bool {
     !target.is_empty() && !target.contains(|c: char| c.is_whitespace() || "|&;<>(){}".contains(c))
 }
 
-/// `head`, a heredoc line up to its marker (comments removed), hands the body
-/// to a [`DATA_READERS`] program: before the `<<` stand only the words of
-/// simple commands of such programs, also by path, one from the line start
-/// and one after each `$(` (`git commit -m "$(cat <<'EOF'`), and those `$(`
-/// are the `open_parens` still open. No `;&|(){}` (a list, a pipe, a subshell,
-/// a group), no other program in front (`env cat`, `X=1 cat`).
-fn reads_data(head: &str, open_parens: usize) -> bool {
+/// `head`, a heredoc line up to its marker (comments removed), with `tail`,
+/// the rest of the line, is one of the forms whose heredoc body ends up in a
+/// commit or tag message, a PR or issue body, or a file, never runs
+/// (ADR-0049). Programs also by path:
+/// - `git commit|tag … -F -` (`--file=-`, `--file -`), no global option
+///   before the subcommand (`git -C`, `git -c`);
+/// - `gh pr|issue create|edit … --body-file -`;
+/// - `git commit|tag … -m "$(cat <<EOF` (`--message=`) and
+///   `gh pr|issue create|edit … --body "$(cat <<EOF`, the only `$(` and the
+///   `open_parens` still open;
+/// - `cat > path <<EOF` (`>>`, or the redirection in `tail`), `tee [-a] path
+///   <<EOF`.
+///
+/// No `;&|(){}` besides that `$(` (a list, a pipe, a subshell, a group), no
+/// other program in front (`env cat`, `X=1 git`).
+fn is_message_form(head: &str, tail: &str, open_parens: usize) -> bool {
     let prefix = head.rfind("<<").map_or(head, |i| &head[..i]);
-    prefix.matches("$(").count() == open_parens
-        && prefix.split("$(").all(|command| {
-            !command.contains(|c: char| ";&|(){}".contains(c))
-                && command
-                    .split_whitespace()
-                    .next()
-                    .and_then(|program| program.rsplit('/').next())
-                    .is_some_and(|name| DATA_READERS.contains(&name))
-        })
+    let parts: Vec<&str> = prefix.split("$(").collect();
+    if parts.len() - 1 != open_parens
+        || parts.iter().any(|part| part.contains(|c: char| ";&|(){}".contains(c)))
+    {
+        return false;
+    }
+    match parts.as_slice() {
+        [command] => {
+            let words = line_words(command);
+            git_message(&words).is_some_and(|rest| reads_stdin(rest, "-F", "--file"))
+                || gh_body(&words)
+                    .is_some_and(|rest| reads_stdin(rest, "--body-file", "--body-file"))
+                || match words.split_first() {
+                    Some((cat, _)) if program_name(cat) == "cat" => {
+                        prefix.contains('>') || tail.contains('>')
+                    }
+                    Some((tee, files)) if program_name(tee) == "tee" => {
+                        files.iter().any(|w| !w.starts_with('-'))
+                    }
+                    _ => false,
+                }
+        }
+        [outer, inner] => {
+            let outer = line_words(outer.trim_end().trim_end_matches('"'));
+            line_words(inner).iter().map(|w| program_name(w)).eq(["cat"])
+                && (git_message(&outer).is_some_and(|rest| {
+                    matches!(rest.last(), Some(&("-m" | "--message" | "--message=")))
+                }) || gh_body(&outer)
+                    .is_some_and(|rest| matches!(rest.last(), Some(&("--body" | "--body=")))))
+        }
+        _ => false,
+    }
+}
+
+/// The words after `git commit` or `git tag` (git also by path, no global
+/// option before the subcommand).
+fn git_message<'a>(words: &'a [&'a str]) -> Option<&'a [&'a str]> {
+    match words {
+        [git, "commit" | "tag", rest @ ..] if program_name(git) == "git" => Some(rest),
+        _ => None,
+    }
+}
+
+/// The words after `gh pr|issue create|edit` (gh also by path).
+fn gh_body<'a>(words: &'a [&'a str]) -> Option<&'a [&'a str]> {
+    match words {
+        [gh, "pr" | "issue", "create" | "edit", rest @ ..] if program_name(gh) == "gh" => {
+            Some(rest)
+        }
+        _ => None,
+    }
+}
+
+/// `words` hand stdin to the option `short` or `long` as `-`: `short -`,
+/// `long -` or `long=-` (`-F -`, `--file=-`).
+fn reads_stdin(words: &[&str], short: &str, long: &str) -> bool {
+    words.windows(2).any(|pair| (pair[0] == short || pair[0] == long) && pair[1] == "-")
+        || words.iter().any(|w| w.strip_prefix(long).is_some_and(|value| value == "=-"))
+}
+
+/// The words of a command line part, without the `\` of a backslash-newline.
+fn line_words(part: &str) -> Vec<&str> {
+    part.split_whitespace().filter(|w| *w != "\\").collect()
+}
+
+/// The program name of a command word given by path (`/usr/bin/git` → `git`).
+fn program_name(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
 }
 
 /// The heredoc that `rest` starts with (`<<EOF`, `<<-'EOF'`): the length of
