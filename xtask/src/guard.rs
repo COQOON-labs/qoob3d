@@ -10,9 +10,11 @@
 //! - shell commands must not bypass the git hooks or write harness files; a
 //!   harness directory counts also when named without its trailing slash, as a
 //!   whole shell argument outside comments (from a `#` that starts a word) and
-//!   outside heredoc bodies that no shell or interpreter on the heredoc line
-//!   reads. A command with a construct the guard does not model keeps its
-//!   comments and heredoc bodies: fail closed (ADR-0049).
+//!   outside heredoc bodies of the safe shape: nothing after the marker but one
+//!   file redirection, and no shell or interpreter on the heredoc line. A
+//!   command with a construct the guard does not model (backticks, `$'`,
+//!   redirections with `&`, arithmetic `((`) keeps its comments and heredoc
+//!   bodies: fail closed (ADR-0049).
 //!
 //! Edit/Write paths are collapsed (`.`, `..`) before any check. Shell commands
 //! are checked as text, at the three anchors of ADR-0043 (token start, `./`,
@@ -116,9 +118,10 @@ const TOKEN_SEPARATORS: &str = "\"'=(;|&><`";
 /// itself (`xtask*`). Not `:` or `,`, which make it prose (`xtask: fix`).
 const ARGUMENT_ENDS: &str = ";|&)<>`*?[";
 /// Shell constructs [`without_prose`] does not model: command substitution
-/// with backticks, ANSI-C quoting, and redirections with `&` (`|&`, `2>&1`,
-/// `&>`, `<&0`). A command with one keeps its prose (fail closed, ADR-0049).
-const UNMODELLED: &[&str] = &["`", "$'", "|&", ">&", "&>", "<&"];
+/// with backticks, ANSI-C quoting, redirections with `&` (`|&`, `2>&1`,
+/// `&>`, `<&0`), and arithmetic, whose `<<` is a shift (`((`, `$((`). A
+/// command with one keeps its prose (fail closed, ADR-0049).
+const UNMODELLED: &[&str] = &["`", "$'", "|&", ">&", "&>", "<&", "(("];
 /// Unquoted, unescaped characters after which a `#` starts a comment. Not `)`:
 /// after `$(…)` or `$((…))` the word goes on (`$(true)#`).
 const COMMENT_STARTS: &str = ";|&(";
@@ -237,14 +240,10 @@ fn unquoted(command: &str) -> String {
 }
 
 /// The guard models every construct of `command` that could start or end
-/// prose, so [`without_prose`] may remove it: none of [`UNMODELLED`], and no
-/// heredoc line ending in `|` or `\` (a pipeline continued after the body).
+/// prose, so [`without_prose`] may remove it: none of [`UNMODELLED`].
 /// Otherwise every word is checked (fail closed, ADR-0049).
 fn models_prose(command: &str) -> bool {
     !UNMODELLED.iter().any(|construct| command.contains(construct))
-        && !command
-            .lines()
-            .any(|line| line.contains("<<") && line.trim_end().ends_with(['|', '\\']))
 }
 
 /// `command` without what the shell reads as no words: heredoc bodies (from
@@ -252,21 +251,24 @@ fn models_prose(command: &str) -> bool {
 /// unquoted, unescaped `#` that starts a word to the end of its line).
 /// Quotes, backslashes and `$(…)` in double quotes are followed, so a quoted
 /// `#` or `<<` starts neither; a `#` after a closing quote, `)` or an escaped
-/// character is part of a word. A heredoc without its terminator line stays,
-/// and so do the bodies of a line that [`feeds_interpreter`] (ADR-0049); a
-/// backslash-newline continues the line. Only for commands that
-/// [`models_prose`].
+/// character is part of a word. A heredoc body is removed only in the safe
+/// shape: the only heredoc of its line, with nothing after the marker but one
+/// file redirection ([`only_redirects_to_file`]), and no interpreter on the
+/// line ([`feeds_interpreter`]; ADR-0049). A backslash-newline continues the
+/// line. Only for commands that [`models_prose`].
 fn without_prose(command: &str) -> String {
     let mut out = String::with_capacity(command.len());
     // Open quotes and parentheses, innermost last.
     let mut open: Vec<char> = Vec::new();
     let mut markers: Vec<(String, bool)> = Vec::new();
-    // Where the current line starts in `out`; whether the next character starts a word.
-    let (mut line_start, mut word_start) = (0, true);
+    // Where the current line starts in `out`, where the text after the last
+    // heredoc marker starts; whether the next character starts a word.
+    let (mut line_start, mut after_marker, mut word_start) = (0, 0, true);
     let mut i = 0;
     while let Some(c) = command[i..].chars().next() {
         let rest = &command[i..];
         let mut end = i + c.len_utf8();
+        let heredocs = markers.len();
         match (open.last().copied(), c) {
             (Some('\''), '\'') | (Some('"'), '"') | (Some('('), ')') => {
                 open.pop();
@@ -294,7 +296,10 @@ fn without_prose(command: &str) -> String {
                 }
             }
             (_, '\n') if !markers.is_empty() => {
-                if !feeds_interpreter(&out[line_start..]) {
+                if markers.len() == 1
+                    && only_redirects_to_file(&out[after_marker..])
+                    && !feeds_interpreter(&out[line_start..])
+                {
                     end += heredoc_bodies(&command[end..], &markers).unwrap_or(0);
                 }
                 markers.clear();
@@ -306,6 +311,9 @@ fn without_prose(command: &str) -> String {
             _ => {}
         }
         out.push_str(&command[i..end]);
+        if markers.len() > heredocs {
+            after_marker = out.len();
+        }
         let outside_quotes = matches!(open.last(), None | Some('('));
         if outside_quotes && c == '\n' {
             line_start = out.len();
@@ -314,6 +322,19 @@ fn without_prose(command: &str) -> String {
         i = end;
     }
     out
+}
+
+/// `tail`, the rest of a heredoc line after its marker (comments removed),
+/// leaves the body data: nothing, or one output redirection to a file
+/// (`> /tmp/note`, `>>/tmp/note`). A pipe, `;`, `&&`, a subshell, a second
+/// redirection or any other word may feed the body to a program.
+fn only_redirects_to_file(tail: &str) -> bool {
+    let tail = tail.trim();
+    let Some(target) = tail.strip_prefix(">>").or_else(|| tail.strip_prefix('>')) else {
+        return tail.is_empty();
+    };
+    let target = target.trim_start();
+    !target.is_empty() && !target.contains(|c: char| c.is_whitespace() || "|&;<>(){}".contains(c))
 }
 
 /// The heredoc `line` (comments removed) feeds a shell or interpreter, so its
@@ -342,8 +363,8 @@ fn is_interpreter(word: &str) -> bool {
 
 /// The heredoc that `rest` starts with (`<<EOF`, `<<-'EOF'`): the length of
 /// the operator with its marker, and the marker without quotes with whether
-/// `<<-` strips leading tabs from the terminator line. None for `<<` in
-/// arithmetic, whose "marker" a `)` follows (`$((1 << 2))`).
+/// `<<-` strips leading tabs from the terminator line. Arithmetic, whose `<<`
+/// is a shift, never gets here ([`UNMODELLED`]).
 fn heredoc(rest: &str) -> Option<(usize, (String, bool))> {
     let operator = rest.strip_prefix("<<")?;
     let (tabs, word) = operator.strip_prefix('-').map_or((false, operator), |word| (true, word));
@@ -352,10 +373,7 @@ fn heredoc(rest: &str) -> Option<(usize, (String, bool))> {
         word.find(|c: char| c.is_whitespace() || ";|&<>()".contains(c)).unwrap_or(word.len());
     let marker = unquoted(&word[..word_len]);
     let after = &word[word_len..];
-    if marker.is_empty() || after.trim_start_matches([' ', '\t']).starts_with(')') {
-        return None;
-    }
-    Some((rest.len() - after.len(), (marker, tabs)))
+    (!marker.is_empty()).then(|| (rest.len() - after.len(), (marker, tabs)))
 }
 
 /// The length of the heredoc bodies at the start of `text`, through the
