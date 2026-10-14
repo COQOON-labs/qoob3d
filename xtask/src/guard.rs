@@ -8,7 +8,8 @@
 //! - format fixtures are never modified,
 //! - one agent context writes either tests or production code, never both,
 //! - shell commands must not bypass the git hooks or write harness files; a
-//!   harness directory counts also when named without its trailing slash.
+//!   harness directory counts also when named without its trailing slash, as a
+//!   whole shell argument outside heredoc bodies and comments.
 //!
 //! Paths are collapsed (`.`, `..`) before any check. Shell commands are also
 //! matched with quotes and backslashes removed, which split words without
@@ -77,10 +78,13 @@ const INLINE_CODE: &[(&[&str], &str, &str, &[&str])] = &[
     (&["perl"], "eE", "CFIMmVx", &[]),
     (&["node"], "ep", "", &["--eval", "--print"]),
     (&["deno"], "", "", &["eval"]),
-    (&["sh", "bash", "zsh"], "c", "", &[]),
+    (SHELLS, "c", "", &[]),
 ];
+/// Shells whose `-c` runs its argument as a command line.
+const SHELLS: &[&str] = &["sh", "bash", "zsh"];
 /// Path fragments of the harness as they appear in shell commands; a directory
-/// (ending in `/`) also as a whole name without its slash ([`harness_in_shell`]).
+/// of [`paths::HARNESS`] also as a whole argument without its slash
+/// ([`harness_in_shell`]).
 const HARNESS_IN_SHELL: &[&str] = &[
     ".claude/",
     ".githooks",
@@ -102,6 +106,12 @@ const ROOT_VARIABLES: &[&str] =
     &["$CLAUDE_PROJECT_DIR", "${CLAUDE_PROJECT_DIR}", "$PWD", "${PWD}", "$(pwd)"];
 /// Characters after which a path starts a new shell token.
 const TOKEN_SEPARATORS: &str = "\"'=(;|&><`";
+/// Characters after which a bare directory name is still a whole argument:
+/// separators and redirections end it, a glob expands it to the directory
+/// itself (`xtask*`). Not `:` or `,`, which make it prose (`xtask: fix`).
+const ARGUMENT_ENDS: &str = ";|&)<>`*?[";
+/// Characters after which an unquoted `#` starts a comment.
+const COMMENT_STARTS: &str = ";|&()";
 
 /// Files in the home directory that every new shell reads (ADR-0043).
 const SHELL_STARTUP: &[&str] =
@@ -181,7 +191,7 @@ pub(crate) fn pre_tool_use(root: &Path, session: &Session, input: &Value) -> Res
 }
 
 pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Result<(), String> {
-    let normalised: String = command.chars().filter(|c| !matches!(c, '\'' | '"' | '\\')).collect();
+    let normalised = unquoted(command);
     let forms = [command.to_lowercase(), normalised.to_lowercase()];
     check_bypasses(&forms[1])?;
     let read = is_pure_read(&normalised);
@@ -198,13 +208,118 @@ pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Resu
     if session.unlocked || !writes {
         return Ok(());
     }
-    if let Some(path) = forms.iter().find_map(|form| harness_in_shell(root, form)) {
+    let shell = without_prose(command);
+    let shell_forms = [shell.to_lowercase(), unquoted(&shell).to_lowercase()];
+    if let Some(path) =
+        forms.iter().zip(&shell_forms).find_map(|(form, shell)| harness_in_shell(root, form, shell))
+    {
         return Err(format!(
             "Shell command could modify the harness file `{path}` (ADR-0037). Harness changes \
              only in a session unlocked by the human (QOOB3D_HARNESS_UNLOCK=1)."
         ));
     }
     Ok(())
+}
+
+/// `command` with quotes and backslashes removed.
+fn unquoted(command: &str) -> String {
+    command.chars().filter(|c| !matches!(c, '\'' | '"' | '\\')).collect()
+}
+
+/// `command` without what the shell reads as no words: heredoc bodies (from
+/// the line after `<<MARKER` through the line `MARKER`) and comments (from an
+/// unquoted `#` that starts a token to the end of its line). Quotes,
+/// backslashes and `$(…)` in double quotes are followed, so a quoted `#` or
+/// `<<` starts neither. A heredoc without its terminator line stays.
+fn without_prose(command: &str) -> String {
+    let mut out = String::with_capacity(command.len());
+    // Open quotes and parentheses, innermost last.
+    let mut open: Vec<char> = Vec::new();
+    let mut markers: Vec<(String, bool)> = Vec::new();
+    let mut i = 0;
+    while let Some(c) = command[i..].chars().next() {
+        let rest = &command[i..];
+        let mut end = i + c.len_utf8();
+        match (open.last().copied(), c) {
+            (Some('\''), '\'') | (Some('"'), '"') | (Some('('), ')') => {
+                open.pop();
+            }
+            (Some('\''), _) => {}
+            (_, '\\') => end += rest[1..].chars().next().map_or(0, char::len_utf8),
+            (Some('"'), '$') if rest.starts_with("$(") => {
+                open.push('(');
+                end += 1;
+            }
+            (Some('"'), _) => {}
+            (_, '\'' | '"' | '(') => open.push(c),
+            (_, '#') if command[..i].chars().next_back().is_none_or(starts_comment) => {
+                i += rest.find('\n').unwrap_or(rest.len());
+                continue;
+            }
+            (_, '<') => {
+                let len = rest.len() - rest.trim_start_matches('<').len();
+                end = i + len;
+                if len == 2
+                    && let Some((len, marker)) = heredoc(rest)
+                {
+                    markers.push(marker);
+                    end = i + len;
+                }
+            }
+            (_, '\n') if !markers.is_empty() => {
+                end += heredoc_bodies(&command[end..], &markers).unwrap_or(0);
+                markers.clear();
+                out.push('\n');
+                i = end;
+                continue;
+            }
+            _ => {}
+        }
+        out.push_str(&command[i..end]);
+        i = end;
+    }
+    out
+}
+
+/// An unquoted `#` after `c` starts a comment.
+fn starts_comment(c: char) -> bool {
+    c.is_whitespace() || COMMENT_STARTS.contains(c)
+}
+
+/// The heredoc that `rest` starts with (`<<EOF`, `<<-'EOF'`): the length of
+/// the operator with its marker, and the marker without quotes with whether
+/// `<<-` strips leading tabs from the terminator line. None for `<<` in
+/// arithmetic, whose "marker" a `)` follows (`$((1 << 2))`).
+fn heredoc(rest: &str) -> Option<(usize, (String, bool))> {
+    let operator = rest.strip_prefix("<<")?;
+    let (tabs, word) = operator.strip_prefix('-').map_or((false, operator), |word| (true, word));
+    let word = word.trim_start_matches([' ', '\t']);
+    let word_len =
+        word.find(|c: char| c.is_whitespace() || ";|&<>()".contains(c)).unwrap_or(word.len());
+    let marker = unquoted(&word[..word_len]);
+    let after = &word[word_len..];
+    if marker.is_empty() || after.trim_start_matches([' ', '\t']).starts_with(')') {
+        return None;
+    }
+    Some((rest.len() - after.len(), (marker, tabs)))
+}
+
+/// The length of the heredoc bodies at the start of `text`, through the
+/// terminator line of the last of `markers`; None if a terminator is missing.
+fn heredoc_bodies(text: &str, markers: &[(String, bool)]) -> Option<usize> {
+    let mut len = 0;
+    for (marker, tabs) in markers {
+        loop {
+            let line = text[len..].split_inclusive('\n').next()?;
+            len += line.len();
+            let line = line.strip_suffix('\n').unwrap_or(line);
+            let line = if *tabs { line.trim_start_matches('\t') } else { line };
+            if line == marker {
+                break;
+            }
+        }
+    }
+    Some(len)
 }
 
 /// The first file named in the lower-cased `forms` of a command (as given,
@@ -303,11 +418,16 @@ fn runs_with_flag(command: &str, table: &[(&[&str], &str, &str, &[&str])]) -> bo
                     .next()
                     .is_some_and(|name| programs.iter().any(|p| name.eq_ignore_ascii_case(p)))
             }) && words.any(|word| {
-                let name = word.split_once('=').map_or(word, |(name, _)| name);
-                short_flags(name).is_some_and(|group| {
-                    group.chars().take_while(|c| !argument.contains(*c)).any(|c| flags.contains(c))
-                }) || (name.len() > 2
-                    && long.iter().any(|o| name.starts_with(o) || o.starts_with(name)))
+                is_option(
+                    word,
+                    |group| {
+                        group
+                            .chars()
+                            .take_while(|c| !argument.contains(*c))
+                            .any(|c| flags.contains(c))
+                    },
+                    long,
+                )
             })
         })
     })
@@ -358,13 +478,17 @@ fn runs_with_option(command: &str, program: &[&str], flag: char, long: &[&str]) 
     segments(command).any(|segment| {
         let mut words = segment.split_whitespace();
         program.iter().all(|p| words.any(|w| w == *p))
-            && words.any(|word| {
-                let name = word.split_once('=').map_or(word, |(name, _)| name);
-                short_flags(name).is_some_and(|flags| flags.contains(flag))
-                    || (name.len() > 2
-                        && long.iter().any(|o| name.starts_with(o) || o.starts_with(name)))
-            })
+            && words.any(|word| is_option(word, |flags| flags.contains(flag), long))
     })
+}
+
+/// `word`, without its `=value`, is a short-flag group that `short` accepts or
+/// one of the `long` options, also abbreviated (`--out`) or extended
+/// (`--output-dir`); `--` alone is none.
+fn is_option(word: &str, short: impl Fn(&str) -> bool, long: &[&str]) -> bool {
+    let name = word.split_once('=').map_or(word, |(name, _)| name);
+    short_flags(name).is_some_and(short)
+        || (name.len() > 2 && long.iter().any(|o| name.starts_with(o) || o.starts_with(name)))
 }
 
 /// The letters of a short-flag group (`-pi` → `pi`).
@@ -463,10 +587,9 @@ fn sets_hook_environment(root: &Path, home: &Path, file: &str) -> bool {
 
 /// The first harness fragment that refers to this repository: at the start of
 /// a token, after a `./` that starts a token, or right after the root (ADR-0043).
-/// A directory also counts as a whole name without its slash (`rm -rf xtask`),
-/// except as `cargo`'s subcommand (`cargo xtask check`). `command` is
-/// lower-cased.
-fn harness_in_shell(root: &Path, command: &str) -> Option<&'static str> {
+/// A directory also counts without its slash ([`bare_positions`] in `shell`,
+/// the command [`without_prose`]). `command` and `shell` are lower-cased.
+fn harness_in_shell(root: &Path, command: &str, shell: &str) -> Option<&'static str> {
     let mut roots: Vec<String> = [root.to_path_buf(), canonical(root)]
         .iter()
         .map(|r| r.to_string_lossy().trim_end_matches('/').to_lowercase())
@@ -475,25 +598,50 @@ fn harness_in_shell(root: &Path, command: &str) -> Option<&'static str> {
     roots.extend(ROOT_VARIABLES.iter().map(|v| v.to_lowercase()));
     HARNESS_IN_SHELL.iter().copied().find(|fragment| {
         let fragment = fragment.to_lowercase();
-        let bare = fragment
-            .strip_suffix('/')
-            .into_iter()
-            .flat_map(|dir| file_name_positions(command, dir))
-            .filter(|&i| !is_cargo_subcommand(&command[..i]));
-        command
-            .match_indices(&fragment)
-            .map(|(i, _)| i)
-            .chain(bare)
-            .any(|i| refers_to_repo(&command[..i], &roots))
+        let name = fragment.trim_end_matches('/');
+        let dir = paths::HARNESS.iter().any(|h| h.strip_suffix('/') == Some(name)).then_some(name);
+        let path = dir.map_or_else(|| fragment.clone(), |dir| format!("{dir}/"));
+        command.match_indices(&path).any(|(i, _)| refers_to_repo(&command[..i], &roots))
+            || dir.is_some_and(|dir| {
+                bare_positions(shell, dir).any(|i| refers_to_repo(&shell[..i], &roots))
+            })
     })
 }
 
-/// A word after `before` is `cargo`'s subcommand: the token directly before it
-/// is `cargo` (also `'cargo` in `bash -c 'cargo xtask check'`).
-fn is_cargo_subcommand(before: &str) -> bool {
-    let separates = |c: char| c.is_whitespace() || TOKEN_SEPARATORS.contains(c);
-    before.ends_with(char::is_whitespace)
-        && before.trim_end().rsplit(separates).next() == Some("cargo")
+/// Where the directory name `dir` stands in `shell` as a whole argument: a
+/// whole file name followed by the end, whitespace or [`ARGUMENT_ENDS`], and
+/// not cargo's package `xtask` ([`is_cargo_package`]).
+fn bare_positions<'a>(shell: &'a str, dir: &'a str) -> impl Iterator<Item = usize> + 'a {
+    file_name_positions(shell, dir).filter(move |&i| {
+        shell[i + dir.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| c.is_whitespace() || ARGUMENT_ENDS.contains(c))
+            && !(dir == "xtask" && is_cargo_package(&shell[..i]))
+    })
+}
+
+/// The word after `before` names a cargo package: cargo, also by path, is the
+/// program of the segment and the word is its subcommand (`cargo xtask check`)
+/// or follows `-p`, `--package` or `--package=` (`cargo test -p xtask`).
+fn is_cargo_package(before: &str) -> bool {
+    let segment = before.rsplit(['|', ';', '&', '\n', '(', '`']).next().unwrap_or_default();
+    let words = command_words(segment);
+    let Some((program, arguments)) = words.split_first() else { return false };
+    program.trim_start_matches(['\'', '"']).rsplit('/').next() == Some("cargo")
+        && arguments.last().is_none_or(|w| matches!(*w, "-p" | "--package" | "--package="))
+}
+
+/// The program of the simple command `segment` and its arguments; for inline
+/// code of a shell (`bash -c 'cargo xtask check'`) those of the code.
+fn command_words(segment: &str) -> Vec<&str> {
+    let words: Vec<&str> = segment.split_whitespace().collect();
+    let shell =
+        words.first().and_then(|w| w.rsplit('/').next()).is_some_and(|name| SHELLS.contains(&name));
+    match words.iter().position(|w| *w == "-c") {
+        Some(c) if shell => words[c + 1..].to_vec(),
+        _ => words,
+    }
 }
 
 /// Whether a path that follows `before` is inside the repository.

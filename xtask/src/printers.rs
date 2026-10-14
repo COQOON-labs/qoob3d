@@ -92,16 +92,8 @@ pub(crate) fn generate(root: &Path, profiles: &Path) -> Result<(), Vec<String>> 
         p.id = id;
     }
 
-    let commit = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(profiles)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map_or_else(
-            || "unknown".into(),
-            |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        );
+    let commit = crate::git(profiles, &["rev-parse", "--short", "HEAD"])
+        .map_or_else(|_| "unknown".into(), |out| out.trim().to_string());
 
     let path = root.join(OUTPUT);
     std::fs::write(&path, render(&printers, &commit)).map_err(|e| vec![e.to_string()])?;
