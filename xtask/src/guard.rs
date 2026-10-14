@@ -9,12 +9,15 @@
 //! - one agent context writes either tests or production code, never both,
 //! - shell commands must not bypass the git hooks or write harness files; a
 //!   harness directory counts also when named without its trailing slash, as a
-//!   whole shell argument outside heredoc bodies and comments.
+//!   whole shell argument outside comments and outside heredoc bodies that no
+//!   shell or interpreter reads (ADR-0049).
 //!
-//! Paths are collapsed (`.`, `..`) before any check. Shell commands are also
-//! matched with quotes and backslashes removed, which split words without
-//! changing what the shell runs. Paths and file names are compared ignoring
-//! case, as macOS file systems do.
+//! Edit/Write paths are collapsed (`.`, `..`) before any check. Shell commands
+//! are checked as text, at the three anchors of ADR-0043 (token start, `./`,
+//! the repository root), without collapsing (ADR-0049). They are also matched
+//! with quotes and backslashes removed, which split words without changing
+//! what the shell runs. Paths and file names are compared ignoring case, as
+//! macOS file systems do.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -230,7 +233,8 @@ fn unquoted(command: &str) -> String {
 /// the line after `<<MARKER` through the line `MARKER`) and comments (from an
 /// unquoted `#` that starts a token to the end of its line). Quotes,
 /// backslashes and `$(…)` in double quotes are followed, so a quoted `#` or
-/// `<<` starts neither. A heredoc without its terminator line stays.
+/// `<<` starts neither. A heredoc without its terminator line stays, and so
+/// do the bodies of a line that [`feeds_interpreter`] (ADR-0049).
 fn without_prose(command: &str) -> String {
     let mut out = String::with_capacity(command.len());
     // Open quotes and parentheses, innermost last.
@@ -267,7 +271,10 @@ fn without_prose(command: &str) -> String {
                 }
             }
             (_, '\n') if !markers.is_empty() => {
-                end += heredoc_bodies(&command[end..], &markers).unwrap_or(0);
+                let line = &command[command[..i].rfind('\n').map_or(0, |n| n + 1)..i];
+                if !feeds_interpreter(line) {
+                    end += heredoc_bodies(&command[end..], &markers).unwrap_or(0);
+                }
                 markers.clear();
                 out.push('\n');
                 i = end;
@@ -279,6 +286,29 @@ fn without_prose(command: &str) -> String {
         i = end;
     }
     out
+}
+
+/// A pipeline of `line` with a heredoc has a word that [`is_interpreter`]
+/// (`bash <<EOF`, `cat <<EOF | /bin/sh`): its heredoc bodies are code, not
+/// data. Any word counts, not only a program (`env bash <<EOF`).
+fn feeds_interpreter(line: &str) -> bool {
+    line.split([';', '&']).filter(|pipeline| pipeline.contains("<<")).any(|pipeline| {
+        pipeline.split(|c: char| c.is_whitespace() || "|()`".contains(c)).any(is_interpreter)
+    })
+}
+
+/// `word`, also by path or quoted, names a program that runs the text it
+/// reads: the programs of [`INLINE_CODE`], python (a writer in [`WRITES`];
+/// also versioned, `python3.12`), `xargs`, and the builtins `eval`, `source`
+/// and `.`.
+fn is_interpreter(word: &str) -> bool {
+    let word = unquoted(word).to_ascii_lowercase();
+    let name = word.rsplit('/').next().unwrap_or_default();
+    INLINE_CODE.iter().any(|(programs, ..)| programs.contains(&name))
+        || name
+            .strip_prefix("python")
+            .is_some_and(|version| version.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        || matches!(name, "xargs" | "eval" | "source" | ".")
 }
 
 /// An unquoted `#` after `c` starts a comment.
