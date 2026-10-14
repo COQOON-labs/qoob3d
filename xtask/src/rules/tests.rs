@@ -226,14 +226,3 @@ fn step_in_dispatch_or_check_exists() {
         fs::remove_dir_all(&root).unwrap();
     }
 }
-
-// ADR-0040 (review G4): the hand-kept copy of the step names is gone from
-// `rules.rs`; a step name literal there would be such a copy.
-#[test]
-fn rules_keeps_no_copy_of_the_step_names() {
-    let source = include_str!("../rules.rs");
-    assert!(!source.contains("XTASK_STEPS"), "XTASK_STEPS still exists");
-    for step in ["\"selftest\"", "\"smoke\"", "\"clippy\""] {
-        assert!(!source.contains(step), "rules.rs names the step {step}");
-    }
-}

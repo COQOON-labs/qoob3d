@@ -1029,9 +1029,10 @@ fn t1_git_like_names_are_not_the_git_dir() {
     fs::remove_dir_all(&root).unwrap();
 }
 
-// ADR-0043 (addendum T1 + F1): `.git/config` and `.git/hooks` are
-// hook-environment fragments in shell commands: pure reads pass, anything
-// else is denied, locked and unlocked.
+// ADR-0043 (addendum T1, refined by review3 R2): `.git/config` and
+// `.git/hooks` named together with a write operation are denied with the
+// `.git/` message, locked and unlocked; reads pass. `perl -pi` is a write
+// operation since review3 R5.
 #[test]
 fn t1_git_config_and_hooks_in_shell() {
     let root = repo("t1_shell");
@@ -1045,7 +1046,7 @@ fn t1_git_config_and_hooks_in_shell() {
             "ln -sf /tmp/x .git/hooks/pre-push",
         ] {
             let what = format!("{command} (unlocked: {unlocked})");
-            assert_denied(check_shell(&root, &s, command), &[MSG_SELF_UNLOCK], &what);
+            assert_denied(check_shell(&root, &s, command), &[MSG_GIT_DIR, ADR_0043], &what);
         }
         for command in ["cat .git/config", "ls .git/hooks", "grep -n url .git/config"] {
             assert_eq!(check_shell(&root, &s, command), Ok(()), "{command} (unlocked: {unlocked})");
@@ -1235,10 +1236,11 @@ fn g2_other_no_options_pass() {
     });
 }
 
-// ADR-0043 (review G3): the guard binary lives in `.git/qoob3d/guard-target`,
-// so every `.git/` path in a shell command is protected like the
-// hook-environment files: denied unless the command is a pure read, locked
-// and unlocked, relative, absolute or via $CLAUDE_PROJECT_DIR.
+// ADR-0043 (review G3, refined by review3 R2): the guard binary lives in
+// `.git/qoob3d/guard-target`, so a shell command naming `.git` together with
+// a write operation or a cargo target dir is denied with the `.git/`
+// message, locked and unlocked, relative, absolute or via
+// $CLAUDE_PROJECT_DIR. `dd … of=` is a write operation since review3 R5.
 #[test]
 fn g3_shell_writes_under_git_dir_are_denied() {
     let root = repo("g3_git_shell");
@@ -1249,7 +1251,7 @@ fn g3_shell_writes_under_git_dir_are_denied() {
         "echo x > .git/info/exclude".to_owned(),
         "touch .git/qoob3d/roles/s--main".to_owned(),
         "mv /tmp/x .git/HEAD".to_owned(),
-        // No WRITES fragment, but not a pure read either.
+        // No WRITES fragment, but a cargo target dir.
         "CARGO_TARGET_DIR=.git/qoob3d/guard-target cargo build --package xtask".to_owned(),
         "cargo build --target-dir .git/qoob3d/guard-target -p xtask".to_owned(),
         "dd if=/tmp/fake of=.git/qoob3d/guard-target/debug/xtask".to_owned(),
@@ -1261,7 +1263,7 @@ fn g3_shell_writes_under_git_dir_are_denied() {
         for command in &commands {
             assert_denied(
                 check_shell(&root, &s, command),
-                &[ADR_0043],
+                &[MSG_GIT_DIR, ADR_0043],
                 &format!("{command} (unlocked: {unlocked})"),
             );
         }
@@ -1269,7 +1271,7 @@ fn g3_shell_writes_under_git_dir_are_denied() {
     fs::remove_dir_all(&root).unwrap();
 }
 
-// ADR-0043 (review G3, spec-fixes F1): pure reads of `.git/` pass; names
+// ADR-0043 (review G3, review3 R2): reads of `.git/` pass; names
 // that only start like `.git` (`.github/`, `.githooks/`, `.gitignore`) are
 // not the git directory, and git commands without a `.git/` path are
 // unaffected. Unlocked, harness writes to `.github/`/`.githooks/` pass.
@@ -1571,4 +1573,234 @@ fn f6_startup_names_as_path_components_are_denied() {
             );
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Fixes from the second branch review (review3 spec R1, R2).
+// ---------------------------------------------------------------------------
+
+// ADR-0043 (review3 R1): a startup name counts as named when the characters
+// directly before and after it are not file-name characters (ASCII letters,
+// digits, `.`, `_`, `-`). Glob characters and brace expansion therefore end a
+// name: `~/.zshrc*` and `~/{.zshenv,/dev/null}` expand to the startup file.
+// Denied with the self-unlock message, locked and unlocked.
+// Known limit, not tested: glob classes inside the name (`~/.zsh[r]c`).
+#[test]
+fn r1_startup_names_next_to_glob_or_brace_characters_are_denied() {
+    both_sessions(|unlocked| {
+        for command in [
+            // The spec's examples.
+            "echo x >> ~/.zshrc*",
+            "echo x >> ~/.zshrc?",
+            "echo x | tee -a ~/{.zshenv,/dev/null}",
+            "echo x | tee -a ~/{.zshrc,.bashrc}",
+            // Same boundaries, other names: `,` before, `}` after.
+            "echo x | tee -a ~/{/dev/null,.profile}",
+            "cp /tmp/x ~/.zprofile*",
+        ] {
+            assert_denied(
+                spec_shell(unlocked, command),
+                &[MSG_SELF_UNLOCK, ADR_0043],
+                &format!("{command:?} (unlocked: {unlocked})"),
+            );
+        }
+    });
+}
+
+// ADR-0043 (review3 R1): a file-name character directly before or after the
+// startup name makes it part of another name, so these pass in write
+// commands, locked and unlocked. Pure reads of startup files still pass.
+#[test]
+fn r1_startup_names_inside_other_file_names_pass() {
+    both_sessions(|unlocked| {
+        for command in [
+            // The spec's examples (also in the F6 test above).
+            "echo self.profiles > /tmp/y",
+            "echo my.profile_x > /tmp/y",
+            "python3 -c 'print(self.profile)'",
+            "perl -pi -e s/cfg.bashrc_path/cfg.rc/ /tmp/notes.txt",
+            "echo x > /tmp/a.zshrc_backup",
+            // `.`, `-` or a digit after the name, a letter before it.
+            "echo x > /tmp/.zshrc.bak",
+            "echo x > /tmp/.zshrc-old",
+            "echo x > /tmp/.zshenv2",
+            "echo x > /tmp/my.bashrc",
+            // Pure reads.
+            "cat ~/.zshrc",
+            "grep -n PATH ~/.zshenv ~/.zprofile",
+        ] {
+            assert_eq!(spec_shell(unlocked, command), Ok(()), "{command:?} (unlocked: {unlocked})");
+        }
+    });
+}
+
+/// Commands that name the git directory (by name or by `git rev-parse`) and
+/// write or set a cargo target dir (review3 R2, DENIED).
+const GIT_DIR_WRITES: &[&str] = &[
+    // The spec's examples.
+    "echo hi > .git/hooks/pre-commit",
+    "cp x .git/config",
+    "cp /tmp/fake .git/qoob3d/guard-target/debug/xtask",
+    "CARGO_TARGET_DIR=.git/x cargo build",
+    "cargo build --target-dir .git/x",
+    "echo x > {.git,x}/hooks/pre-push",
+    "cp /tmp/fake \"$(git rev-parse --git-dir)/qoob3d/guard-target/debug/xtask\"",
+    "cp x \"$(git rev-parse --git-path hooks)/pre-push\"",
+    "rm -rf .git/qoob3d",
+    // The other two git-dir options of R2, with a write.
+    "cp x \"$(git rev-parse --absolute-git-dir)/hooks/pre-push\"",
+    "cp x \"$(git rev-parse --git-common-dir)/config\"",
+    // A cargo target dir given via `=`, and via a git-dir substitution.
+    "cargo build --target-dir=.git/x",
+    "CARGO_TARGET_DIR=$(git rev-parse --git-dir)/x cargo build",
+    // Case-insensitive (macOS), and `.git` as the whole last component.
+    "echo x > .GIT/hooks/pre-push",
+    "rm -rf .git",
+    // Write operations added by review3 R5.
+    "perl -pi -e s/a/b/ .git/config",
+    "dd if=/tmp/fake of=.git/qoob3d/guard-target/debug/xtask",
+    "perl -i.bak -pe s/a/b/ .git/config",
+    "dd of=.git/hooks/pre-push if=/tmp/x",
+];
+
+/// Commands that name the git directory without writing (review3 R2, PASS).
+const GIT_DIR_NON_WRITES: &[&str] = &[
+    // The spec's examples.
+    "find . -path ./.git -prune -o -name '*.rs' -print",
+    "du -sh .git",
+    ".git/qoob3d/guard-target/debug/xtask guard",
+    "tar czf /tmp/x.tgz --exclude=.git .",
+    "rsync -a --exclude=.git . /tmp/y",
+    "grep -rn --exclude-dir=.git foo . | sort",
+    "fd -E .git foo",
+    "ls -la .git",
+    "cat .git/config",
+    "git rev-parse --git-dir",
+    // The other git-dir options of R2, without a write.
+    "git rev-parse --absolute-git-dir",
+    "git rev-parse --git-path hooks",
+    "ls \"$(git rev-parse --git-common-dir)\"",
+];
+
+// ADR-0043 (review3 R2): naming `.git` (whole name, any case) or
+// substituting the git dir via `git rev-parse` together with a write
+// operation or a cargo target dir is denied in any session with the `.git/`
+// message. `.git` is no hook-environment fragment any more, so the
+// self-unlock message must not answer. Spec root and a temp repo (absolute
+// root spelled out as well).
+#[test]
+fn r2_git_dir_with_a_write_is_denied_with_the_git_message() {
+    let root = repo("r2_git_writes");
+    let root_str = root.to_str().unwrap().to_owned();
+    let absolute = [
+        format!("cp x {root_str}/.git/config"),
+        format!("echo x > \"{root_str}/.git/hooks/pre-push\""),
+    ];
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &unused_home());
+        let checks = GIT_DIR_WRITES
+            .iter()
+            .map(|c| ((*c).to_owned(), spec_shell(unlocked, c)))
+            .chain(GIT_DIR_WRITES.iter().map(|c| ((*c).to_owned(), check_shell(&root, &s, c))))
+            .chain(absolute.iter().map(|c| (c.clone(), check_shell(&root, &s, c))));
+        for (command, result) in checks {
+            let what = format!("{command:?} (unlocked: {unlocked})");
+            assert_denied(result.clone(), &[MSG_GIT_DIR, ADR_0043], &what);
+            let message = result.unwrap_err();
+            assert!(!message.contains(MSG_SELF_UNLOCK), "{what}: {message}");
+        }
+    });
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0043 (review3 R2): naming `.git` or the git-dir options without a write
+// operation or cargo target dir passes, locked and unlocked.
+#[test]
+fn r2_git_dir_without_a_write_passes() {
+    let root = repo("r2_git_reads");
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &unused_home());
+        for command in GIT_DIR_NON_WRITES {
+            let what = format!("{command:?} (unlocked: {unlocked})");
+            assert_eq!(spec_shell(unlocked, command), Ok(()), "{what}");
+            assert_eq!(check_shell(&root, &s, command), Ok(()), "{what}");
+        }
+    });
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0043 (review3 R1 applied to `.git`): a file-name character directly
+// before or after `.git` makes it another name, so writes to these pass; a
+// cargo target dir elsewhere passes too (it only matters with `.git`).
+#[test]
+fn r2_git_like_names_and_other_target_dirs_pass() {
+    let root = repo("r2_git_like");
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &unused_home());
+        for command in [
+            "echo target >> .gitignore",
+            "echo '*.qbd binary' >> .gitattributes",
+            "echo x > .git-blame-ignore-revs",
+            "echo x > /tmp/my.git/x",
+            "cargo build --target-dir /tmp/t",
+            "CARGO_TARGET_DIR=/tmp/t cargo build",
+        ] {
+            let what = format!("{command:?} (unlocked: {unlocked})");
+            assert_eq!(spec_shell(unlocked, command), Ok(()), "{what}");
+            assert_eq!(check_shell(&root, &s, command), Ok(()), "{what}");
+        }
+    });
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (review3 R5): `dd` as a whole word, `of=`, and `perl` with an
+// in-place flag (`-i`, `-pi`, `-pie`, `-i.bak`, also after other flags) are
+// write operations. With a harness path: locked denied with the harness
+// message (naming the fragment), unlocked allowed (the unlock lifts harness
+// paths). Spec root and a temp repo.
+#[test]
+fn r5_dd_and_perl_in_place_write_harness_files() {
+    let root = repo("r5_harness");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in [
+        // The spec's examples.
+        ("dd if=/tmp/x of=xtask/src/main.rs", "xtask/"),
+        ("perl -pi -e s/a/b/ Cargo.toml", "Cargo.toml"),
+        // Other in-place spellings and operand orders.
+        ("perl -i -pe s/a/b/ Cargo.toml", "Cargo.toml"),
+        ("perl -pie s/a/b/ clippy.toml", "clippy.toml"),
+        ("perl -i.bak -pe s/a/b/ deny.toml", "deny.toml"),
+        ("perl -0777 -pi -e s/a/b/ rustfmt.toml", "rustfmt.toml"),
+        ("dd of=harness/rules.md if=/tmp/x", "harness/"),
+        ("cat /tmp/x | dd of=.githooks/pre-push", ".githooks"),
+    ] {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}`");
+        assert_denied(spec_shell(false, command), &[&needle], command);
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], command);
+        assert_eq!(spec_shell(true, command), Ok(()), "{command} (unlocked)");
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (review3 R5): `dd` inside a word is no write operation, and `perl`
+// without an in-place flag does not write the files it names, so these pass
+// in a locked session.
+#[test]
+fn r5_add_commands_and_perl_without_in_place_pass() {
+    let root = repo("r5_pass");
+    for command in [
+        // The spec's examples.
+        "git add xtask/src/main.rs",
+        "cargo add serde",
+        // `dd` inside other words, next to harness paths.
+        "git add -p Cargo.toml .github/workflows/ci.yml",
+        "cargo add --path xtask serde",
+        // `perl` that only reads.
+        "perl -ne print Cargo.toml",
+    ] {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command}");
+    }
+    fs::remove_dir_all(&root).unwrap();
 }

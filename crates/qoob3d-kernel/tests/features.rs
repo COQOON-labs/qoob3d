@@ -420,10 +420,11 @@ fn changing_the_first_solid_feature_recomputes_it_and_every_later_one() {
     //   unchanged → cached = 2.
     // - Hash chain (ADR-0012): key_i = hash(key_{i-1}, param_i), so Extrude1
     //   and Extrude2 get new keys → computed = 2.
-    // - Every body in the state produced by a recomputed step counts as
-    //   analyzed, even if its geometry is unchanged (the kernel does not
-    //   compare geometry): the state after Extrude2 holds Body1 and Body2
-    //   → analyzed = 2.
+    // - A body created or modified by a recomputed step gets a new analysis,
+    //   even if its geometry is unchanged (the kernel does not compare
+    //   geometry); bodies a recomputed step only carries over keep theirs.
+    //   Body1 is created by the recomputed Extrude1 (Extrude2 only carries it
+    //   over), Body2 by the recomputed Extrude2 → analyzed = 2.
     // Body1 = 40 · 25 · 12 = 12 000 mm³, Body2 = π · 5² · 30 = 750π mm³.
     let (doc, e1, _) = two_bodies();
     let mut changed = doc.clone();
@@ -446,8 +447,11 @@ fn changing_the_first_solid_feature_of_a_join_cut_chain() {
     //   sketch changes → cached = 2 (Plane1 counts in neither field).
     // - Extrude1 changed; Extrude2 and Extrude3 follow it in the hash chain
     //   → computed = 3.
-    // - The one body of the final state comes from a recomputed step
-    //   → analyzed = 1.
+    // - The one body of the final state is created by the recomputed
+    //   Extrude1 and modified by the recomputed Extrude2 and Extrude3, so it
+    //   gets a new analysis; by decision 2 only bodies in the rebuild result
+    //   are analyzed, not the states after Extrude1 or Extrude2 (as in the
+    //   first rebuild, (5, 0, 1)) → analyzed = 1.
     // computed + cached = 5 = evaluated_features (2 sketches + 3 extrudes).
     // Volume: plate 60 · 40 · 6 + boss above it π · 5² · (13 − 6) − hole
     // π · 3² · 13 = 14 400 + 175π − 117π = 14 400 + 58π mm³.
