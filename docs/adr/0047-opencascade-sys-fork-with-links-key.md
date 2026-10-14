@@ -30,6 +30,9 @@ ADR-0014 kept `opencascade-sys` unchanged from crates.io and took the include pa
   and patched in with `[patch.crates-io]` in the workspace `Cargo.toml`.
 - The fork declares `links = "occt"` and its build script prints `cargo:include=<dir>`, the
   include directory it compiled against (builtin or system OCCT).
+- The fork's build script passes `-Wno-deprecated-declarations` to its cxx build, as the
+  kernel's build script does. Cargo shows build-script warnings of path dependencies on every
+  build, and the OCCT headers' `sprintf` deprecation warnings would bury real warnings.
 - The kernel's build script reads `DEP_OCCT_INCLUDE`. Because of `links`, Cargo runs it only
   after the build script of `opencascade-sys`, so the headers exist. The kernel no longer has a
   build dependency on `occt-sys`.
@@ -42,8 +45,8 @@ ADR-0014 kept `opencascade-sys` unchanged from crates.io and took the include pa
 
 - Clean builds are ordered correctly; the include path comes from the crate that built OCCT
   instead of a second crate guessing the same directory.
-- A second vendored crate to maintain. Updating opencascade-sys means re-applying two small
-  changes (manifest, one `println!`).
+- A second vendored crate to maintain. Updating opencascade-sys means re-applying three small
+  changes (manifest, one `println!`, one compiler flag).
 - `links = "occt"` reserves the name: no other crate in the graph may declare it.
 - Changing the dependency source re-runs the build script of opencascade-sys once; OCCT stays in
   `target/OCCT` and is only re-checked by CMake.

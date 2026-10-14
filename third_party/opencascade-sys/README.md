@@ -21,3 +21,7 @@ the kernel looked for the OCCT headers before OCCT was built. With
 2. `build.rs` prints `cargo:include=<OCCT include dir>` (the `include_dir` from
    `OcctConfig::detect()`, works for builtin and system OCCT). Marked with
    `// QOOB3D:`.
+3. `build.rs` passes `-Wno-deprecated-declarations` to the cxx build. The OCCT
+   headers trigger `sprintf` deprecation warnings, and Cargo shows build-script
+   warnings of path dependencies on every build, which buries real warnings.
+   Marked with `// QOOB3D:`.

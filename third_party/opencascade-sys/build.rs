@@ -111,6 +111,9 @@ fn main() {
     build
         .cpp(true)
         .flag_if_supported("-std=c++11")
+        // QOOB3D: silence the OCCT header deprecation warnings (`sprintf`); Cargo replays
+        // build-script warnings of path dependencies on every build (ADR-0047).
+        .flag_if_supported("-Wno-deprecated-declarations")
         .define("_USE_MATH_DEFINES", "TRUE")
         .include(occt_config.include_dir)
         .include("include")
