@@ -3509,3 +3509,83 @@ fn heredocs_with_at_most_one_output_redirection_stay_data() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// The heredoc's program as an allowlist (critic finding on 9543ec3, within
+// the user's fail-closed direction): a heredoc body is data only when, in
+// addition to the safe shape after the marker, the simple command carrying
+// it is a known data reader — `cat`, `tee`, `git`, `gh`, also by path — and
+// only its words precede the marker on the logical line, from the line
+// start, right after an unclosed `$(`, or from the backslash-joined start of
+// the command. No `;&|(){}` and no compound keyword (`if`, `then`, `do`,
+// `done`, `fi`, `while` …) before the marker within that command. Anything
+// else keeps the body as shell text, checked word by word.
+// ---------------------------------------------------------------------------
+
+/// Heredocs whose command is no known data reader, with the directory the
+/// denial must name. bash/zsh run the body (or, for the `while` loop, act on
+/// its lines) in every finding example and in `env bash` (checked with a
+/// harmless equivalent; dash, ksh, csh and tcsh exist on macOS); `mysql`
+/// stands for any unknown reader. Must be denied in a locked session.
+const HEREDOC_COMMANDS_THAT_ARE_NO_DATA_READERS: &[(&str, &str)] = &[
+    // The finding's examples.
+    ("{ bash; } <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("(bash; true) <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("{\nbash\n} <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("if true; then bash; fi <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("dash <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("ksh <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("csh <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("tcsh <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("/bin/dash <<EOF\nrm -rf harness\nEOF", "harness"),
+    ("while read f; do rm -rf \"$f\"; done <<EOF\nxtask\nEOF", "xtask"),
+    ("mysql <<EOF\nxtask\nEOF", "xtask"),
+    // Derived: a known reader behind another program is no known reader.
+    ("env cat <<EOF\nxtask notes\nEOF", "xtask"),
+    ("env bash <<EOF\nrm -rf xtask\nEOF", "xtask"),
+];
+
+/// Data heredocs of known readers (`cat`, `tee`, `git`, `gh`, also by path,
+/// with options before the marker). Must pass in a locked session. (The
+/// `git commit -F - <<'EOF'`, `cat > /tmp/note <<EOF` and gh PR body forms are
+/// in HARNESS_WORDS_IN_PROSE, the continued commit form in
+/// MULTI_LINE_DATA_HEREDOCS, the `cat <<EOF > …`/`>>` forms in
+/// HEREDOC_DATA_SHAPES.)
+const HEREDOC_DATA_READERS: &[&str] = &[
+    // The task's examples.
+    "tee /tmp/note <<EOF\nharness\nEOF",
+    "/bin/cat > /tmp/n <<EOF\nxtask notes\nEOF",
+    // Derived: git and gh with options or by path, tee appending.
+    "git -C /tmp/repo commit -F - <<'EOF'\nxtask: fix\n\nThe harness denies writes.\nEOF",
+    "/usr/bin/git commit -F - <<'EOF'\nfix the harness guard\nEOF",
+    "gh issue create --title Guard --body-file - <<'EOF'\nharness notes\nEOF",
+    "tee -a /tmp/note <<'EOF'\nxtask\nEOF",
+];
+
+// ADR-0037/ADR-0043 (critic finding on 9543ec3): a heredoc whose command is
+// no known data reader keeps its body as shell text. Locked denied naming
+// the directory, unlocked allowed; spec root and a temp repo.
+#[test]
+fn heredoc_body_is_data_only_for_a_known_reader() {
+    let root = repo("heredoc_no_data_reader");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in HEREDOC_COMMANDS_THAT_ARE_NO_DATA_READERS {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (critic finding on 9543ec3): heredocs of the known data readers
+// stay data. Locked, spec root and a temp repo.
+#[test]
+fn heredocs_of_known_data_readers_stay_data() {
+    let root = repo("heredoc_data_readers");
+    for command in HEREDOC_DATA_READERS {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
