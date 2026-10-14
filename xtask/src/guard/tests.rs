@@ -3136,21 +3136,22 @@ const INTERPRETER_FED_HEREDOCS: &[(&str, &str)] = &[
 /// Heredocs that must still pass in a locked session (critic K-10 on
 /// 2f94396): the cargo exceptions inside an interpreter-fed body, an
 /// interpreter-fed body without a path into the repository, and data
-/// heredocs (to a file, to git, to a non-interpreter behind a pipe).
+/// heredocs (to a file, to git). The data heredocs piped into a
+/// non-interpreter (`cat <<EOF | tee /tmp/x`, `cat <<EOF | wc -l`) moved to
+/// HEREDOC_LINES_WITH_MORE_AFTER_THE_MARKER: since the allowlist of the safe
+/// heredoc shape (critic findings on 0cf5dd6) they are denied conservatively.
 const HEREDOCS_THAT_STAY_ALLOWED: &[&str] = &[
     // The amendment's examples.
     "bash <<EOF\ncargo xtask check\nEOF",
     "bash <<EOF\ncargo test -p xtask 2>&1 | tail\nEOF",
-    "cat <<EOF | tee /tmp/x\nthe harness notes\nEOF",
     "git commit -F - <<'EOF'\nxtask: fix the guard\n\nThe harness denies writes.\nEOF",
     "cat > /tmp/note <<EOF\nupdate the harness docs\nEOF",
     // Derived: the cargo exceptions behind a pipe and by path, a path
-    // outside the repository, a data heredoc piped into a reader.
+    // outside the repository.
     "cat <<EOF | bash\ncargo test --package xtask > /tmp/log\nEOF",
     "bash <<EOF\n~/.cargo/bin/cargo xtask check > /tmp/log\nEOF",
     "bash <<EOF\nrm -rf /tmp/xtask\nEOF",
     "python3 <<EOF\nprint(1)\nEOF",
-    "cat <<EOF | wc -l\nxtask\nharness\nEOF",
 ];
 
 // ADR-0037/ADR-0043 (critic K-10 on 2f94396): a heredoc body read by a shell
@@ -3392,6 +3393,119 @@ fn prose_is_kept_when_the_command_has_an_unmodelled_construct() {
         assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
         assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
         assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// The safe heredoc shape as an allowlist (critic findings on 0cf5dd6, within
+// the user's fail-closed direction): a heredoc body is data (removed) only
+// when its logical line (comments removed, backslash-newlines joined) has
+// nothing after `<<MARKER` (also `<<-`, `<<'M'`, `<<"M"`) except at most one
+// output redirection to a file (`> path`, `>> path`). Anything else after
+// the marker keeps the body as shell text, checked word by word. Any `((`
+// (also `$((`) in the command makes the guard fail closed.
+// ---------------------------------------------------------------------------
+
+/// Heredoc lines with something after the marker other than at most one
+/// output redirection to a file, with the directory the denial must name. The finding's five run the body
+/// in bash/zsh (checked with a harmless equivalent); the derived ones and the
+/// moved data pipelines are denied conservatively (the user accepted that
+/// rare spellings are denied). Must be denied in a locked session.
+const HEREDOC_LINES_WITH_MORE_AFTER_THE_MARKER: &[(&str, &str)] = &[
+    // The finding's examples.
+    ("cat <<EOF | # c\nrm -rf xtask\nEOF\nbash", "xtask"),
+    ("cat <<EOF | (\nrm -rf xtask\nEOF\nbash)", "xtask"),
+    ("cat <<EOF | {\nrm -rf xtask\nEOF\nbash; }", "xtask"),
+    ("cat <<EOF | if true; then\nrm -rf xtask\nEOF\nbash; fi", "xtask"),
+    ("cat <<EOF > >(\nrm -rf xtask\nEOF\nbash)", "xtask"),
+    // Derived: `;`, `&&`, `&`, a second `<<`, a redirection followed by a
+    // pipe, two redirections, a further word after the marker.
+    ("cat <<EOF; bash\nrm -rf xtask\nEOF", "xtask"),
+    ("cat <<EOF && bash\nrm -rf xtask\nEOF", "xtask"),
+    ("cat <<EOF & bash\nrm -rf xtask\nEOF", "xtask"),
+    ("cat <<A <<B\nrm -rf xtask\nA\nnotes\nB", "xtask"),
+    ("cat <<EOF > /tmp/n | bash\nrm -rf xtask\nEOF", "xtask"),
+    ("cat <<EOF > /tmp/a > /tmp/b\nrm -rf xtask\nEOF", "xtask"),
+    ("cat <<EOF /tmp/other\nharness notes\nEOF", "harness"),
+    // Moved from HEREDOCS_THAT_STAY_ALLOWED (were must-pass).
+    ("cat <<EOF | tee /tmp/x\nthe harness notes\nEOF", "harness"),
+    ("cat <<EOF | wc -l\nxtask\nharness\nEOF", "xtask"),
+];
+
+/// Arithmetic `((`/`$((`: `<<` inside it is a shift, not a heredoc, and a
+/// command substitution in it runs (checked in bash/zsh with a harmless
+/// equivalent). Plus fail-closed probes: a data heredoc with a bare harness
+/// word next to a `$((…))` or `((…))` keeps its body. With the directory the
+/// denial must name. Must be denied in a locked session.
+const ARITHMETIC_COMMANDS: &[(&str, &str)] = &[
+    // The finding's examples.
+    ("(( x = 1 << y\n+ $(rm -rf xtask)\ny\n))", "xtask"),
+    ("echo $(( 1 << y\n+ $(rm -rf xtask)\ny\n))", "xtask"),
+    ("x=$(( 1 <<y\n+ $(rm -rf xtask)\ny\n))", "xtask"),
+    // Fail-closed probes.
+    ("cat > /tmp/n <<EOF\nharness\nEOF\necho $((1))", "harness"),
+    ("cat > /tmp/n <<EOF\nxtask notes\nEOF\n((n++))", "xtask"),
+];
+
+/// Data heredocs of the safe shape: nothing after the marker but at most one
+/// output redirection to a file, also with a comment after it. Must pass in
+/// a locked session. (The commit, note and PR body forms are in
+/// HARNESS_WORDS_IN_PROSE, the continued commit form in
+/// MULTI_LINE_DATA_HEREDOCS.)
+const HEREDOC_DATA_SHAPES: &[&str] = &[
+    // The task's examples.
+    "cat <<EOF > /tmp/note\nupdate the harness docs\nEOF",
+    "cat <<'EOF' >> /tmp/note\nxtask notes\nEOF",
+    // Derived: `<<-`, `<<"M"`, no space after `>`, a comment after the
+    // redirection.
+    "cat <<-EOF > /tmp/note\n\tthe harness\n\tEOF",
+    "cat <<\"EOF\" >/tmp/note\nharness\nEOF",
+    "cat <<EOF > /tmp/note # harness notes\nxtask\nEOF",
+];
+
+// ADR-0037/ADR-0043 (critic finding on 0cf5dd6): a heredoc line with
+// anything after the marker but at most one output redirection to a file
+// keeps the body as shell text.
+// Locked denied naming the directory, unlocked allowed; spec root and a temp
+// repo.
+#[test]
+fn heredoc_body_is_data_only_with_nothing_after_the_marker() {
+    let root = repo("heredoc_more_after_marker");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in HEREDOC_LINES_WITH_MORE_AFTER_THE_MARKER {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037/ADR-0043 (critic finding on 0cf5dd6): `((`/`$((` makes the guard
+// fail closed. Locked denied naming the directory, unlocked allowed; spec
+// root and a temp repo.
+#[test]
+fn arithmetic_makes_the_guard_fail_closed() {
+    let root = repo("arithmetic_fail_closed");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in ARITHMETIC_COMMANDS {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (critic finding on 0cf5dd6): the safe heredoc shape stays data.
+// Locked, spec root and a temp repo.
+#[test]
+fn heredocs_with_at_most_one_output_redirection_stay_data() {
+    let root = repo("heredoc_data_shapes");
+    for command in HEREDOC_DATA_SHAPES {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
     }
     fs::remove_dir_all(&root).unwrap();
 }
