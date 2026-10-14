@@ -28,11 +28,16 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    after the repository root (ADR-0043 decision 3). A detour through `..` in a shell command
    (`rm -rf missing/../xtask`) is a known gap, like the `cd xtask && …` indirection.
 2. **Heredoc bodies are data**, as are comments: a bare harness directory name in them is no
-   path. A path with its slash (`xtask/…`) still counts everywhere.
+   path. A path with its slash (`xtask/…`) still counts everywhere. A comment starts only
+   where the shell starts one: at an unquoted, unescaped `#` that starts a word (`$(true)#`,
+   `\ #` and `'a'#` start none).
 3. **Unless an interpreter reads the body:** when a pipeline with the heredoc names a shell
    or interpreter (sh, bash, zsh, python with any version, perl, ruby, node, deno, also by path),
    or `xargs`, `eval`, `source`, `.`, the body is checked like inline code, with the cargo
-   exceptions (`cargo xtask …`, `-p xtask`) as elsewhere.
+   exceptions (`cargo xtask …`, `-p xtask`) as elsewhere. The pipeline is read as the shell
+   reads it: a backslash-newline joins lines, and a `|` that ends the heredoc line continues
+   with the command after the terminator line, whose stages count by their program
+   (`cat <<EOF |` … `EOF` / `bash`, but not `grep -c bash`).
 
 ## Consequences
 

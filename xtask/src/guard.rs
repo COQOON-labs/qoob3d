@@ -9,8 +9,9 @@
 //! - one agent context writes either tests or production code, never both,
 //! - shell commands must not bypass the git hooks or write harness files; a
 //!   harness directory counts also when named without its trailing slash, as a
-//!   whole shell argument outside comments and outside heredoc bodies that no
-//!   shell or interpreter reads (ADR-0049).
+//!   whole shell argument outside comments (from a `#` that starts a word) and
+//!   outside heredoc bodies that no shell or interpreter reads, also through a
+//!   pipeline continued over lines (ADR-0049).
 //!
 //! Edit/Write paths are collapsed (`.`, `..`) before any check. Shell commands
 //! are checked as text, at the three anchors of ADR-0043 (token start, `./`,
@@ -113,8 +114,9 @@ const TOKEN_SEPARATORS: &str = "\"'=(;|&><`";
 /// separators and redirections end it, a glob expands it to the directory
 /// itself (`xtask*`). Not `:` or `,`, which make it prose (`xtask: fix`).
 const ARGUMENT_ENDS: &str = ";|&)<>`*?[";
-/// Characters after which an unquoted `#` starts a comment.
-const COMMENT_STARTS: &str = ";|&()";
+/// Unquoted, unescaped characters after which a `#` starts a comment. Not `)`:
+/// after `$(…)` or `$((…))` the word goes on (`$(true)#`).
+const COMMENT_STARTS: &str = ";|&(";
 
 /// Files in the home directory that every new shell reads (ADR-0043).
 const SHELL_STARTUP: &[&str] =
@@ -231,15 +233,19 @@ fn unquoted(command: &str) -> String {
 
 /// `command` without what the shell reads as no words: heredoc bodies (from
 /// the line after `<<MARKER` through the line `MARKER`) and comments (from an
-/// unquoted `#` that starts a token to the end of its line). Quotes,
-/// backslashes and `$(…)` in double quotes are followed, so a quoted `#` or
-/// `<<` starts neither. A heredoc without its terminator line stays, and so
-/// do the bodies of a line that [`feeds_interpreter`] (ADR-0049).
+/// unquoted, unescaped `#` that starts a word to the end of its line).
+/// Quotes, backslashes and `$(…)` in double quotes are followed, so a quoted
+/// `#` or `<<` starts neither; a `#` after a closing quote, `)` or an escaped
+/// character is part of a word. A heredoc without its terminator line stays,
+/// and so do the bodies of a line that [`feeds_interpreter`] (ADR-0049); a
+/// backslash-newline continues the line.
 fn without_prose(command: &str) -> String {
     let mut out = String::with_capacity(command.len());
     // Open quotes and parentheses, innermost last.
     let mut open: Vec<char> = Vec::new();
     let mut markers: Vec<(String, bool)> = Vec::new();
+    // Where the current line starts in `out`; whether the next character starts a word.
+    let (mut line_start, mut word_start) = (0, true);
     let mut i = 0;
     while let Some(c) = command[i..].chars().next() {
         let rest = &command[i..];
@@ -256,7 +262,7 @@ fn without_prose(command: &str) -> String {
             }
             (Some('"'), _) => {}
             (_, '\'' | '"' | '(') => open.push(c),
-            (_, '#') if command[..i].chars().next_back().is_none_or(starts_comment) => {
+            (_, '#') if word_start => {
                 i += rest.find('\n').unwrap_or(rest.len());
                 continue;
             }
@@ -271,30 +277,48 @@ fn without_prose(command: &str) -> String {
                 }
             }
             (_, '\n') if !markers.is_empty() => {
-                let line = &command[command[..i].rfind('\n').map_or(0, |n| n + 1)..i];
-                if !feeds_interpreter(line) {
-                    end += heredoc_bodies(&command[end..], &markers).unwrap_or(0);
+                if let Some(len) = heredoc_bodies(&command[end..], &markers)
+                    && !feeds_interpreter(&out[line_start..], &command[end + len..])
+                {
+                    end += len;
                 }
                 markers.clear();
                 out.push('\n');
+                (line_start, word_start) = (out.len(), true);
                 i = end;
                 continue;
             }
             _ => {}
         }
         out.push_str(&command[i..end]);
+        let outside_quotes = matches!(open.last(), None | Some('('));
+        if outside_quotes && c == '\n' {
+            line_start = out.len();
+        }
+        word_start = outside_quotes && (c.is_whitespace() || COMMENT_STARTS.contains(c));
         i = end;
     }
     out
 }
 
-/// A pipeline of `line` with a heredoc has a word that [`is_interpreter`]
-/// (`bash <<EOF`, `cat <<EOF | /bin/sh`): its heredoc bodies are code, not
-/// data. Any word counts, not only a program (`env bash <<EOF`).
-fn feeds_interpreter(line: &str) -> bool {
+/// The heredoc `line` (comments removed) feeds a shell or interpreter, so its
+/// heredoc bodies are code, not data: a pipeline of `line` with a heredoc has
+/// a word that [`is_interpreter`] (`bash <<EOF`, `cat <<EOF | /bin/sh`; any
+/// word counts, `env bash <<EOF`), or `line` ends in a pipe that continues in
+/// `after`, the text after the terminator line, into an interpreter
+/// ([`pipes_into_interpreter`]).
+fn feeds_interpreter(line: &str, after: &str) -> bool {
     line.split([';', '&']).filter(|pipeline| pipeline.contains("<<")).any(|pipeline| {
         pipeline.split(|c: char| c.is_whitespace() || "|()`".contains(c)).any(is_interpreter)
-    })
+    }) || (line.trim_end().trim_end_matches('&').ends_with('|') && pipes_into_interpreter(after))
+}
+
+/// The pipeline at the start of `text` has a stage whose program
+/// [`is_interpreter`] (`bash`, `grep x | sh`); an argument does not count
+/// (`grep -c bash`).
+fn pipes_into_interpreter(text: &str) -> bool {
+    let pipeline = text.trim_start().split([';', '&', '\n']).next().unwrap_or_default();
+    pipeline.split('|').any(|stage| stage.split_whitespace().next().is_some_and(is_interpreter))
 }
 
 /// `word`, also by path or quoted, names a program that runs the text it
@@ -309,11 +333,6 @@ fn is_interpreter(word: &str) -> bool {
             .strip_prefix("python")
             .is_some_and(|version| version.chars().all(|c| c.is_ascii_digit() || c == '.'))
         || matches!(name, "xargs" | "eval" | "source" | ".")
-}
-
-/// An unquoted `#` after `c` starts a comment.
-fn starts_comment(c: char) -> bool {
-    c.is_whitespace() || COMMENT_STARTS.contains(c)
 }
 
 /// The heredoc that `rest` starts with (`<<EOF`, `<<-'EOF'`): the length of
