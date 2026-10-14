@@ -167,11 +167,13 @@ const HARMLESS: &[&str] = &[
     "ls harness/ > /dev/null",
     "cat clippy.toml 2> /dev/null",
     // sed, ruby and awk without an in-place option only print (critic K-10
-    // on 7ce6580): the `i` in `s/i/j/` is the script, not a flag.
+    // on 7ce6580): the `i` in `s/i/j/` is the script, not a flag. A ruby
+    // script file is no inline code; `ruby -e … xtask/src/guard.rs` moved to
+    // INLINE_CODE_WRITES (inline-code interpreters are potential writers).
     "sed -n 1,5p xtask/src/guard.rs",
     "sed -e s/i/j/ xtask/src/guard.rs",
     "sed -E 's/x/y/' Cargo.toml",
-    "ruby -e 'puts 1' xtask/src/guard.rs",
+    "ruby prog.rb xtask/src/guard.rs",
     "awk '{print}' Cargo.toml",
     "gawk -f prog.awk Cargo.toml",
 ];
@@ -1897,8 +1899,10 @@ fn r5_add_commands_and_perl_without_in_place_pass() {
         // `dd` inside other words, next to harness paths.
         "git add -p Cargo.toml .github/workflows/ci.yml",
         "cargo add --path xtask serde",
-        // `perl` that only reads.
-        "perl -ne print Cargo.toml",
+        // `perl` that only reads. Was `perl -ne print Cargo.toml`, which is
+        // inline code (`-e` in the flag group) and now a potential writer
+        // (INLINE_CODE_WRITES); a script file keeps the R5 intent.
+        "perl -n prog.pl Cargo.toml",
     ] {
         assert_eq!(spec_shell(false, command), Ok(()), "{command}");
         assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command}");
@@ -2076,16 +2080,19 @@ fn s3_perl_by_path_with_in_place_flag_writes_harness_files() {
 // ADR-0037 (review4 S3): `-M<module>` and `-I<dir>` are no in-place flags,
 // even when the lower-cased word contains an `i` (`-mstrict`, `-ilib`), so
 // these read harness files and pass in a locked session.
+// The spec's examples were `perl … -ne print <harness file>`; `-ne` is inline
+// code and now a potential writer (INLINE_CODE_WRITES), so they moved there
+// and a script file `prog.pl` keeps the S3 intent here.
 #[test]
 fn s3_perl_module_and_include_flags_are_not_in_place() {
     let root = repo("s3_perl_pass");
     for command in [
-        // The spec's examples.
-        "perl -Mstrict -ne print Cargo.toml",
-        "perl -Ilib -ne print Cargo.toml",
+        // The spec's examples, with a script file instead of `-e`.
+        "perl -Mstrict -n prog.pl Cargo.toml",
+        "perl -Ilib -n prog.pl Cargo.toml",
         // By path, a module name with `i`, a directory with `i`.
-        "/usr/bin/perl -Mwarnings -ne print Cargo.toml",
-        "perl -I/tmp/lib -Mstrict -ne print xtask/src/main.rs",
+        "/usr/bin/perl -Mwarnings -n prog.pl Cargo.toml",
+        "perl -I/tmp/lib -Mstrict -n prog.pl xtask/src/main.rs",
     ] {
         assert_eq!(spec_shell(false, command), Ok(()), "{command}");
         assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command}");
@@ -2502,15 +2509,175 @@ fn k10_sed_ruby_and_awk_without_in_place_pass() {
         "sed -n -e s/i/j/p -e 1p deny.toml",
         "/usr/bin/sed -E -n 1p Cargo.toml",
         "grep -i sed Cargo.toml",
-        "ruby -rdigest -e 'puts 1' Cargo.toml",
-        "ruby -Ilib -e 'puts 1' xtask/src/main.rs",
-        "/usr/bin/ruby -e 'puts 1' Cargo.toml",
+        // Were `ruby … -e 'puts 1' <harness file>`: inline code is now a
+        // potential writer (INLINE_CODE_WRITES); a script file keeps the
+        // intent that `-r<lib>`/`-I<dir>` are no in-place flags.
+        "ruby -rdigest prog.rb Cargo.toml",
+        "ruby -Ilib prog.rb xtask/src/main.rs",
+        "/usr/bin/ruby prog.rb Cargo.toml",
         "awk -F: '{print $1}' Cargo.toml",
         "awk -v i=1 '{print i}' clippy.toml",
         "gawk -e 'BEGIN { n = 0 }' -f prog.awk xtask/src/main.rs",
     ] {
         assert_eq!(spec_shell(false, command), Ok(()), "{command}");
         assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Inline-code interpreters are potential writers; one source of truth for
+// harness paths (ADR-0037).
+// ---------------------------------------------------------------------------
+
+/// Commands that run inline code with an interpreter and name a harness path,
+/// with the harness fragment the message names. Inline code can do anything,
+/// so the interpreter is a write operation like `cp`. Derived from the options
+/// of each program:
+/// - ruby: `-e <code>`, also attached (`-e'…'`) and ending a flag group (`-ne`);
+/// - perl: `-e`/`-E`, also in a flag group (`-ne`, `-pe`, `-nE`), after
+///   `-M<module>`/`-I<dir>` groups;
+/// - node: `-e`/`--eval[=]` and `-p`/`--print` (which evaluates the code), also
+///   bundled (`-pe`);
+/// - python/python3: `-c`, also bundled (`-Bc`);
+/// - deno: the subcommand `eval`;
+/// - sh/bash/zsh: `-c`, also bundled (`-lc`, `-ec`) and after long options.
+///
+/// Programs count by path, ignoring case (macOS), with quotes removed (module
+/// doc of guard.rs) and after `env`/`xargs`, as the in-place editors do.
+const INLINE_CODE_WRITES: &[(&str, &str)] = &[
+    // The task's examples.
+    ("ruby -e \"File.write(ARGV[0], String.new)\" xtask/src/guard.rs", "xtask/"),
+    ("perl -e \"unlink @ARGV\" harness/rules.md", "harness/"),
+    ("perl -ne 1 Cargo.toml", "Cargo.toml"),
+    ("perl -E 'say 1' clippy.toml", "clippy.toml"),
+    ("node -e \"require('fs').rmSync(process.argv[1])\" xtask/src/guard.rs", "xtask/"),
+    ("node --eval x deny.toml", "deny.toml"),
+    ("node -p x deny.toml", "deny.toml"),
+    // Denied before this change already (`python`, `rm `, `cp ` are writes);
+    // kept as regressions.
+    ("python -c x Cargo.toml", "Cargo.toml"),
+    ("python3 -c x Cargo.toml", "Cargo.toml"),
+    ("bash -c 'rm xtask/src/guard.rs'", "xtask/"),
+    ("sh -c \"cp /tmp/x Cargo.toml\"", "Cargo.toml"),
+    ("deno eval x .githooks/pre-push", ".githooks"),
+    ("bash -lc x Cargo.toml", "Cargo.toml"),
+    ("zsh -c x Cargo.toml", "Cargo.toml"),
+    ("/usr/bin/ruby -e x Cargo.toml", "Cargo.toml"),
+    ("/bin/sh -c x Cargo.toml", "Cargo.toml"),
+    // Passed before this change (HARMLESS, k10, r5, s3); they run inline code
+    // and name a harness path, so the new rule denies them.
+    ("ruby -e 'puts 1' xtask/src/guard.rs", "xtask/"),
+    ("ruby -rdigest -e 'puts 1' Cargo.toml", "Cargo.toml"),
+    ("ruby -Ilib -e 'puts 1' xtask/src/main.rs", "xtask/"),
+    ("/usr/bin/ruby -e 'puts 1' Cargo.toml", "Cargo.toml"),
+    ("perl -ne print Cargo.toml", "Cargo.toml"),
+    ("perl -Mstrict -ne print Cargo.toml", "Cargo.toml"),
+    ("perl -Ilib -ne print Cargo.toml", "Cargo.toml"),
+    ("/usr/bin/perl -Mwarnings -ne print Cargo.toml", "Cargo.toml"),
+    ("perl -I/tmp/lib -Mstrict -ne print xtask/src/main.rs", "xtask/"),
+    // Further spellings derived from the options above.
+    ("perl -pe s/a/b/ Cargo.toml", "Cargo.toml"),
+    ("perl -nE 'say' clippy.toml", "clippy.toml"),
+    ("ruby -ne 'puts 1' deny.toml", "deny.toml"),
+    ("ruby -e'File.delete(ARGV[0])' Cargo.toml", "Cargo.toml"),
+    ("node --eval=x deny.toml", "deny.toml"),
+    ("node --print x rustfmt.toml", "rustfmt.toml"),
+    ("node -pe x Cargo.toml", "Cargo.toml"),
+    ("/opt/homebrew/bin/node -e x .github/workflows/ci.yml", ".github/"),
+    ("python3 -Bc x Cargo.toml", "Cargo.toml"),
+    ("/usr/local/bin/deno eval x xtask/src/guard.rs", "xtask/"),
+    ("bash -ec x Cargo.toml", "Cargo.toml"),
+    ("bash --norc -c x Cargo.toml", "Cargo.toml"),
+    ("/bin/zsh -c x harness/rules.md", "harness/"),
+    ("env ruby -e x Cargo.toml", "Cargo.toml"),
+    ("echo Cargo.toml | xargs perl -e 'unlink @ARGV'", "Cargo.toml"),
+    ("ru''by -e x Cargo.toml", "Cargo.toml"),
+    ("Ruby -e x Cargo.toml", "Cargo.toml"),
+];
+
+/// Commands that pass in a locked session: inline code without a harness
+/// path, and interpreters running a script file (no inline code; behaviour
+/// unchanged). The letter that means inline code is per program: `-e` of
+/// bash is errexit, `-n` of bash only checks syntax, `-c` of node, ruby and
+/// perl only checks syntax; the `e` in `-I/usr/share/perl5` belongs to the
+/// directory.
+const INLINE_CODE_HARMLESS: &[&str] = &[
+    // The task's examples.
+    "bash -c 'cargo xtask check'",
+    "sh -c 'echo hi'",
+    "ruby -e 'puts 1'",
+    "node -e 'console.log(1)'",
+    "bash .claude/hooks/guard.sh",
+    "ruby script.rb",
+    "perl -n script.pl",
+    // Derived.
+    "python3 -c 'print(1)'",
+    "deno eval 'console.log(1)'",
+    "perl -e 'print 1' /tmp/notes.txt",
+    "sh .githooks/pre-push",
+    "bash -n .githooks/pre-push",
+    "bash -e .githooks/pre-push",
+    "zsh -x xtask/run.sh",
+    "node xtask/tool.js",
+    "node -c .github/scripts/check.js",
+    "node --check .github/scripts/check.js",
+    "ruby -c harness/tool.rb",
+    "ruby -w prog.rb Cargo.toml",
+    "perl -c xtask/tool.pl",
+    "perl -I/usr/share/perl5 -n prog.pl Cargo.toml",
+    "deno run .github/scripts/x.ts",
+    "shellcheck -s bash .githooks/pre-push",
+    "grep -c node Cargo.toml",
+];
+
+// ADR-0037: an interpreter running inline code that names a harness path is
+// denied in a locked session with the harness message naming the fragment,
+// and allowed in an unlocked one. Spec root and a temp repo.
+#[test]
+fn inline_code_interpreters_naming_harness_paths_are_denied() {
+    let root = repo("inline_code_denied");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in INLINE_CODE_WRITES {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}`");
+        assert_denied(spec_shell(false, command), &[&needle], command);
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], command);
+        assert_eq!(spec_shell(true, command), Ok(()), "{command} (unlocked)");
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037: inline code without a harness path and interpreters running a
+// script file pass in a locked session.
+#[test]
+fn inline_code_without_harness_path_and_script_files_pass() {
+    let root = repo("inline_code_pass");
+    for command in INLINE_CODE_HARMLESS {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037, one source of truth for harness paths: every entry of
+// `paths::HARNESS` is detected by the shell check. A prefix entry (ending in
+// `/` or `-`, as `is_harness` treats them) is completed with `x`. `cp /tmp/x
+// <path>` writes it, so a locked session denies it with the harness message,
+// also upper-cased (`is_harness` ignores case, macOS file systems do). Fails
+// as soon as HARNESS gains an entry the shell detection does not know.
+#[test]
+fn harness_list_drift_every_entry_is_guarded_in_shell() {
+    let root = repo("harness_list_drift");
+    for entry in paths::HARNESS {
+        let path =
+            if entry.ends_with(['/', '-']) { format!("{entry}x") } else { (*entry).to_owned() };
+        assert!(paths::is_harness(&path), "{path} must be a harness path");
+        for path in [path.clone(), path.to_uppercase()] {
+            let command = format!("cp /tmp/x {path}");
+            assert_denied(spec_shell(false, &command), &[MSG_HARNESS_SHELL], &command);
+            assert_denied(check_shell(&root, &locked(), &command), &[MSG_HARNESS_SHELL], &command);
+        }
     }
     fs::remove_dir_all(&root).unwrap();
 }

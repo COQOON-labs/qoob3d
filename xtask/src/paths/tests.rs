@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use super::*;
 
 // ADR-0039: test files are `tests/**`, `**/tests.rs`, `proptest-regressions/`
@@ -237,4 +239,101 @@ fn xtask_deps_binary_is_harness() {
     ] {
         assert!(!is_harness(path), "{path} should not be harness");
     }
+}
+
+// ADR-0037, one source of truth for harness paths: `harness_files` takes the
+// output of `git diff --name-only` (one path per line) and returns, in order,
+// the lines that `is_harness` classifies as harness. Expected values from the
+// HARNESS list: root files, directory prefixes, the guard binary; crate
+// manifests, docs and `Cargo.lock` are not harness.
+#[test]
+fn harness_files_keeps_the_harness_lines_in_order() {
+    let names = "Cargo.toml\ncrates/a.rs\nxtask/src/x.rs\ndocs/x.md\n.githooks/pre-push\n\
+                 Cargo.lock\ntarget/debug/xtask\n";
+    assert_eq!(
+        harness_files(names),
+        ["Cargo.toml", "xtask/src/x.rs", ".githooks/pre-push", "target/debug/xtask"]
+    );
+    let names = "harness/ratchet.txt\n.github/workflows/ci.yml\ncrates/qoob3d-core/Cargo.toml\n\
+                 .claude/settings.json\nrust-toolchain.toml\ntarget/debug/deps/xtask-0123abcd\n\
+                 .cargo/config.toml\nREADME.md";
+    assert_eq!(
+        harness_files(names),
+        [
+            "harness/ratchet.txt",
+            ".github/workflows/ci.yml",
+            ".claude/settings.json",
+            "rust-toolchain.toml",
+            "target/debug/deps/xtask-0123abcd",
+            ".cargo/config.toml",
+        ]
+    );
+}
+
+// ADR-0037: no input, no harness line, blank lines → nothing; the last line
+// counts without a trailing newline; a path is returned as given, also when
+// `is_harness` matched it ignoring case (macOS, ADR-0043).
+#[test]
+fn harness_files_edge_cases() {
+    let none: [&str; 0] = [];
+    assert_eq!(harness_files(""), none);
+    assert_eq!(harness_files("\n\n"), none);
+    assert_eq!(harness_files("crates/a.rs\ndocs/x.md\nCargo.lock\n"), none);
+    assert_eq!(harness_files("docs/x.md\nclippy.toml"), ["clippy.toml"]);
+    assert_eq!(harness_files("\nCargo.toml\n\n"), ["Cargo.toml"]);
+    assert_eq!(
+        harness_files("CARGO.TOML\nXtask/src/main.rs\n"),
+        ["CARGO.TOML", "Xtask/src/main.rs"]
+    );
+    // Agrees with `is_harness` line by line.
+    let names = "Cargo.toml\nxtask\n.claudeX/foo\ntarget/debug/qoob3d\n.github/CODEOWNERS\n";
+    let expected: Vec<&str> = names.lines().filter(|l| is_harness(l)).collect();
+    assert_eq!(harness_files(names), expected);
+    assert_eq!(expected, ["Cargo.toml", ".github/CODEOWNERS"]);
+}
+
+/// The lines of the step `- name: <name>` of a GitHub workflow: from its
+/// `- name:` line up to the next line indented no deeper than its `-`.
+fn workflow_step<'a>(workflow: &'a str, name: &str) -> Option<Vec<&'a str>> {
+    let mut lines = workflow.lines();
+    let first = lines.find(|l| l.trim() == format!("- name: {name}"))?;
+    let indent = first.len() - first.trim_start().len();
+    let rest = lines.take_while(|l| l.trim().is_empty() || l.len() - l.trim_start().len() > indent);
+    Some(std::iter::once(first).chain(rest).collect())
+}
+
+// ADR-0037, one source of truth for harness paths: the CI step "Flag harness
+// changes" asks xtask (`paths::is_harness`) which changed files are harness,
+// `cargo xtask harness-changes <base> <head>` with the PR's base and head,
+// and carries no hand-written path list (`grep -E '^(…)'`) of its own. It
+// still reports into the step summary.
+#[test]
+fn ci_flags_harness_changes_through_xtask() {
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask lives in the workspace");
+    let workflow = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("ci.yml");
+    let step =
+        workflow_step(&workflow, "Flag harness changes").expect("step `Flag harness changes`");
+    let text = step.join("\n");
+    let call = step
+        .iter()
+        .find(|l| l.contains("cargo xtask harness-changes"))
+        .unwrap_or_else(|| panic!("the step does not run `cargo xtask harness-changes`:\n{text}"));
+    assert!(call.contains("$PR_BASE") && call.contains("$PR_HEAD"), "{call}");
+    assert!(!text.contains("grep -E"), "the step carries its own path list:\n{text}");
+    assert!(text.contains("GITHUB_STEP_SUMMARY"), "{text}");
+}
+
+// The step parser of the CI test above: it stops at the next step and at a
+// shallower line, keeps blank lines inside the step, and finds nothing for an
+// unknown name.
+#[test]
+fn workflow_step_parser() {
+    let workflow = "jobs:\n  a:\n    steps:\n      - name: One\n        run: |\n          x\n\n          y\n      - name: Two\n        run: z\n  b:\n    steps: []\n";
+    assert_eq!(
+        workflow_step(workflow, "One"),
+        Some(vec!["      - name: One", "        run: |", "          x", "", "          y"])
+    );
+    assert_eq!(workflow_step(workflow, "Two"), Some(vec!["      - name: Two", "        run: z"]));
+    assert_eq!(workflow_step(workflow, "Three"), None);
 }

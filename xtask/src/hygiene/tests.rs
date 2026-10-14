@@ -188,17 +188,22 @@ fn manifest_without_inherited_lints() {
     }
 }
 
-// ADR-0040: suppressions are `#[expect(` / `#![expect(` at the start of a line
-// (after whitespace); `allow`, comments and mid-line mentions do not count.
+// ADR-0040: every `expect` attribute counts, outer and inner, indented or
+// not; `allow`, comments and string mentions do not count.
+// Changed with the "count suppressed lints" spec: an attribute that does not
+// start its line (`fn a() {} #[expect(dead_code)]`) used to count 0; it is a
+// suppression like any other, so it counts 1 now.
+// Inputs in this file are written so that no source line starts with the
+// attribute (concat! / `\n` escapes): the real repository ratchet scans this
+// file, too.
 #[test]
 fn counts_expect_attributes() {
-    // Built with concat! so that no line of this file starts with the attribute
-    // (the real repository ratchet counts this file, too).
     let text = concat!(
         "#[expect(clippy::too_many_lines, reason = \"x\")]\nfn a() {}\n",
         "    #![expect(dead_code, reason = \"y\")]\n\t#[expect(unused)]\n",
     );
     assert_eq!(count_suppressions(text), 3);
+    assert_eq!(count_suppressions("fn a() {} #[expect(dead_code)]\n"), 1);
     for text in [
         "",
         "#[allow(dead_code)]\n",
@@ -206,10 +211,197 @@ fn counts_expect_attributes() {
         "// #[expect(dead_code)]\n",
         "    // #![expect(dead_code)]\n",
         "let s = \"#[expect(\";\n",
-        "fn a() {} #[expect(dead_code)]\n",
     ] {
         assert_eq!(count_suppressions(text), 0, "{text:?}");
     }
+}
+
+/// `count_suppressions` per input, with the input in the failure message.
+fn assert_counts(cases: &[(&str, usize)]) {
+    for (text, expected) in cases {
+        assert_eq!(count_suppressions(text), *expected, "{text:?}");
+    }
+}
+
+// ADR-0040 (count suppressed lints): the ratchet counts lints, not attribute
+// lines. Each lint argument of `expect(…)` is one suppression, a lint path
+// (`clippy::too_many_lines`) is one lint, `reason = …` is no lint, and commas
+// or parentheses inside the reason string are part of the string.
+#[test]
+fn counts_every_lint_of_an_expect_attribute() {
+    assert_counts(&[
+        ("#[expect(a, b, reason = \"r\")]\nfn f() {}\n", 2),
+        ("#![expect(clippy::x)]\n", 1),
+        ("#[expect(clippy::too_many_lines, clippy::cognitive_complexity)]\n", 2),
+        ("#[expect(clippy::too_many_lines, reason = \"x\")]\n", 1),
+        ("#[expect(a, reason = \"b, c, d\")]\n", 1),
+        ("#[expect(a, reason = \"x) (y, z\")]\n", 1),
+        ("#[expect(a, b, c, reason = \"(ADR-0004), so\")]\n", 3),
+        // A trailing comma adds no lint.
+        ("#[expect(a, b,)]\n", 2),
+        ("#[expect(a, reason = \"r\",)]\n", 1),
+        // An empty list suppresses nothing.
+        ("#[expect()]\n", 0),
+        // Several attributes on one line, and on several items.
+        ("#[expect(a)] #[expect(b, c)] fn f() {}\n", 3),
+        ("#[expect(a)]\nfn f() {}\n\n#[expect(b)]\nfn g() {}\n", 2),
+    ]);
+}
+
+// ADR-0040 (count suppressed lints): `cfg_attr(<predicate>, attr, …)` applies
+// its attributes conditionally; every `expect` among them counts with its
+// lints, also nested. The predicate (with its own commas and parentheses) is
+// no attribute, even when a cfg option is called `expect`.
+#[test]
+fn counts_expect_inside_cfg_attr() {
+    assert_counts(&[
+        ("#[cfg_attr(test, expect(a, reason = \"r\"))]\n", 1),
+        ("#[cfg_attr(test, expect(a), expect(b, c))]\n", 3),
+        ("#![cfg_attr(test, expect(a))]\n", 1),
+        ("#[cfg_attr(all(test, not(windows)), expect(a, b))]\n", 2),
+        ("#[cfg_attr(feature = \"x\", expect(a))]\n", 1),
+        ("#[cfg_attr(test, derive(Debug), expect(a, reason = \"r\"))]\n", 1),
+        ("#[cfg_attr(unix, cfg_attr(test, expect(a, b)))]\n", 2),
+        ("#[cfg_attr(unix, cfg_attr(test, expect(a)), expect(b))]\n", 2),
+        ("#[cfg_attr(all(), expect(clippy::unwrap_used, reason = \"sabotage\"))]\n", 1),
+        // No expect inside.
+        ("#[cfg_attr(x, derive(Debug))]\n", 0),
+        ("#[cfg_attr(test, allow(dead_code))]\n", 0),
+        ("#[cfg_attr(expect, derive(Debug))]\n", 0),
+        ("#[cfg_attr(feature = \"expect(a)\", derive(Debug))]\n", 0),
+    ]);
+}
+
+// ADR-0040 (count suppressed lints): an attribute is a token sequence, so it
+// counts across lines and with whitespace between any two tokens. The inner
+// attribute of crates/qoob3d-kernel/src/occt.rs (2 lints, a reason with a
+// string continuation and `(ADR-0004),`) and the outer one of
+// crates/qoob3d-app/src/viewcube.rs (1 lint) are copied verbatim.
+#[test]
+fn counts_attributes_spread_over_lines_and_whitespace() {
+    let occt = concat!(
+        "//! cxx bridge to QOOB3D's own OCCT wrappers in `cpp/` (ADR-0014).\n",
+        "#![expect(\n",
+        "    unsafe_code,\n",
+        "    unreachable_pub,\n",
+        "    reason = \"cxx generates the unsafe FFI glue and its pub items; the C++ side converts \\\n",
+        "              every OCCT exception into an `Err` (ADR-0004), so calls are safe from Rust\"\n",
+        ")]\n",
+        "\n",
+        "#[cxx::bridge]\n",
+        "pub(crate) mod ffi {}\n",
+    );
+    let viewcube = concat!(
+        "    let scale = (1.3 / size.x).min(0.6 / size.y);\n",
+        "    #[expect(\n",
+        "        clippy::redundant_closure_for_method_calls,\n",
+        "        reason = \"the method path does not satisfy the higher-ranked closure bound\"\n",
+        "    )]\n",
+        "    let font_tex_size = ui.ctx().fonts(|f| f.font_image_size());\n",
+    );
+    assert_counts(&[
+        (occt, 2),
+        (viewcube, 1),
+        ("# [ expect ( a ) ]\n", 1),
+        ("# ! [ expect ( a , b ) ]\n", 2),
+        ("#\t[\texpect\t(\ta\t)\t]\n", 1),
+        ("#\n[\nexpect\n(\na\n,\nreason\n=\n\"r\"\n)\n]\n", 1),
+        ("#[cfg_attr(\n    test,\n    expect(\n        a,\n        b,\n    )\n)]\n", 2),
+        ("#[expect(clippy :: too_many_lines)]\n", 1),
+    ]);
+}
+
+// ADR-0040 (count suppressed lints): text inside string literals (normal,
+// with escaped quotes, raw with any number of `#`, byte and raw byte strings)
+// is no attribute; an attribute right after the literal ends counts.
+#[test]
+fn ignores_expect_inside_string_literals() {
+    assert_counts(&[
+        ("let s = \"#[expect(a)]\";\n", 0),
+        ("let s = \"\\\"#[expect(a)]\";\n", 0),
+        ("let s = \"\\\" #[expect(a)] \\\"\";\n", 0),
+        ("let s = \"multi\nline #[expect(a)]\n\";\n", 0),
+        ("let s = r\"#[expect(a)]\";\n", 0),
+        ("let s = r#\"a \" #[expect(a)] \"#;\n", 0),
+        ("let s = r##\"a \"# #[expect(a)] \"##;\n", 0),
+        ("let s = b\"#[expect(a)]\";\n", 0),
+        ("let s = b\"\\\"#[expect(a)]\";\n", 0),
+        ("let s = br#\"a \" #[expect(a)] \"#;\n", 0),
+        ("#[doc = \"#[expect(a)]\"]\nfn f() {}\n", 0),
+        // The literal ends where Rust ends it.
+        ("let s = \"\\\\\"; #[expect(a)] fn f() {}\n", 1),
+        ("let s = r\"\\\"; #[expect(a)] fn f() {}\n", 1),
+        ("let s = r#\"x\"#; #[expect(a)] fn f() {}\n", 1),
+        ("let s = b\"x\"; #[expect(a, b)] fn f() {}\n", 2),
+        // A comment marker inside a string opens no comment.
+        ("let s = \"//\"; #[expect(a)] fn f() {}\n", 1),
+        ("let s = \"/*\"; #[expect(a)] fn f() {}\n", 1),
+    ]);
+}
+
+// ADR-0040 (count suppressed lints): line comments (`//`, `///`, `//!`) and
+// block comments (also nested and doc block comments) hide attributes; a
+// line comment ends at the newline, a block comment at its matching `*/`,
+// and a quote inside a comment opens no string.
+#[test]
+fn ignores_expect_inside_comments() {
+    assert_counts(&[
+        ("// #[expect(a)]\n", 0),
+        ("/// #[expect(a)]\nfn f() {}\n", 0),
+        ("//! #![expect(a)]\n", 0),
+        ("fn f() {} // #[expect(a)]\n", 0),
+        ("/* #[expect(a)] */\n", 0),
+        ("/** #[expect(a)] */\nfn f() {}\n", 0),
+        ("/*! #![expect(a)] */\n", 0),
+        ("/*\n#[expect(a)]\n*/\n", 0),
+        ("/* outer /* inner */ #[expect(a)] */\n", 0),
+        ("/* /* /* */ */ #[expect(a)] */\n", 0),
+        // After the comment the attribute counts.
+        ("// x\n#[expect(a)]\nfn f() {}\n", 1),
+        ("/* x */ #[expect(a)] fn f() {}\n", 1),
+        ("/* /* */ */ #[expect(a)] fn f() {}\n", 1),
+        ("// \"\n#[expect(a)]\nfn f() {}\n", 1),
+        ("/* \" */ #[expect(a)] fn f() {}\n", 1),
+    ]);
+}
+
+// ADR-0040 (count suppressed lints): `allow` is rejected by clippy separately
+// and is no suppression here; the word `expect` outside an expect attribute
+// (method calls, other attribute names, arguments of other attributes,
+// identifiers) does not count.
+#[test]
+fn other_attributes_and_the_word_expect_do_not_count() {
+    assert_counts(&[
+        ("#[allow(dead_code)]\n", 0),
+        ("#![allow(dead_code, unused)]\n", 0),
+        ("let x = y.expect(\"x\");\n", 0),
+        ("let x = y.expect(z);\n", 0),
+        ("#[expected]\nfn f() {}\n", 0),
+        ("#[expected(a)]\nfn f() {}\n", 0),
+        ("#[expect_foo(a)]\nfn f() {}\n", 0),
+        ("#[should_panic(expected = \"boom\")]\nfn f() {}\n", 0),
+        ("fn expect(a: u8) {}\n", 0),
+        ("let expect = (a, b);\n", 0),
+        ("#[cfg_attr(x, derive(Debug))]\n", 0),
+    ]);
+}
+
+// ADR-0040 (count suppressed lints): a char literal is no string, so a `"`
+// inside one opens nothing, and a lifetime is no char literal; attributes
+// after them count.
+#[test]
+fn char_literals_and_lifetimes_open_no_string() {
+    assert_counts(&[
+        ("let q = '\"'; #[expect(a)] fn f() {}\n", 1),
+        ("let q = '\\''; #[expect(a)] fn f() {}\n", 1),
+        ("let q = b'\"'; #[expect(a)] fn f() {}\n", 1),
+        ("fn f<'a>(x: &'a str) {} #[expect(a)] fn g() {}\n", 1),
+        // An odd number of `'`: a lexer that pairs them as char literals
+        // would swallow the attribute.
+        ("fn f(x: &'static str) {} #[expect(a)] fn g() {}\n", 1),
+        ("struct S<'a>(&'a u8);\nimpl S<'_> {}\n#[expect(a)]\nfn g() {}\n", 1),
+        ("fn f(x: &'static str) -> u8 { 0 } fn g() { \"#[expect(a)]\"; }\n", 0),
+    ]);
 }
 
 // ADR-0040 (spec section 4.3): exceeding the ratchet is one problem with the

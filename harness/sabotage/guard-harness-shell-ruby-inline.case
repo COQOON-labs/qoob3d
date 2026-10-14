@@ -1,0 +1,4 @@
+# Agent rewrites a harness file with inline ruby code, no in-place flag (ADR-0037)
+command: cargo xtask guard
+expect: could modify the harness file `xtask/`
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "ruby -e \"File.write(ARGV[0], String.new)\" xtask/src/guard.rs"}, "hook_event_name": "PreToolUse"}
