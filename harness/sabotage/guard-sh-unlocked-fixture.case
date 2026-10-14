@@ -1,0 +1,7 @@
+# The real hook script in an unlocked session still protects fixtures (ADR-0043: guard.sh
+# must not exit early when unlocked)
+command: bash .claude/hooks/guard.sh
+expect: is a format fixture and immutable
+env: QOOB3D_HARNESS_UNLOCK=1
+env: CLAUDE_PROJECT_DIR=.
+stdin: {"session_id": "selftest", "tool_name": "Write", "tool_input": {"file_path": "crates/qoob3d-core/tests/fixtures/format_v1.qbd", "content": "{}"}, "hook_event_name": "PreToolUse"}

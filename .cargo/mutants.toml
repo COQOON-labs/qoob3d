@@ -1,0 +1,2 @@
+# cargo-mutants (ADR-0039): generated data has no logic to test.
+exclude_globs = ["crates/qoob3d-core/src/printer/data.rs"]

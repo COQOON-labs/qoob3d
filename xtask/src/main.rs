@@ -8,13 +8,28 @@
 //! cargo xtask i18n             translation keys complete and used keys defined (ADR-0020)
 //! cargo xtask printers <dir>   regenerate the printer database from OrcaSlicer (ADR-0021)
 //! cargo xtask models [--write] reference models: build, measure, export (ADR-0033)
+//! cargo xtask hygiene          source rules beyond clippy (ADR-0039, ADR-0040, ADR-0044, ADR-0045)
+//! cargo xtask commits <revs>   commit policy for a revision range (ADR-0038, ADR-0039, ADR-0044)
+//! cargo xtask commits --message <file>  same for one message (commit-msg hook)
+//! cargo xtask setup            install the git hooks (ADR-0037)
+//! cargo xtask review <tip> <revs>  critic record for pushed code (ADR-0041)
+//! cargo xtask rules            every rule in harness/rules.md has existing checks (ADR-0040)
+//! cargo xtask selftest         the harness rejects every sabotage in harness/sabotage/ (ADR-0042)
+//! cargo xtask guard            Claude Code PreToolUse hook: JSON on stdin, exit 2 = deny (ADR-0043)
 //! ```
 
 mod arch;
+mod commits;
 mod docs;
+mod guard;
+mod hygiene;
 mod i18n;
 mod models;
+mod paths;
 mod printers;
+mod review;
+mod rules;
+mod selftest;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -31,18 +46,34 @@ fn main() -> ExitCode {
         Some("docs") => report("docs", docs::check(&root, flag("--fix"))),
         Some("screenshot") => screenshot(&root, args.get(1).map(PathBuf::from)),
         Some("i18n") => report("i18n", i18n::check(&root)),
-        Some("models") if flag("--write") => report("models", models::write(&root)),
-        Some("models") => models_step(&root),
-        Some("printers") => match args.get(1) {
-            Some(dir) => report("printers", printers::generate(&root, Path::new(dir))),
-            None => {
-                eprintln!("usage: cargo xtask printers <OrcaSlicer resources/profiles dir>");
+        Some("hygiene") => report("hygiene", hygiene::check(&root)),
+        Some("commits") => commits_step(&root, &args[1..]),
+        Some("setup") => setup(&root),
+        Some("guard") => return guard_hook(&root),
+        Some("rules") => report("rules", rules::check(&root)),
+        Some("selftest") => report("selftest", selftest::run(&root)),
+        Some("review") => match &args[1..] {
+            [tip, revs @ ..] if !revs.is_empty() => {
+                report("review", review::check(&root, tip, revs))
+            }
+            _ => {
+                eprintln!("usage: cargo xtask review <tip> <rev-list args>");
                 false
             }
         },
+        Some("models") if flag("--write") => report("models", models::write(&root)),
+        Some("models") => models_step(&root),
+        Some("printers") => {
+            if let Some(dir) = args.get(1) {
+                report("printers", printers::generate(&root, Path::new(dir)))
+            } else {
+                eprintln!("usage: cargo xtask printers <OrcaSlicer resources/profiles dir>");
+                false
+            }
+        }
         _ => {
             eprintln!(
-                "usage: cargo xtask <check [--fast] | arch | docs [--fix] | i18n | models [--write] | screenshot [dir]>"
+                "usage: cargo xtask <check [--fast] | arch | docs [--fix] | i18n | hygiene | rules | selftest | commits <revs> | review <tip> <revs> | guard | setup | models [--write] | screenshot [dir]>"
             );
             return ExitCode::from(2);
         }
@@ -65,7 +96,7 @@ fn report(name: &str, result: Result<(), Vec<String>>) -> bool {
             for p in &problems {
                 eprintln!("{name}: {p}");
             }
-            eprintln!("{name}: {} Problem(e)", problems.len());
+            eprintln!("{name}: {} problem(s)", problems.len());
             false
         }
     }
@@ -84,6 +115,9 @@ fn check(root: &Path, fast: bool) -> bool {
             Step::Cargo(&["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]),
         ),
         ("test", Step::Cargo(&["test", "--workspace", "--quiet"])),
+        ("hooks", Step::Internal(hooks_installed)),
+        ("hygiene", Step::Internal(|root| report("hygiene", hygiene::check(root)))),
+        ("rules", Step::Internal(|root| report("rules", rules::check(root)))),
         ("arch", Step::Internal(|root| report("arch", arch::check(root)))),
         ("docs", Step::Internal(|root| report("docs", docs::check(root, false)))),
         ("i18n", Step::Internal(|root| report("i18n", i18n::check(root)))),
@@ -108,16 +142,84 @@ fn check(root: &Path, fast: bool) -> bool {
         }
     }
 
-    println!("── Zusammenfassung ─────────────────────────────────");
+    println!("── summary ─────────────────────────────────────────");
     for (name, ok, t) in &summary {
         println!("{} {name:<7} {:>6.1}s", if *ok { "✔" } else { "✘" }, t.as_secs_f32());
     }
     let all_ok = summary.iter().all(|s| s.1);
     println!(
         "{}",
-        if all_ok { if fast { "CHECK (fast) GRÜN" } else { "CHECK GRÜN" } } else { "CHECK ROT" }
+        if all_ok { if fast { "CHECK (fast) GREEN" } else { "CHECK GREEN" } } else { "CHECK RED" }
     );
     all_ok
+}
+
+/// `commits --message <file>` checks one message, anything else is a rev range.
+fn commits_step(root: &Path, args: &[String]) -> bool {
+    match args {
+        [flag, file] if flag == "--message" => {
+            let mut problems = match std::fs::read_to_string(file) {
+                Ok(message) => commits::check_message(&message),
+                Err(e) => vec![format!("{file}: {e}")],
+            };
+            problems.extend(commits::check_current_identity(root));
+            report("commits", if problems.is_empty() { Ok(()) } else { Err(problems) })
+        }
+        [] => {
+            eprintln!("usage: cargo xtask commits <rev-list args> | --message <file>");
+            false
+        }
+        revs => report("commits", commits::check_range(root, revs)),
+    }
+}
+
+/// Exit code 2 tells Claude Code to block the tool call and show stderr.
+fn guard_hook(root: &Path) -> ExitCode {
+    let env = |key: &str| std::env::var(key).ok();
+    let session = guard::Session::from_env_values(
+        env("QOOB3D_HARNESS_UNLOCK").as_deref(),
+        env("HOME").as_deref(),
+    );
+    let input = std::io::read_to_string(std::io::stdin())
+        .map_err(|e| e.to_string())
+        .and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string()));
+    match input
+        .map_err(|e| format!("guard: unreadable hook input: {e}"))
+        .and_then(|v| guard::pre_tool_use(root, &session, &v))
+    {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(reason) => {
+            eprintln!("{reason}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+const HOOKS_DIR: &str = ".githooks";
+
+/// Points git at the versioned hooks in `.githooks/` (ADR-0037).
+fn setup(root: &Path) -> bool {
+    let ok = run(root, "git", &["config", "core.hooksPath", HOOKS_DIR]);
+    if ok {
+        println!("setup: git hooks from {HOOKS_DIR}/ active");
+    }
+    ok
+}
+
+/// Local checkouts must use the versioned git hooks; CI checks the same rules itself.
+fn hooks_installed(root: &Path) -> bool {
+    if std::env::var_os("CI").is_some() {
+        return true;
+    }
+    let configured = Command::new("git")
+        .args(["config", "--get", "core.hooksPath"])
+        .current_dir(root)
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == HOOKS_DIR);
+    if !configured {
+        eprintln!("hooks: git hooks not active → `cargo xtask setup` (ADR-0037)");
+    }
+    configured
 }
 
 /// Writes `ui.png` (whole app via egui_kittest) and scene renders of the
@@ -194,11 +296,25 @@ fn run(root: &Path, program: &str, args: &[&str]) -> bool {
     match status {
         Ok(s) => s.success(),
         Err(err) => {
-            eprintln!("konnte `{program}` nicht starten: {err}");
+            eprintln!("could not start `{program}`: {err}");
             if program == "cargo" && args.first() == Some(&"deny") {
-                eprintln!("→ installieren mit: brew install cargo-deny");
+                eprintln!("→ install with: brew install cargo-deny");
             }
             false
         }
+    }
+}
+
+/// Output of a git command, or its error message.
+pub(crate) fn git(root: &Path, args: &[&str]) -> Result<String, String> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("git: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()))
     }
 }

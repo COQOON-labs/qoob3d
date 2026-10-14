@@ -1,0 +1,5 @@
+# Unlocked session modifies a fixture: the unlock lifts only the harness protection (ADR-0043)
+command: cargo xtask guard
+expect: is a format fixture and immutable
+env: QOOB3D_HARNESS_UNLOCK=1
+stdin: {"session_id": "selftest", "tool_name": "Write", "tool_input": {"file_path": "crates/qoob3d-core/tests/fixtures/format_v1.qbd", "content": "{}"}, "hook_event_name": "PreToolUse"}

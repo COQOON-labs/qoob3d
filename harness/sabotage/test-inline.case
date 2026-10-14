@@ -1,0 +1,17 @@
+# Unit tests are back in production code (ADR-0039)
+command: cargo xtask hygiene
+expect: test code belongs in its own file
+--- patch
+diff --git a/crates/qoob3d-core/src/profile.rs b/crates/qoob3d-core/src/profile.rs
+--- a/crates/qoob3d-core/src/profile.rs
++++ b/crates/qoob3d-core/src/profile.rs
+@@ -33,3 +33,9 @@
+ 
+ #[cfg(test)]
+ mod tests;
++
++#[cfg(test)]
++mod inline {
++    #[test]
++    fn t() {}
++}

@@ -1,0 +1,5 @@
+# Agent edits a shell startup file in place with perl -pi, even unlocked (ADR-0043)
+command: cargo xtask guard
+expect: can set the environment of Claude Code hooks
+env: QOOB3D_HARNESS_UNLOCK=1
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "perl -pi -e 's/^/export X=1\\n/' ~/.zshenv"}, "hook_event_name": "PreToolUse"}

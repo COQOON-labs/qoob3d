@@ -26,11 +26,34 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Lint policy (ADR-0040). Every suppression is `#[expect(lint, reason = "…")]`;
+# `xtask hygiene` caps their number (harness/ratchet.txt).
 [workspace.lints.rust]
 unsafe_code = "deny"
+# `pub` that nothing outside the crate can reach: lets `dead_code` see it.
+unreachable_pub = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+# Suppressions must be explained and must go away when no longer needed.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+ignore_without_reason = "warn"
+# No leftovers.
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+# Size and complexity limits (thresholds in clippy.toml).
+too_many_lines = "warn"
+cognitive_complexity = "warn"
+# Style decisions from docs/design/code-style.md (ADR-0040).
+unwrap_used = "warn"
+semicolon_if_nothing_returned = "warn"
+items_after_statements = "warn"
+redundant_closure_for_method_calls = "warn"
+map_unwrap_or = "warn"
+if_not_else = "warn"
+single_match_else = "warn"
 
 # Optimise all dependencies in dev builds: tessellation, OCCT and wgpu are
 # unusably slow at opt-level 0. Our own crates stay at 0 for fast compiles.

@@ -1,0 +1,5 @@
+# Agent edits .claude/settings.local.json (its `env` reaches the hooks), even unlocked (ADR-0043)
+command: cargo xtask guard
+expect: can set the environment of Claude Code hooks
+env: QOOB3D_HARNESS_UNLOCK=1
+stdin: {"session_id": "selftest", "tool_name": "Write", "tool_input": {"file_path": ".claude/settings.local.json", "content": "{}"}, "hook_event_name": "PreToolUse"}

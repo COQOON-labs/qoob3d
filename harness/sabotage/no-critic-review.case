@@ -1,0 +1,13 @@
+# Production code is pushed without a critic review (ADR-0041)
+command: cargo xtask review HEAD HEAD^..HEAD
+expect: no critic review for this state
+--- patch
+diff --git a/crates/qoob3d-core/src/profile.rs b/crates/qoob3d-core/src/profile.rs
+--- a/crates/qoob3d-core/src/profile.rs
++++ b/crates/qoob3d-core/src/profile.rs
+@@ -33,3 +33,5 @@
+ 
+ #[cfg(test)]
+ mod tests;
++
++// sabotage

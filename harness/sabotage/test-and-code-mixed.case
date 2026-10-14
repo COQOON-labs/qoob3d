@@ -1,0 +1,22 @@
+# One commit changes a test and production code together (ADR-0039)
+command: cargo xtask commits HEAD^..HEAD
+expect: changes tests and production code together
+--- patch
+diff --git a/crates/qoob3d-core/src/profile.rs b/crates/qoob3d-core/src/profile.rs
+--- a/crates/qoob3d-core/src/profile.rs
++++ b/crates/qoob3d-core/src/profile.rs
+@@ -33,3 +33,5 @@
+ 
+ #[cfg(test)]
+ mod tests;
++
++// sabotage
+diff --git a/crates/qoob3d-core/src/profile/tests.rs b/crates/qoob3d-core/src/profile/tests.rs
+--- a/crates/qoob3d-core/src/profile/tests.rs
++++ b/crates/qoob3d-core/src/profile/tests.rs
+@@ -12,3 +12,5 @@
+     assert!(square.contains([0.0, 5.0]), "on the border");
+     assert!(!square.contains([11.0, 5.0]));
+ }
++
++// sabotage

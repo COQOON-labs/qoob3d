@@ -1,0 +1,4 @@
+# The test author changes production code (ADR-0039)
+command: cargo xtask guard
+expect: This agent context already writes tests
+stdin: {"session_id": "selftest", "tool_name": "Edit", "tool_input": {"file_path": "crates/qoob3d-core/src/profile.rs", "old_string": "a", "new_string": "b"}, "hook_event_name": "PreToolUse", "agent_type": "test-author", "agent_id": "a1"}

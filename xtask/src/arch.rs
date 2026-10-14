@@ -42,7 +42,7 @@ fn forbidden_transitive(krate: &str) -> &'static [&'static str] {
     }
 }
 
-pub fn check(root: &Path) -> Result<(), Vec<String>> {
+pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
     let output = Command::new("cargo")
         .args(["metadata", "--format-version", "1"])
         .current_dir(root)
@@ -57,13 +57,13 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
     let mut problems = Vec::new();
     for &krate in WORKSPACE_CRATES {
         let Some(direct) = graph.edges.get(krate) else {
-            problems.push(format!("{krate}: nicht im Workspace gefunden"));
+            problems.push(format!("{krate}: not found in the workspace"));
             continue;
         };
         for dep in direct.iter().filter(|d| WORKSPACE_CRATES.contains(&d.as_str())) {
             if !allowed_workspace_deps(krate).contains(&dep.as_str()) {
                 problems.push(format!(
-                    "{krate} → {dep} ist nicht erlaubt (ADR-0036; erlaubt: {:?})",
+                    "{krate} → {dep} is not allowed (ADR-0036; allowed: {:?})",
                     allowed_workspace_deps(krate)
                 ));
             }
@@ -72,7 +72,7 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
         for &bad in forbidden_transitive(krate) {
             if reachable.contains(bad) {
                 problems.push(format!(
-                    "{krate} zieht (transitiv) `{bad}` – verboten nach ADR-0036. Pfad: {}",
+                    "{krate} pulls in `{bad}` (transitively) – forbidden by ADR-0036. Path: {}",
                     graph.path(krate, bad).join(" → ")
                 ));
             }
@@ -90,12 +90,12 @@ impl Graph {
     fn from_metadata(meta: &Value) -> Result<Self, String> {
         let names: BTreeMap<&str, &str> = meta["packages"]
             .as_array()
-            .ok_or("metadata: packages fehlt")?
+            .ok_or("metadata: packages is missing")?
             .iter()
             .filter_map(|p| Some((p["id"].as_str()?, p["name"].as_str()?)))
             .collect();
         let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for node in meta["resolve"]["nodes"].as_array().ok_or("metadata: resolve fehlt")? {
+        for node in meta["resolve"]["nodes"].as_array().ok_or("metadata: resolve is missing")? {
             let from = names[node["id"].as_str().ok_or("node id")?].to_string();
             let entry = edges.entry(from).or_default();
             for dep in node["deps"].as_array().into_iter().flatten() {

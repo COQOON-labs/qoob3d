@@ -1,0 +1,3 @@
+# The only identity allowed as author and committer of a commit (ADR-0044).
+# Checked by `cargo xtask commits` (commit-msg and pre-push hooks, CI job `policy`).
+Benjamin Gröner <bgroener@coqoon.com>

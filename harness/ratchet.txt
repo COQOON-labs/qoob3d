@@ -1,0 +1,3 @@
+# Upper bound for lint suppressions (#[expect(…)]) in crates/ and xtask/ (ADR-0040).
+# Only ever lower it. xtask hygiene says when it can go down.
+suppressions = 9

@@ -1,0 +1,5 @@
+# Unlocked session: the implementer still may not change tests (ADR-0043, ADR-0039)
+command: cargo xtask guard
+expect: This agent context already writes production code
+env: QOOB3D_HARNESS_UNLOCK=1
+stdin: {"session_id": "selftest", "tool_name": "Edit", "tool_input": {"file_path": "crates/qoob3d-core/src/profile/tests.rs", "old_string": "a", "new_string": "b"}, "hook_event_name": "PreToolUse", "agent_type": "implementer", "agent_id": "a1"}

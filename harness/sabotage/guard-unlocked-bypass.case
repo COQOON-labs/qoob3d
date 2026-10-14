@@ -1,0 +1,5 @@
+# Unlocked session: bypassing the git hooks is still denied (ADR-0043)
+command: cargo xtask guard
+expect: `--no-verify` bypasses the quality gates
+env: QOOB3D_HARNESS_UNLOCK=1
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "git commit --no-verify -m x"}, "hook_event_name": "PreToolUse"}

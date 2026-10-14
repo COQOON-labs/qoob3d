@@ -1,0 +1,6 @@
+# Agent edits the user's Claude settings outside the repo, even unlocked (ADR-0043)
+command: cargo xtask guard
+expect: can set the environment of Claude Code hooks
+env: QOOB3D_HARNESS_UNLOCK=1
+env: HOME=/tmp/qoob3d-selftest-home
+stdin: {"session_id": "selftest", "tool_name": "Edit", "tool_input": {"file_path": "/tmp/qoob3d-selftest-home/.claude/settings.json", "old_string": "a", "new_string": "b"}, "hook_event_name": "PreToolUse"}

@@ -1,0 +1,14 @@
+# Commit names an AI as co-author (ADR-0038)
+command: cargo xtask commits HEAD^..HEAD
+expect: AI attribution in the commit message: `Co-Authored-By: Claude
+message: docs: tweak theme notes\n\nCo-Authored-By: Claude <noreply@anthropic.com>
+--- patch
+diff --git a/docs/design/theme.md b/docs/design/theme.md
+--- a/docs/design/theme.md
++++ b/docs/design/theme.md
+@@ -84,3 +84,5 @@
+ (ADR-0020). Texts are short and without exclamation marks, workspace captions in capitals
+ (DESIGN, SKETCH …). Units are always shown (`20 mm`). The decimal separator follows
+ the language (`15.70` / `15,70 cm³`).
++
++Sabotage.

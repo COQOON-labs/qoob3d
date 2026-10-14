@@ -1,0 +1,4 @@
+# A `..` through a missing directory must not hide a harness path (ADR-0043)
+command: cargo xtask guard
+expect: belongs to the harness
+stdin: {"session_id": "selftest", "tool_name": "Edit", "tool_input": {"file_path": "nonexistent/../xtask/src/guard.rs", "old_string": "a", "new_string": "b"}, "hook_event_name": "PreToolUse"}

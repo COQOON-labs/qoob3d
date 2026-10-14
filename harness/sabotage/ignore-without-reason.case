@@ -1,0 +1,15 @@
+# `#[ignore]` without a reason (R-20)
+command: cargo clippy -p qoob3d-core --all-targets -- -D warnings
+expect: without reason
+--- patch
+diff --git a/crates/qoob3d-core/src/profile/tests.rs b/crates/qoob3d-core/src/profile/tests.rs
+--- a/crates/qoob3d-core/src/profile/tests.rs
++++ b/crates/qoob3d-core/src/profile/tests.rs
+@@ -12,3 +12,7 @@
+     assert!(square.contains([0.0, 5.0]), "on the border");
+     assert!(!square.contains([11.0, 5.0]));
+ }
++
++#[test]
++#[ignore]
++fn later() {}

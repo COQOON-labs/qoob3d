@@ -1,0 +1,4 @@
+# Agent modifies a fixture (ADR-0030)
+command: cargo xtask guard
+expect: is a format fixture and immutable
+stdin: {"session_id": "selftest", "tool_name": "Write", "tool_input": {"file_path": "crates/qoob3d-core/tests/fixtures/format_v1.qbd", "content": "{}"}, "hook_event_name": "PreToolUse"}
