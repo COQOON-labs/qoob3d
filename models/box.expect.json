@@ -1,5 +1,5 @@
 {
-  "why": "Quader 40×25×10: V = a·b·c",
+  "why": "Box 40×25×10: V = a·b·c",
   "bodies": 1,
   "volume_mm3": 10000.0,
   "volume_rel_tol": 1e-06,

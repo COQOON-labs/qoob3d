@@ -1,71 +1,71 @@
-# Architektur-Überblick
+# Architecture overview
 
-Stand: M4. Details und Begründungen stehen in den ADRs (`docs/adr/`). Diese Datei zeigt das
-Zusammenspiel.
+Status: M4. Details and rationale are in the ADRs (`docs/adr/`). This file shows how the parts
+work together.
 
-## Schichten und Datenfluss
+## Layers and data flow
 
 ```mermaid
 flowchart LR
-    subgraph app[qoob3d-app · UI-Thread]
-        UI[Panels / Werkzeuge] --> PRJ[Project<br/>Undo-Snapshots]
-        CMD[commands.rs<br/>Feature-Dialoge] --> PRJ
-        SK[sketch_ui.rs<br/>egui-Overlay] --> SKL[qoob3d-sketch<br/>Werkzeuge, Fangen]
+    subgraph app[qoob3d-app · UI thread]
+        UI[Panels / tools] --> PRJ[Project<br/>undo snapshots]
+        CMD[commands.rs<br/>feature dialogs] --> PRJ
+        SK[sketch_ui.rs<br/>egui overlay] --> SKL[qoob3d-sketch<br/>tools, snapping]
         SKL --> PRJ
-        PRJ --> DOC[(Arc&lt;Document&gt;<br/>Feature-Liste)]
+        PRJ --> DOC[(Arc&lt;Document&gt;<br/>feature list)]
         NAV[navigation.rs] --> CAM[Camera]
-        VC[ViewCube & Overlays<br/>egui] --> CAM
+        VC[ViewCube & overlays<br/>egui] --> CAM
     end
-    subgraph kernel[qoob3d-kernel · Worker-Thread]
-        W[worker.rs] --> M[model.rs<br/>Features, Cache]
+    subgraph kernel[qoob3d-kernel · worker thread]
+        W[worker.rs] --> M[model.rs<br/>features, cache]
         M --> OCCT[[OpenCascade]]
-        OCCT --> CPP[cpp/qoob3d_occt.cpp<br/>Tessellierung]
+        OCCT --> CPP[cpp/qoob3d_occt.cpp<br/>tessellation]
     end
     subgraph render[qoob3d-render · GPU]
-        R[ViewportRenderer] --> TEX[Offscreen-Textur<br/>sRGB, egui-View Unorm]
+        R[ViewportRenderer] --> TEX[Offscreen texture<br/>sRGB, egui view Unorm]
     end
     DOC -- "Request::Rebuild(Arc&lt;Document&gt;)" --> W
-    CPP -- "Response: Profile, Körper (ShapeMesh, Volumen),<br/>Feature-Fehler, Export-Netze" --> app
+    CPP -- "Response: profiles, bodies (ShapeMesh, volume),<br/>feature errors, export meshes" --> app
     app -- "ShapeMesh + Camera + SceneOptions" --> R
-    TEX -- "native egui-Textur" --> UI
+    TEX -- "native egui texture" --> UI
 ```
 
-1. **Dokument** (`qoob3d-core`): die einzige Wahrheit, eine Feature-Liste mit Parametern
-   (ADR-0030). Bisher gibt es Skizzen (`FeatureKind::Sketch`): Punkte als Entitäten, Kurven
-   referenzieren Punkt-IDs (ADR-0024). Datei = Hülle `{format, format_version, document}`,
-   Validierung und Migrationen beim Laden. Das Dokument ist unveränderlich geteilt
-   (`Arc<Document>`); jede Änderung erzeugt einen neuen Schnappschuss. `Project` (App) hält
-   Verlauf, Undo/Redo und „ungespeichert“ (ADR-0029).
-   Körper-Features (Formatversion 2, ADR-0031): Konstruktionsebene, Extrudieren, Drehen,
-   Erhebung, Stirnrad und Spirale (ADR-0032, Geometrie in `core::generate`).
-2. **Skizzenlogik** (`qoob3d-sketch`): reine Werkzeug-Zustandsautomaten, Fangen, Treffertest,
-   Ziehen, in Skizzenkoordinaten (ADR-0036). Die App übersetzt Pixel ↔ Ebene und zeichnet
-   alles als egui-Overlay (ADR-0027).
-3. **Kernel** (`qoob3d-kernel`): eigener Thread, einziger Ort mit OCCT (ADR-0005). Eigene
-   exception-sichere C++-Wrapper (ADR-0014) liefern `ShapeMesh` (Dreiecke mit Face-ID, Kanten
-   als Polylinien) und Skizzenprofile per General Fuse (ADR-0028). `model.rs` baut die
-   Features nacheinander zu Körpern (Booleans gegen berührte Körper, Hash-Ketten-Cache,
-   ADR-0031/0012). Rebuilds werden zusammengefasst: nur die neueste wartende Anfrage zählt.
-4. **Renderer** (`qoob3d-render`): Hintergrund, Körper, Kanten (Pixel-breite Quads), Raster mit
-   Druckbett und Achsen (ADR-0021), im Skizziermodus in der Skizzenebene. Offscreen mit MSAA, Reverse-Z; egui bekommt eine
-   Unorm-View (ADR-0019).
-5. **App** (`qoob3d-app`): Panels, Navigation (Fusion, Orbit um Cursor-Pivot per Raycast,
-   ADR-0017; Linksziehen-Orbit, ADR-0022), ViewCube und Overlays in egui (ADR-0015),
-   Kamera-Animationen. Feature-Dialoge mit Live-Vorschau über den normalen Rebuild
-   (ADR-0035). Export STL/3MF (ADR-0034). CLI: `--report`, `--export`, `--render` für
-   `.qbd`-Dateien (ADR-0033). Alle Texte über Fluent (Englisch Basis, ADR-0020),
-   gespeicherte `Settings`.
-6. **Druckerdatenbank** (`qoob3d-core/src/printer/`): 441 Modelle, generiert aus
-   OrcaSlicer-Profilen (ADR-0021).
+1. **Document** (`qoob3d-core`): the single source of truth, a feature list with parameters
+   (ADR-0030). So far there are sketches (`FeatureKind::Sketch`): points as entities, curves
+   reference point IDs (ADR-0024). File = envelope `{format, format_version, document}`,
+   validation and migrations on load. The document is shared immutably
+   (`Arc<Document>`); every change creates a new snapshot. `Project` (app) holds
+   history, undo/redo and "unsaved" (ADR-0029).
+   Body features (format version 2, ADR-0031): construction plane, extrude, revolve,
+   loft, spur gear and coil (ADR-0032, geometry in `core::generate`).
+2. **Sketch logic** (`qoob3d-sketch`): pure tool state machines, snapping, hit testing,
+   dragging, in sketch coordinates (ADR-0036). The app translates pixels ↔ plane and draws
+   everything as an egui overlay (ADR-0027).
+3. **Kernel** (`qoob3d-kernel`): own thread, the only place with OCCT (ADR-0005). Our own
+   exception-safe C++ wrappers (ADR-0014) deliver `ShapeMesh` (triangles with face ID, edges
+   as polylines) and sketch profiles via General Fuse (ADR-0028). `model.rs` builds the
+   features one after another into bodies (booleans against touched bodies, hash chain cache,
+   ADR-0031/0012). Rebuilds are coalesced: only the newest waiting request counts.
+4. **Renderer** (`qoob3d-render`): background, bodies, edges (pixel-wide quads), grid with
+   print bed and axes (ADR-0021), in sketch mode in the sketch plane. Offscreen with MSAA, reverse-Z; egui gets a
+   Unorm view (ADR-0019).
+5. **App** (`qoob3d-app`): panels, navigation (Fusion, orbit around cursor pivot via raycast,
+   ADR-0017; left-drag orbit, ADR-0022), ViewCube and overlays in egui (ADR-0015),
+   camera animations. Feature dialogs with live preview via the normal rebuild
+   (ADR-0035). Export STL/3MF (ADR-0034). CLI: `--report`, `--export`, `--render` for
+   `.qbd` files (ADR-0033). All texts via Fluent (English base, ADR-0020),
+   saved `Settings`.
+6. **Printer database** (`qoob3d-core/src/printer/`): 441 models, generated from
+   OrcaSlicer profiles (ADR-0021).
 
 ## Threads
 
-| Thread | Besitzt | Darf nicht |
+| Thread | Owns | Must not |
 | --- | --- | --- |
-| Main/UI (winit, eframe) | egui-Context, `Viewport` (Camera, Renderer), Dokument | auf den Kernel warten |
-| `qoob3d-kernel` | alle OCCT-Objekte, Rebuild-Cache | UI- oder GPU-Typen anfassen |
+| Main/UI (winit, eframe) | egui context, `Viewport` (Camera, Renderer), document | wait for the kernel |
+| `qoob3d-kernel` | all OCCT objects, rebuild cache | touch UI or GPU types |
 
-## Crate-Abhängigkeiten (erzwungen durch `cargo xtask check`, ADR-0036)
+## Crate dependencies (enforced by `cargo xtask check`, ADR-0036)
 
 ```mermaid
 flowchart TD
@@ -77,42 +77,44 @@ flowchart TD
     app --> render[qoob3d-render]
     kernel --> core
     render --> core
-    kernel --> occ[third_party/opencascade<br/>Fork, ADR-0014]
+    kernel --> occ[third_party/opencascade<br/>fork, ADR-0014]
 ```
 
-## Wo finde ich was?
+## Where do I find what?
 
-| Thema | Ort |
+| Topic | Location |
 | --- | --- |
-| Mesh-Typen, Mesh-Prüfung, Raycast | `crates/qoob3d-core/src/mesh.rs` |
-| Dokument, Skizzenmodell, Ebenen, Dateiformat | `crates/qoob3d-core/src/document/`, Fixture `crates/qoob3d-core/tests/fixtures/` |
-| Ausdrücke in Eingabefeldern (`10+5`, `1in`) | `crates/qoob3d-core/src/expr.rs` |
-| Profil-Typ (Regionen) | `crates/qoob3d-core/src/profile.rs` |
-| Skizzenwerkzeuge, Fangen, Treffertest, Ziehen | `crates/qoob3d-sketch/src/` |
-| Profilberechnung (General Fuse) | `crates/qoob3d-kernel/src/profiles.rs`, `cpp/qoob3d_occt.cpp` |
-| Skizziermodus (Overlay, HUD, Ebenenwahl) | `crates/qoob3d-app/src/sketch_ui.rs` |
-| Undo/Redo, Laden/Speichern | `crates/qoob3d-app/src/{history,project}.rs` |
-| Körper-Features (Daten, Validierung) | `crates/qoob3d-core/src/document/feature.rs` |
-| Zahnrad-Evolvente, Spiralbahn | `crates/qoob3d-core/src/generate.rs` |
-| STL/3MF-Writer, ZIP | `crates/qoob3d-core/src/export.rs` |
-| Referenzmodelle (Quelle) / Dateien + Erwartungen | `crates/qoob3d-core/src/document/examples.rs` / `models/` |
-| Rebuild der Features, Booleans, Cache | `crates/qoob3d-kernel/src/model.rs` |
-| Feature-Dialoge, Auswahl im Viewport | `crates/qoob3d-app/src/commands.rs` |
-| CLI-Batch (`--report`, `--export`) | `crates/qoob3d-app/src/batch.rs` |
-| E2E-Modellieren durch die UI | `crates/qoob3d-app/tests/modeling.rs` |
-| Referenzmodell-Gate | `xtask/src/models.rs` |
-| Druckerprofile (generiert) | `crates/qoob3d-core/src/printer/{mod,data}.rs`, Generator `xtask/src/printers.rs` |
-| Übersetzungen, Einstellungen | `crates/qoob3d-app/locales/*/main.ftl`, `src/{i18n,settings}.rs` |
-| Kernel-Protokoll, Worker | `crates/qoob3d-kernel/src/worker.rs` |
-| Eigene OCCT-Wrapper (C++) | `crates/qoob3d-kernel/cpp/`, Bridge `src/occt.rs` |
-| Kamera-Mathematik (Ortho/Persp., Ray, Animation) | `crates/qoob3d-render/src/camera.rs` |
-| Render-Pipelines, Targets, Farbraum | `crates/qoob3d-render/src/renderer.rs` |
-| Shader (Körper, Linien, Raster) | `crates/qoob3d-render/src/shaders/scene.wgsl` |
-| Headless-GPU, Readback | `crates/qoob3d-render/src/headless.rs` |
-| Panels (Werkzeugleiste, Browser, Timeline) | `crates/qoob3d-app/src/panels.rs` |
-| Viewport-Widget, Overlays, Navigationsleiste | `crates/qoob3d-app/src/viewport.rs` |
+| Mesh types, mesh check, raycast | `crates/qoob3d-core/src/mesh.rs` |
+| Document, sketch model, planes, file format | `crates/qoob3d-core/src/document/`, fixture `crates/qoob3d-core/tests/fixtures/` |
+| Expressions in input fields (`10+5`, `1in`) | `crates/qoob3d-core/src/expr.rs` |
+| Profile type (regions) | `crates/qoob3d-core/src/profile.rs` |
+| Sketch tools, snapping, hit testing, dragging | `crates/qoob3d-sketch/src/` |
+| Profile computation (General Fuse) | `crates/qoob3d-kernel/src/profiles.rs`, `cpp/qoob3d_occt.cpp` |
+| Sketch mode (overlay, HUD, plane pick) | `crates/qoob3d-app/src/sketch_ui.rs` |
+| Undo/redo, load/save | `crates/qoob3d-app/src/{history,project}.rs` |
+| Body features (data, validation) | `crates/qoob3d-core/src/document/feature.rs` |
+| Gear involute, coil path | `crates/qoob3d-core/src/generate.rs` |
+| STL/3MF writer, ZIP | `crates/qoob3d-core/src/export.rs` |
+| Reference models (source) / files + expectations | `crates/qoob3d-core/src/document/examples.rs` / `models/` |
+| Rebuild of the features, booleans, cache | `crates/qoob3d-kernel/src/model.rs` |
+| Feature dialogs, selection in the viewport | `crates/qoob3d-app/src/commands.rs` |
+| CLI batch (`--report`, `--export`) | `crates/qoob3d-app/src/batch.rs` |
+| E2E modeling through the UI | `crates/qoob3d-app/tests/modeling.rs` |
+| Reference model gate | `xtask/src/models.rs` |
+| Printer profiles (generated) | `crates/qoob3d-core/src/printer/{mod,data}.rs`, generator `xtask/src/printers.rs` |
+| Translations, settings | `crates/qoob3d-app/locales/*/main.ftl`, `src/{i18n,settings}.rs` |
+| Kernel protocol, worker | `crates/qoob3d-kernel/src/worker.rs` |
+| Own OCCT wrappers (C++) | `crates/qoob3d-kernel/cpp/`, bridge `src/occt.rs` |
+| Camera math (ortho/persp., ray, animation) | `crates/qoob3d-render/src/camera.rs` |
+| Render pipelines, targets, color space | `crates/qoob3d-render/src/renderer.rs` |
+| Shaders (bodies, lines, grid) | `crates/qoob3d-render/src/shaders/scene.wgsl` |
+| Headless GPU, readback | `crates/qoob3d-render/src/headless.rs` |
+| Panels (toolbar, browser, timeline) | `crates/qoob3d-app/src/panels.rs` |
+| Viewport widget, overlays, navigation bar | `crates/qoob3d-app/src/viewport.rs` |
 | ViewCube | `crates/qoob3d-app/src/viewcube.rs` |
-| Maus/Trackpad → Kamera | `crates/qoob3d-app/src/navigation.rs` |
+| Mouse/trackpad → camera | `crates/qoob3d-app/src/navigation.rs` |
 | CLI (`--render`, `--smoke-test`) | `crates/qoob3d-app/src/{cli,headless_render,smoke}.rs` |
-| UI-Tests, Screenshots | `crates/qoob3d-app/tests/ui.rs` |
-| Checks, Doku-Lint, Architekturregeln, Screenshots | `xtask/src/` |
+| UI tests, screenshots | `crates/qoob3d-app/tests/ui.rs` |
+| Checks, docs lint, architecture rules, screenshots | `xtask/src/` |
+| AI harness: guard, commit policy, hygiene, rule register, critic protocol, self-test | `xtask/src/{guard,commits,hygiene,rules,review,selftest,paths}.rs`, `harness/`, `.claude/`, `.githooks/`, `.github/workflows/` – overview `docs/harness.md` |
+| Unit tests of a module | `<module>/tests.rs` next to `<module>.rs` (ADR-0039) |

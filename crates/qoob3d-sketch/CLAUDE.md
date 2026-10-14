@@ -1,31 +1,31 @@
 # qoob3d-sketch
 
-Skizzen-Logik ohne UI, GPU und Kernel (ADR-0036): Werkzeuge, Fangen, Treffertest,
-Bearbeiten, ab M3b der Solver. Anforderungen: `docs/requirements/skizzen.md` (IDs `SK-…`).
+Sketch logic without UI, GPU and kernel (ADR-0036): tools, snapping, hit testing,
+editing, from M3b the solver. Requirements: `docs/requirements/sketches.md` (IDs `SK-…`).
 
-## Regeln
+## Rules
 
-- **Rein:** nur `qoob3d-core` und Mathe-Crates. Kein egui, wgpu, eframe, OCCT, auch nicht
-  transitiv (`cargo xtask arch`).
-- Alles in **Skizzenkoordinaten** (mm, `f64`, lokales System der Ebene). Pixel kennt dieses
-  Crate nicht: Toleranzen kommen in Skizzeneinheiten herein.
-- Punkte sind Entitäten (ADR-0024). Fangen auf einen Punkt liefert dessen ID, Werkzeuge
-  verwenden sie wieder statt neue Punkte anzulegen.
-- Werkzeuge sind Zustandsautomaten (`tools::Tool`). Neue Werkzeuge bekommen Tests für Ablauf,
-  Escape, Werteingabe und entartete Eingaben.
-- Texte (Feldnamen) sind nur Schlüssel (`field-length` …). Übersetzt wird in der App (ADR-0020).
+- **Pure:** only `qoob3d-core` and math crates. No egui, wgpu, eframe, OCCT, not even
+  transitively (`cargo xtask arch`).
+- Everything in **sketch coordinates** (mm, `f64`, local system of the plane). This crate does
+  not know pixels: tolerances come in as sketch units.
+- Points are entities (ADR-0024). Snapping to a point returns its ID, tools
+  reuse it instead of creating new points.
+- Tools are state machines (`tools::Tool`). New tools get tests for the flow,
+  Escape, value input and degenerate input.
+- Texts (field names) are only keys (`field-length` …). Translation happens in the app (ADR-0020).
 
-## Dateien
+## Files
 
-- `src/tools.rs`: Linie/Polylinie, Rechteck (2 Punkte, Mitte), Kreis, Bogen (Mitte → Start →
-  Ende, Felder nacheinander), Punkt.
-- `src/snap.rs`: Fangen und Ausrichtung mit Priorität.
-- `src/pick.rs`: Treffertest, Fenster- und Kreuzungsauswahl.
-- `src/edit.rs`: Ziehen, Punkte zusammenführen, Konstruktion umschalten.
-- `src/geom.rs`: Schnittpunkte (auch Bögen), nächste Punkte, Kreis-/Bogen-Polylinie.
-- Bögen: Das Endpunkt-Entity muss auf dem Kreis liegen (`Sketch::repair_arcs` nach dem
-  Ziehen), sonst lehnt `validate` die Datei ab.
+- `src/tools.rs`: line/polyline, rectangle (2 points, center), circle, arc (center → start →
+  end, fields one after another), point.
+- `src/snap.rs`: snapping and alignment with priority.
+- `src/pick.rs`: hit testing, window and crossing selection.
+- `src/edit.rs`: dragging, merging points, toggling construction.
+- `src/geom.rs`: intersections (also arcs), nearest points, circle/arc polyline.
+- Arcs: the end point entity must lie on the circle (`Sketch::repair_arcs` after
+  dragging), otherwise `validate` rejects the file.
 
-## Relevante ADRs
+## Relevant ADRs
 
 ADR-0024, ADR-0025, ADR-0036, ADR-0027

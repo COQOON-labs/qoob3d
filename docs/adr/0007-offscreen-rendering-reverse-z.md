@@ -1,7 +1,7 @@
 ---
 id: ADR-0007
-title: Der Viewport rendert offscreen mit 4× MSAA und Reverse-Z und wird als egui-Textur angezeigt
-status: ersetzt
+title: The viewport renders offscreen with 4× MSAA and reverse Z and is shown as an egui texture
+status: superseded
 date: 2026-10-13
 crates: [qoob3d-render, qoob3d-app]
 tags: [rendering, wgpu]
@@ -9,35 +9,35 @@ supersedes: []
 superseded_by: ADR-0019
 ---
 
-## Kontext
+## Context
 
-egui bietet zwei Wege für eigene 3D-Inhalte: Paint-Callbacks, die im Render-Pass von egui
-zeichnen (ohne eigenen Tiefenpuffer und ohne eigenes MSAA), oder eine eigene Textur.
-CAD braucht präzise Tiefe über große Distanzen (0,01 mm bis Meter), Kantenglättung und
-später einen ID-Puffer fürs Picking.
+egui offers two ways for custom 3D content: paint callbacks that draw in egui's render pass
+(without an own depth buffer and without own MSAA), or an own texture.
+CAD needs precise depth over large distances (0.01 mm up to meters), anti-aliasing and
+later an ID buffer for picking.
 
-## Entscheidung
+## Decision
 
-- `ViewportRenderer::render` zeichnet in eigene Targets: Farbe `Rgba8UnormSrgb` mit 4× MSAA,
-  aufgelöst in eine einzelne Sample-Textur, und Tiefe `Depth32Float`.
-- **Reverse-Z** mit unendlicher Perspektive: Tiefe wird mit 0 gelöscht, Vergleich `Greater`.
-- Die aufgelöste Textur wird über `register_native_texture` in egui registriert und bei
-  Größenänderung mit `update_egui_texture_from_wgpu_texture` aktualisiert.
-- Shader rechnen linear, das sRGB-Format übernimmt die Gamma-Kodierung.
-- wgpu wird ausschließlich über `qoob3d_render::wgpu` (= `eframe::egui_wgpu::wgpu`) benutzt.
-- Die Textur hat `COPY_SRC`, damit Headless-Tests und die CLI (`--render`) zurücklesen können.
+- `ViewportRenderer::render` draws into own targets: color `Rgba8UnormSrgb` with 4× MSAA,
+  resolved into a single-sample texture, and depth `Depth32Float`.
+- **Reverse Z** with infinite perspective: depth is cleared with 0, comparison `Greater`.
+- The resolved texture is registered in egui via `register_native_texture` and, on
+  resize, updated with `update_egui_texture_from_wgpu_texture`.
+- Shaders compute linearly, the sRGB format takes care of gamma encoding.
+- wgpu is used exclusively via `qoob3d_render::wgpu` (= `eframe::egui_wgpu::wgpu`).
+- The texture has `COPY_SRC` so that headless tests and the CLI (`--render`) can read back.
 
-## Konsequenzen
+## Consequences
 
-- Eigene Render-Passes sind frei kombinierbar (Picking, Kanten, Overlay).
-- Headless-Rendering ohne Fenster ist möglich – Grundlage der visuellen Tests (ADR-0013).
-- Ein zusätzlicher Kopier- und Sample-Schritt pro Frame ist vernachlässigbar.
+- Own render passes can be combined freely (picking, edges, overlay).
+- Headless rendering without a window is possible – the basis of the visual tests (ADR-0013).
+- An additional copy and sample step per frame is negligible.
 
-## Verworfene Alternativen
+## Rejected alternatives
 
-- **egui-Paint-Callback** – kein eigener Tiefenpuffer und kein eigenes MSAA, schwer headless zu testen.
-- **Klassisches Z mit near/far** – Z-Fighting bei großen Distanzbereichen.
+- **egui paint callback** – no own depth buffer and no own MSAA, hard to test headless.
+- **Classic Z with near/far** – Z-fighting across large distance ranges.
 
-## Verweise
+## References
 
 - `crates/qoob3d-render/src/renderer.rs`, `crates/qoob3d-render/src/shaders/scene.wgsl`

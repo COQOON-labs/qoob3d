@@ -1,49 +1,49 @@
 # qoob3d-render
 
-wgpu-Viewport: Kamera, Pipelines, Offscreen-Targets, Headless-Hilfen.
+wgpu viewport: camera, pipelines, offscreen targets, headless helpers.
 
-## Regeln
+## Rules
 
-- wgpu **nur** über `crate::wgpu` (= `eframe::egui_wgpu::wgpu`) importieren, nie als eigene
-  Abhängigkeit (ADR-0019).
-- Keine Abhängigkeit auf `qoob3d-kernel` (ADR-0036). Geometrie kommt als `ShapeMesh`
-  (Flächen + Kanten).
-- **Farbraum (ADR-0019):** Rendern in `COLOR_FORMAT` (sRGB), egui bekommt die
-  `DISPLAY_FORMAT`-View (Unorm) derselben Textur. Shader rechnen linear. Farben stehen in
-  `renderer.rs::palette` und `docs/design/theme.md`.
-- **Reverse-Z:** Tiefe wird mit 0 gelöscht, Vergleich `Greater`/`GreaterEqual`. Für Ortho
-  gibt es eine eigene lineare Reverse-Z-Matrix (`Camera::projection`).
-- Linien sind Instanzen, die im Vertex-Shader zu Quads in Pixelbreite expandiert werden
-  (`vs_line`). Kanten werden in Richtung Kamera versetzt (Anteil der Kameradistanz), damit sie
-  den Tiefentest gegen ihre Fläche gewinnen.
-- Raster, Druckbett (Polygon), Sperrzonen, Einzeldüsen-Zonen und X/Y-Achsen zeichnet der
-  analytische Vollbild-Shader `fs_grid` (ADR-0021). Die Polygone liegen im Uniform `bed`
-  (`MAX_BED_POINTS` = 192, gleicher Wert in `xtask printers`). Das Raster liegt in einer
-  beliebigen Ebene (`SceneOptions::grid_plane`, `GridPlane`); das Druckbett erscheint nur in
-  der Welt-XY-Ebene. Skizzen nutzen das für ihr Raster.
-- Visuelle Änderungen prüfen: `cargo xtask screenshot`, dann die PNGs ansehen.
+- Import wgpu **only** via `crate::wgpu` (= `eframe::egui_wgpu::wgpu`), never as a separate
+  dependency (ADR-0019).
+- No dependency on `qoob3d-kernel` (ADR-0036). Geometry arrives as `ShapeMesh`
+  (faces + edges).
+- **Color space (ADR-0019):** render in `COLOR_FORMAT` (sRGB), egui gets the
+  `DISPLAY_FORMAT` view (Unorm) of the same texture. Shaders compute linearly. Colors are in
+  `renderer.rs::palette` and `docs/design/theme.md`.
+- **Reverse-Z:** depth is cleared to 0, comparison `Greater`/`GreaterEqual`. For ortho
+  there is a separate linear reverse-Z matrix (`Camera::projection`).
+- Lines are instances that are expanded into pixel-wide quads in the vertex shader
+  (`vs_line`). Edges are offset towards the camera (fraction of the camera distance) so that
+  they win the depth test against their face.
+- Grid, print bed (polygon), exclusion zones, single-nozzle zones and X/Y axes are drawn by the
+  analytic full-screen shader `fs_grid` (ADR-0021). The polygons are in the uniform `bed`
+  (`MAX_BED_POINTS` = 192, same value in `xtask printers`). The grid lies in an
+  arbitrary plane (`SceneOptions::grid_plane`, `GridPlane`); the print bed appears only in
+  the world XY plane. Sketches use this for their grid.
+- Check visual changes: `cargo xtask screenshot`, then look at the PNGs.
 
-## Dateien
+## Files
 
-- `src/camera.rs`: `Camera` (Orbit/Orbit um Pivot, Pan, Zoom auf den Cursor, Einpassen,
-  Perspektive/Ortho, `ray`, `project`, `interpolate`), `ViewPreset`, `grid_snap_step`
-  (Rasterweite fürs Fangen, passend zum sichtbaren Raster). Mit Unit-Tests.
-- `src/renderer.rs`: `ViewportRenderer` (`set_scene`, `render`), `SceneOptions`, Pipelines
-  (Hintergrund, Körper, Linien, Raster), Targets.
-- `src/headless.rs`: Headless-Device und Texture-Readback (Tests, CLI).
-- `src/shaders/scene.wgsl`: alle Shader. **`target` ist in WGSL reserviert.**
-- `tests/offscreen.rs`: rendert einen Würfel headless und prüft Pixel (schlägt mit
-  `QOOB3D_REQUIRE_GPU` fehl statt zu überspringen).
+- `src/camera.rs`: `Camera` (orbit/orbit around pivot, pan, zoom to the cursor, fit,
+  perspective/ortho, `ray`, `project`, `interpolate`), `ViewPreset`, `grid_snap_step`
+  (grid spacing for snapping, matching the visible grid). With unit tests.
+- `src/renderer.rs`: `ViewportRenderer` (`set_scene`, `render`), `SceneOptions`, pipelines
+  (background, bodies, lines, grid), targets.
+- `src/headless.rs`: headless device and texture readback (tests, CLI).
+- `src/shaders/scene.wgsl`: all shaders. **`target` is reserved in WGSL.**
+- `tests/offscreen.rs`: renders a cube headless and checks pixels (fails with
+  `QOOB3D_REQUIRE_GPU` instead of skipping).
 
-## Fallstricke (wgpu 30 / glam 0.34 / WGSL)
+## Pitfalls (wgpu 30 / glam 0.34 / WGSL)
 
-- `depth_write_enabled`/`depth_compare` sind `Option`, `PipelineLayoutDescriptor::immediate_size`,
-  Bind-Group-Layouts sind `&[Option<&_>]`, `multiview_mask`, `get_mapped_range()` liefert ein `Result`.
-- Kamera-Matrizen: `glam::camera::rh::{view::look_at_mat4, proj::directx::perspective_infinite_reverse}`.
-- Dynamisch indizierte Arrays in WGSL als `var` deklarieren.
-- Shader-Fehler zeigen sich erst zur Laufzeit. `tests/offscreen.rs` erzeugt alle Pipelines
-  und fängt sie dadurch ab.
+- `depth_write_enabled`/`depth_compare` are `Option`, `PipelineLayoutDescriptor::immediate_size`,
+  bind group layouts are `&[Option<&_>]`, `multiview_mask`, `get_mapped_range()` returns a `Result`.
+- Camera matrices: `glam::camera::rh::{view::look_at_mat4, proj::directx::perspective_infinite_reverse}`.
+- Declare dynamically indexed arrays in WGSL as `var`.
+- Shader errors only show up at runtime. `tests/offscreen.rs` creates all pipelines
+  and thereby catches them.
 
-## Relevante ADRs
+## Relevant ADRs
 
 ADR-0036, ADR-0006, ADR-0008, ADR-0021, ADR-0017, ADR-0019

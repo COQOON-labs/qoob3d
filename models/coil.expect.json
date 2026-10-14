@@ -1,5 +1,5 @@
 {
-  "why": "Schraube Ø20, 5 Windungen, Steigung 4, Draht Ø2: V = π·1²·5·√((20π)²+4²)",
+  "why": "Coil Ø20, 5 turns, pitch 4, wire Ø2: V = π·1²·5·√((20π)²+4²)",
   "bodies": 1,
   "volume_mm3": 988.9584177812836,
   "volume_rel_tol": 0.01,

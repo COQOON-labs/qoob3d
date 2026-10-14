@@ -1,5 +1,5 @@
 {
-  "why": "Flache Spirale r=5…21 (4 Windungen, 4 mm/Windung), Draht Ø2: V = π·1²·L, L = ∫√(r²+b²)dθ = 327.18",
+  "why": "Flat spiral r=5…21 (4 turns, 4 mm/turn), wire Ø2: V = π·1²·L, L = ∫√(r²+b²)dθ = 327.18",
   "bodies": 1,
   "volume_mm3": 1027.87203882292,
   "volume_rel_tol": 0.01,

@@ -1,5 +1,5 @@
 {
-  "why": "Pyramide a=30, h=25: V = a²·h/3",
+  "why": "Pyramid a=30, h=25: V = a²·h/3",
   "bodies": 1,
   "volume_mm3": 7500.0,
   "volume_rel_tol": 1e-05,

@@ -1,46 +1,46 @@
 # qoob3d-core
 
-Dokumentmodell und gemeinsame reine Datentypen. Wird von allen anderen Crates benutzt.
+Document model and shared pure data types. Used by all other crates.
 
-## Regeln
+## Rules
 
-- **Keine Abhängigkeit auf OCCT, wgpu, egui oder eframe, auch nicht transitiv** (ADR-0036,
-  geprüft von `cargo xtask check`). Neue Abhängigkeiten nur, wenn sie klein und rein sind
-  (z. B. `serde`).
-- Einheiten: mm, Z oben (ADR-0006). `TriMesh` nutzt `f32`, das Dokumentmodell `f64`.
-- **Dateiformat (ADR-0030):** Jede Änderung an serialisierten Typen braucht eine neue
-  `FORMAT_VERSION`, eine Migration in `document::migrate` und eine neue Fixture. Bestehende
-  Fixtures in `tests/fixtures/` nie ändern, sie beweisen, dass alte Dateien laden.
-- IDs (`FeatureId`, `EntityId`) sind stabil und werden nie wiederverwendet (Zähler im Dokument
-  bzw. in der Skizze, SK-DT-03). `validate` prüft das beim Laden.
-- Ebenen-Konvention: `OriginPlane::frame()` (XY: u=X, v=Y; XZ: u=X, v=Z, n=−Y; YZ: u=Y, v=Z)
-  muss zu den ViewCube-Flächen passen (Oben/Vorne/Rechts).
-- Alles hier ist ohne GPU und Kernel testbar, also gehören hierher gründliche Unit- und
-  Property-Tests.
+- **No dependency on OCCT, wgpu, egui or eframe, not even transitively** (ADR-0036,
+  checked by `cargo xtask check`). New dependencies only if they are small and pure
+  (e.g. `serde`).
+- Units: mm, Z up (ADR-0006). `TriMesh` uses `f32`, the document model `f64`.
+- **File format (ADR-0030):** every change to serialized types needs a new
+  `FORMAT_VERSION`, a migration in `document::migrate` and a new fixture. Never change existing
+  fixtures in `tests/fixtures/`, they prove that old files load.
+- IDs (`FeatureId`, `EntityId`) are stable and never reused (counter in the document
+  or in the sketch, SK-DT-03). `validate` checks this on load.
+- Plane convention: `OriginPlane::frame()` (XY: u=X, v=Y; XZ: u=X, v=Z, n=−Y; YZ: u=Y, v=Z)
+  must match the ViewCube faces (top/front/right).
+- Everything here is testable without GPU and kernel, so thorough unit and
+  property tests belong here.
 
-## Dateien
+## Files
 
-- `src/mesh.rs`: `ShapeMesh` (Flächen + Kanten), `TriMesh` (mit `face_ids`), `Polylines`,
-  `Aabb`, `MeshReport` (dicht/manifold, Volumen; ADR-0013), `raycast` (ADR-0017).
-- `src/document/mod.rs`: `Document`, `Feature`, `FeatureKind`, Hülle, `to_json`/`from_json`,
-  `validate`, `migrate`. `src/document/sketch.rs`: `Sketch`, Punkte, Kurven, `OriginPlane`,
-  `PlaneFrame` (lokal ↔ Welt, Strahl-Schnitt). ADR-0024.
-- `src/expr.rs`: Ausdrücke in Eingabefeldern (`+ − * /`, Klammern, Einheiten mm/cm/m/in/um,
-  Komma je nach Sprache).
-- `src/profile.rs`: `Profile` (Schlüssel = sortierte Kurven-IDs, Fläche, 2D-Dreiecke; ADR-0011,
+- `src/mesh.rs`: `ShapeMesh` (faces + edges), `TriMesh` (with `face_ids`), `Polylines`,
+  `Aabb`, `MeshReport` (watertight/manifold, volume; ADR-0013), `raycast` (ADR-0017).
+- `src/document/mod.rs`: `Document`, `Feature`, `FeatureKind`, envelope, `to_json`/`from_json`,
+  `validate`, `migrate`. `src/document/sketch.rs`: `Sketch`, points, curves, `OriginPlane`,
+  `PlaneFrame` (local ↔ world, ray intersection). ADR-0024.
+- `src/expr.rs`: expressions in input fields (`+ − * /`, parentheses, units mm/cm/m/in/um,
+  comma depending on language).
+- `src/profile.rs`: `Profile` (key = sorted curve IDs, area, 2D triangles; ADR-0011,
   ADR-0028).
-- `src/document/feature.rs`: Körper-Features (Extrude, Revolve, Loft, Plane, SpurGear, Coil),
-  `ProfileRef`, `AxisRef`, `BodyOp`, Grenzwerte (ADR-0031). Neue Felder brauchen
-  `#[serde(default)]` oder eine neue Formatversion.
-- `src/document/examples.rs`: Referenzmodelle wie in der UI gebaut; Quelle für `models/`
-  (`cargo xtask models --write`) und `all_kinds()` (Quelle der v2-Fixture, ADR-0033).
-- `src/generate.rs`: Evolventen-Stirnrad (Kontur aus Stücken), Spiralbahn, Bahnlänge (ADR-0032).
-- `src/export.rs`: STL, 3MF, ZIP-Writer/-Leser mit CRC-32 (ADR-0034).
-- `tests/fixtures/`: `format_v1.qbd`, `format_v2.qbd` (alle Feature- und Kurvenarten).
+- `src/document/feature.rs`: body features (Extrude, Revolve, Loft, Plane, SpurGear, Coil),
+  `ProfileRef`, `AxisRef`, `BodyOp`, limits (ADR-0031). New fields need
+  `#[serde(default)]` or a new format version.
+- `src/document/examples.rs`: reference models as built in the UI; source for `models/`
+  (`cargo xtask models --write`) and `all_kinds()` (source of the v2 fixture, ADR-0033).
+- `src/generate.rs`: involute spur gear (contour from pieces), coil path, path length (ADR-0032).
+- `src/export.rs`: STL, 3MF, ZIP writer/reader with CRC-32 (ADR-0034).
+- `tests/fixtures/`: `format_v1.qbd`, `format_v2.qbd` (all feature and curve kinds).
 - `src/printer/mod.rs`: `PrinterProfile`, `BedGeometry` (ADR-0021).
-- `src/printer/data.rs`: **generiert** von `cargo xtask printers` aus OrcaSlicer-Profilen –
-  nie von Hand ändern, sondern neu generieren.
+- `src/printer/data.rs`: **generated** by `cargo xtask printers` from OrcaSlicer profiles –
+  never edit by hand, regenerate instead.
 
-## Relevante ADRs
+## Relevant ADRs
 
 ADR-0036, ADR-0006, ADR-0030, ADR-0011, ADR-0013, ADR-0021, ADR-0017, ADR-0024, ADR-0028
