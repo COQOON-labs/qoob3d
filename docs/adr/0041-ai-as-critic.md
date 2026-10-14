@@ -27,8 +27,9 @@ spurious problems and tends towards judgments of taste.
    human may accept a confirmed severe finding.
 4. **Push condition:** `cargo xtask review` in the `pre-push` hook requires, for every state with
    production code, a record for exactly this tree without open, confirmed
-   `blocker`/`major` findings. The human skips this with `QOOB3D_SKIP_REVIEW=1`; the guard
-   forbids agents this variable.
+   `blocker`/`major` findings. (The record fails closed: every `blocker`/`major` finding
+   blocks unless it is refuted, or accepted by the human with a reason.) The human skips this
+   with `QOOB3D_SKIP_REVIEW=1`; the guard forbids agents this variable.
 
 ## Consequences
 

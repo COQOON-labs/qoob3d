@@ -160,7 +160,13 @@ fn hash_of(seed: u64, value: &impl serde::Serialize) -> u64 {
 
 impl Model {
     pub(crate) fn rebuild(&mut self, doc: &Document) -> RebuildResult {
-        let (state, mut result) = self.run(doc);
+        let (state, mut result, used) = self.run(doc);
+        // Keep this and the previous rebuild (cheap undo/redo), drop the rest.
+        // Only here: exports must not change what is retained (ADR-0046).
+        let keep: HashSet<u64> = used.union(&self.previous_keys).copied().collect();
+        self.steps.retain(|k, _| keep.contains(k));
+        self.profiles.retain(|k, _| keep.contains(k));
+        self.previous_keys = used;
         let analyzed = &mut result.stats.analyzed_bodies;
         result.bodies = state
             .bodies
@@ -199,7 +205,7 @@ impl Model {
         doc: &Document,
         tolerance: f64,
     ) -> Result<Vec<ExportBody>, KernelError> {
-        let (state, _) = self.run(doc);
+        let (state, _, _) = self.run(doc);
         state
             .bodies
             .iter()
@@ -211,7 +217,8 @@ impl Model {
     }
 
     /// Runs the features; the result has no bodies yet (see [`Self::rebuild`]).
-    fn run(&mut self, doc: &Document) -> (Rc<State>, RebuildResult) {
+    /// Also returns the cache keys used.
+    fn run(&mut self, doc: &Document) -> (Rc<State>, RebuildResult, HashSet<u64>) {
         let mut state = Rc::new(State { bodies: Vec::new(), next_number: 1 });
         let mut result = RebuildResult::default();
         let (mut evaluated, mut computed) = (0, 0);
@@ -258,14 +265,9 @@ impl Model {
                 }
             }
         }
-        // Keep this and the previous rebuild (cheap undo/redo), drop the rest.
-        let keep: HashSet<u64> = used.union(&self.previous_keys).copied().collect();
-        self.steps.retain(|k, _| keep.contains(k));
-        self.profiles.retain(|k, _| keep.contains(k));
-        self.previous_keys = used;
         result.stats.computed_features = computed;
         result.stats.cached_features = evaluated - computed;
-        (state, result)
+        (state, result, used)
     }
 }
 

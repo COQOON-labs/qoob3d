@@ -12,11 +12,8 @@ use std::path::Path;
 pub(crate) const REGISTER: &str = "harness/rules.md";
 /// The critic's check items (`K-NN`, ADR-0041).
 const CRITIC_CHECKLIST: &str = "harness/critic-checklist.md";
-/// Subcommands and check steps of this binary.
-const XTASK_STEPS: &[&str] = &[
-    "check", "fmt", "clippy", "test", "hooks", "hygiene", "rules", "arch", "docs", "i18n",
-    "models", "deny", "smoke", "commits", "review", "guard", "selftest",
-];
+/// Source of the subcommands and check steps of this binary.
+const XTASK_MAIN: &str = "xtask/src/main.rs";
 
 /// One row of the register: rule id and its checks.
 pub(crate) struct Rule {
@@ -75,7 +72,7 @@ fn exists(root: &Path, check: &str) -> Result<(), &'static str> {
     let read = |p: &str| fs::read_to_string(root.join(p)).unwrap_or_default();
     let found = match check.split_once(':') {
         None => check == "manual",
-        Some(("xtask", step)) => XTASK_STEPS.contains(&step),
+        Some(("xtask", step)) => names_step(&read(XTASK_MAIN), step),
         Some(("lint", lint)) => {
             read("Cargo.toml").lines().any(|l| l.split('=').next().map(str::trim) == Some(lint))
         }
@@ -96,6 +93,19 @@ fn exists(root: &Path, check: &str) -> Result<(), &'static str> {
         Some(_) => return Err("has an unknown kind"),
     };
     if found { Ok(()) } else { Err("does not exist") }
+}
+
+/// `step` is a subcommand of main's dispatch (`Some("step")`) or a named step
+/// of `check()` (`("step", Step::…)`).
+fn names_step(main: &str, step: &str) -> bool {
+    let quoted = format!("\"{step}\"");
+    main.match_indices(&quoted).any(|(i, _)| {
+        let before = main[..i].trim_end();
+        let after = main[i + quoted.len()..].trim_start();
+        (before.ends_with("Some(") && after.starts_with(')'))
+            || (before.ends_with('(')
+                && after.strip_prefix(',').is_some_and(|a| a.trim_start().starts_with("Step::")))
+    })
 }
 
 fn test_exists(dir: &Path, needle: &str) -> bool {

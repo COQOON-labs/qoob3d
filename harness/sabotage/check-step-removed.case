@@ -1,0 +1,14 @@
+# A check step disappears from `cargo xtask check` while the register still cites it (ADR-0040)
+command: cargo xtask rules
+expect: R-10: check `xtask:deny` does not exist
+--- patch
+diff --git a/xtask/src/main.rs b/xtask/src/main.rs
+--- a/xtask/src/main.rs
++++ b/xtask/src/main.rs
+@@ -125,6 +125,5 @@
+     ];
+     if !fast {
+-        steps.push(("deny", Step::Cargo(&["deny", "--log-level", "error", "check"])));
+         steps.push(("smoke", Step::Internal(smoke)));
+     }
+

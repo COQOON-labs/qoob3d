@@ -41,8 +41,9 @@ ADR-0037 lets the human unlock harness work by starting Claude Code with
    is a pure read (no redirection, every segment starts with a read-only program such as `cat`,
    `grep`, `head`). Commands that run `launchctl setenv`, that name `QOOB3D_HARNESS_UNLOCK` or
    `QOOB3D_SKIP_REVIEW`, or that bypass the git hooks (`--no-verify`, `git commit -n`,
-   `core.hooksPath` in any case) are denied. Matching ignores case where git does and removes
-   shell quotes first, so `~/.zsh''env` or `core.hookspath` do not slip through.
+   `core.hooksPath` in any case, abbreviations such as `--no-veri`) are denied. Matching removes
+   shell quotes first and ignores case, because git keys and the macOS file system do, so
+   `~/.zsh''env`, `~/.ZSHENV` or `core.hookspath` do not slip through.
 3. **Harness paths in shell commands** count only if they refer to this repository: at the
    start of a token, after `./`, or right after the repository root (spelled out or as
    `$CLAUDE_PROJECT_DIR`/`$PWD`). Crate manifests (`crates/*/Cargo.toml`) are not harness
@@ -51,13 +52,21 @@ ADR-0037 lets the human unlock harness work by starting Claude Code with
    `missing/../xtask/x.rs` is recognised as a harness file.
 5. If the guard binary does not build during harness work, `guard.sh` falls back to the last
    built binary instead of blocking every tool call; without any binary it still blocks.
-   `guard.sh` takes the binary from `$CARGO_TARGET_DIR` (default `target`), so the self-test
-   runs the real hook script.
+6. **The guard binary lives under `.git/qoob3d/guard-target/`**, which agents can write
+   neither with Edit/Write nor through the shell. A binary in `target/` could be replaced
+   through `target/debug/deps/`, which cargo copies over `target/debug/xtask` on every build.
+   The self-test runs the real hook script in its own copy of the repository.
 
 ## Consequences
 
 - An unlocked session is still bound by fixture, role and bypass rules; harness work goes
   through `test-author` and `implementer` like any other change.
+- **Limit:** an unlocked session may change the guard itself (`xtask/src/guard.rs`,
+  `.claude/hooks/guard.sh`, `.claude/settings.json`), and the changed guard applies from the next
+  tool call. "Always active" therefore holds against agents that do not rewrite the guard; an
+  unlocked session trusts the agent with the guard. Such edits are visible in the diff and need
+  the owner's review before they reach `main`, but their effect on files outside the repository
+  is not reviewed.
 - Settings changes outside the repository (permissions, env, editor settings) are made by the
   human. The repository's own `.claude/settings.json` stays a harness file (versioned, owner
   review).
@@ -81,5 +90,7 @@ ADR-0037 lets the human unlock harness work by starting Claude Code with
   (runs the real hook script), `guard-self-unlock-*.case`, `guard-launchctl-setenv.case`,
   `guard-git-config-edit.case`, `guard-dot-dot-harness-edit.case`,
   `guard-harness-shell-dot-slash.case`, `guard-commit-short-no-verify.case`,
-  `guard-hookspath-lowercase.case`
+  `guard-hookspath-lowercase.case`, `guard-abbreviated-no-verify.case`,
+  `guard-deps-binary.case`, `guard-git-dir-shell.case`, `guard-skip-review.case`,
+  `guard-admin-merge.case`
 - Related: ADR-0037, ADR-0039, ADR-0042

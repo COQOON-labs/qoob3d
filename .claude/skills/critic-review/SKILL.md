@@ -6,7 +6,9 @@ description: Run the AI critic over a revision range, verify findings independen
 # Critic review (ADR-0041)
 
 The pre-push hook (`cargo xtask review`) requires, for every pushed state with production code,
-a record `target/critic/<tree>.json` without open, confirmed `blocker`/`major` findings.
+a record `target/critic/<tree>.json` in which every `blocker`/`major` finding is refuted, or
+accepted by the user with an `accepted_reason`. Unverified and `fixed` findings still block (a fix
+changes the tree and needs a new review).
 
 1. **Determine the range.** `head` = `HEAD` (the review applies to the committed state; have
    uncommitted changes committed first, commits only on the user's instruction).

@@ -32,7 +32,8 @@ flowchart LR
 
 | Check | Local brake | Wall in CI |
 | --- | --- | --- |
-| fmt, clippy (strict lints), tests, smoke, reference models | stop hook, pre-push | `check (macOS)` |
+| fmt, clippy (strict lints), tests, reference models | stop hook, pre-push | `check (macOS)` |
+| Smoke test, supply chain (cargo-deny) | pre-push (`check` without `--fast`) | `check (macOS)`, `policy` |
 | Hygiene (tests in their own files, lint suppressions capped, English only, CODEOWNERS covers the harness) | stop hook, pre-push | `policy`, `check` |
 | Rule register complete | stop hook, pre-push | `check` |
 | Commit policy (identity, no AI attribution, tests/code separate, fixtures) | commit-msg, pre-push | `policy` |

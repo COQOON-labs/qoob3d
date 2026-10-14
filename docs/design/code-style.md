@@ -14,7 +14,7 @@ agents and humans write the same style and nobody reworks code according to pers
 | ID | Decision | Check |
 | --- | --- | --- |
 | ST-01 | Formatting is done by `rustfmt` (`max_width = 100`, `use_small_heuristics = "Max"`). No hand formatting that `rustfmt` changes again. | `cargo fmt --check` |
-| ST-02 | Everything in the repository in English: code, comments, docs, commit messages, messages from `xtask` (ADR-0045). German only in `crates/qoob3d-app/locales/de/` and in tests that assert German translations. Visible UI texts only via `tr("key")` (ADR-0020). | `xtask i18n`, critic |
+| ST-02 | Everything in the repository in English: code, comments, docs, commit messages, messages from `xtask` (ADR-0045). German only in `crates/qoob3d-app/locales/de/` and in tests that assert German translations. Visible UI texts only via `tr("key")` (ADR-0020). | `xtask hygiene`, `xtask i18n`, critic |
 | ST-03 | Visibility as narrow as possible. `pub` only for the crate's API, otherwise `pub(crate)` or private. That way `dead_code` detects unused parts. | `unreachable_pub` |
 | ST-04 | Error types with `thiserror` in libraries, `anyhow` only in `qoob3d-app`. Propagate errors with `?`, adding context where it is missing. | critic (K-09) |
 | ST-05 | No `unwrap()` in production code. `expect("why this holds here")` only for real invariants, otherwise `?` or handling. `unwrap()` is allowed in tests. | `clippy::unwrap_used` |

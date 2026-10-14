@@ -10,7 +10,8 @@
 //!
 //! Paths are collapsed (`.`, `..`) before any check. Shell commands are also
 //! matched with quotes and backslashes removed, which split words without
-//! changing what the shell runs.
+//! changing what the shell runs. Paths and file names are compared ignoring
+//! case, as macOS file systems do.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -26,6 +27,9 @@ const IMPLEMENTER: &str = "implementer";
 /// (git config keys ignore case).
 const BYPASSES: &[&str] =
     &["--no-verify", "core.hookspath", "--admin", "qoob3d_harness_unlock", "qoob3d_skip_review"];
+/// The shortest abbreviation of `--no-verify` git accepts (`--no-ver` is
+/// ambiguous with `--no-verbose`).
+const NO_VERIFY_MIN: &str = "--no-veri";
 /// Shell fragments that (may) write files.
 const WRITES: &[&str] = &[
     ">",
@@ -59,8 +63,9 @@ const HARNESS_IN_SHELL: &[&str] = &[
     "deny.toml",
     "rustfmt.toml",
     "rust-toolchain",
-    // The guard runs this binary; replacing it would switch the guard off.
+    // `cargo xtask` runs this binary; cargo links it from `deps/`.
     "target/debug/xtask",
+    "target/debug/deps/xtask-",
 ];
 /// Spellings of the repository root in shell commands besides the path itself.
 const ROOT_VARIABLES: &[&str] =
@@ -76,26 +81,22 @@ const MANAGED_SETTINGS: &[&str] = &["/Library/Application Support/ClaudeCode", "
 /// VS Code user settings, relative to the home directory.
 const VSCODE_USER_SETTINGS: &[&str] =
     &["Library/Application Support/Code/User/settings.json", ".config/Code/User/settings.json"];
-/// Shell fragments naming a file that can set the hook environment; the home
-/// path spelled out is added per session.
+/// Shell fragments naming a file that can set the hook environment, matched
+/// lower-case; the home path spelled out is added per session.
 const HOOK_ENVIRONMENT_IN_SHELL: &[&str] = &[
     "settings.local.json",
     "managed-settings",
     "~/.claude/settings",
-    "$HOME/.claude/settings",
-    "${HOME}/.claude/settings",
+    "$home/.claude/settings",
+    "${home}/.claude/settings",
     ".vscode/settings.json",
-    "Code/User/settings.json",
-    ".zshrc",
-    ".zprofile",
-    ".zshenv",
-    ".bashrc",
-    ".bash_profile",
-    ".profile",
-    // Hooks path and hook scripts of git.
-    ".git/config",
-    ".git/hooks",
+    "code/user/settings.json",
 ];
+/// The git directory holds the hooks path, the hooks and the guard binary
+/// (`.git/qoob3d/guard-target`).
+const GIT_DIR: &str = ".git";
+/// Characters that end a file name in a shell command, besides whitespace.
+const NAME_ENDS: &str = "\"';|&)/<>`";
 /// Programs that only read; a command made of them may name a hook-environment
 /// file. Not `less`/`more`: their `-o`/`--log-file` writes a file.
 const READ_ONLY: &[&str] =
@@ -141,18 +142,13 @@ pub(crate) fn pre_tool_use(root: &Path, session: &Session, input: &Value) -> Res
 
 pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Result<(), String> {
     let normalised: String = command.chars().filter(|c| !matches!(c, '\'' | '"' | '\\')).collect();
-    check_bypasses(&normalised.to_lowercase())?;
-    let home_settings = format!("{}/.claude/settings", session.home.display());
-    if let Some(file) = HOOK_ENVIRONMENT_IN_SHELL
-        .iter()
-        .copied()
-        .chain([home_settings.as_str()])
-        .find(|f| normalised.contains(f))
+    let forms = [command.to_lowercase(), normalised.to_lowercase()];
+    check_bypasses(&forms[1])?;
+    if let Some(file) = hook_environment_in_shell(session, &forms)
         && !is_pure_read(&normalised)
     {
-        return Err(self_unlock_message(file));
+        return Err(self_unlock_message(&file));
     }
-    let forms = [command, normalised.as_str()];
     if session.unlocked || !forms.iter().any(|form| WRITES.iter().any(|w| form.contains(w))) {
         return Ok(());
     }
@@ -165,12 +161,43 @@ pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Resu
     Ok(())
 }
 
+/// The first file named in the lower-cased `forms` of a command (as given,
+/// normalised) that can set the hook environment. Startup files and `.git`
+/// count only as whole names.
+fn hook_environment_in_shell(session: &Session, forms: &[String; 2]) -> Option<String> {
+    let home_settings = format!("{}/.claude/settings", session.home.display()).to_lowercase();
+    let fragment = HOOK_ENVIRONMENT_IN_SHELL
+        .iter()
+        .copied()
+        .chain([home_settings.as_str()])
+        .find(|f| forms[1].contains(f));
+    let name = || {
+        SHELL_STARTUP
+            .iter()
+            .copied()
+            .chain([GIT_DIR])
+            .find(|name| forms.iter().any(|form| names_file(form, name)))
+    };
+    fragment.or_else(name).map(str::to_owned)
+}
+
+/// `name` stands in `command` as a whole path component.
+fn names_file(command: &str, name: &str) -> bool {
+    command.match_indices(name).any(|(i, _)| {
+        let before = command[..i].chars().next_back();
+        let after = command[i + name.len()..].chars().next();
+        before.is_none_or(|c| c.is_whitespace() || TOKEN_SEPARATORS.contains(c) || "/~".contains(c))
+            && after.is_none_or(|c| c.is_whitespace() || NAME_ENDS.contains(c))
+    })
+}
+
 /// Gate bypasses in a normalised, lower-cased command.
 fn check_bypasses(command: &str) -> Result<(), String> {
     let bypass = BYPASSES
         .iter()
         .copied()
         .find(|b| command.contains(b))
+        .or_else(|| abbreviates_no_verify(command).then_some("--no-verify"))
         .or_else(|| commits_without_verify(command).then_some("git commit -n"));
     if let Some(bypass) = bypass {
         return Err(format!(
@@ -187,6 +214,13 @@ fn check_bypasses(command: &str) -> Result<(), String> {
             .into());
     }
     Ok(())
+}
+
+/// A word that git expands to `--no-verify`.
+fn abbreviates_no_verify(command: &str) -> bool {
+    command
+        .split(|c: char| !(c.is_alphanumeric() || c == '-'))
+        .any(|word| word.len() >= NO_VERIFY_MIN.len() && "--no-verify".starts_with(word))
 }
 
 /// `git … commit` followed by a short-flag group containing `n`, the short
@@ -230,30 +264,33 @@ fn self_unlock_message(path: &str) -> String {
 /// Claude, VS Code and shell configuration that reaches the environment of the
 /// hooks (ADR-0043). A relative `file` is relative to `root`.
 fn sets_hook_environment(root: &Path, home: &Path, file: &str) -> bool {
-    let path = canonical(&collapse(&root.join(file)));
-    let home = canonical(home);
+    let path = lower(&canonical(&collapse(&root.join(file))));
+    let home = lower(&canonical(home));
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
     let parent = path.parent().unwrap_or(Path::new(""));
     let parent_name = parent.file_name().and_then(|n| n.to_str()).unwrap_or_default();
     (parent == home.join(".claude") && name.starts_with("settings") && name.ends_with(".json"))
-        || MANAGED_SETTINGS.iter().any(|dir| path.starts_with(canonical(Path::new(dir))))
+        || MANAGED_SETTINGS.iter().any(|dir| path.starts_with(lower(&canonical(Path::new(dir)))))
         || (parent_name == ".claude" && name == "settings.local.json")
         || (parent_name == ".vscode" && name == "settings.json")
-        || VSCODE_USER_SETTINGS.iter().any(|rel| path == home.join(rel))
+        || VSCODE_USER_SETTINGS.iter().any(|rel| path == home.join(rel.to_lowercase()))
         || (parent == home && SHELL_STARTUP.contains(&name))
 }
 
 /// The first harness fragment that refers to this repository: at the start of
 /// a token, after a `./` that starts a token, or right after the root (ADR-0043).
+/// `command` is lower-cased.
 fn harness_in_shell(root: &Path, command: &str) -> Option<&'static str> {
     let mut roots: Vec<String> = [root.to_path_buf(), canonical(root)]
         .iter()
-        .map(|r| r.to_string_lossy().trim_end_matches('/').to_owned())
+        .map(|r| r.to_string_lossy().trim_end_matches('/').to_lowercase())
         .filter(|r| !r.is_empty())
         .collect();
-    roots.extend(ROOT_VARIABLES.iter().map(|v| (*v).to_owned()));
+    roots.extend(ROOT_VARIABLES.iter().map(|v| v.to_lowercase()));
     HARNESS_IN_SHELL.iter().copied().find(|fragment| {
-        command.match_indices(fragment).any(|(i, _)| refers_to_repo(&command[..i], &roots))
+        command
+            .match_indices(&fragment.to_lowercase())
+            .any(|(i, _)| refers_to_repo(&command[..i], &roots))
     })
 }
 
@@ -271,7 +308,8 @@ fn refers_to_repo(before: &str, roots: &[String]) -> bool {
 }
 
 fn check_file_write(root: &Path, session: &Session, rel: &str) -> Result<(), String> {
-    if rel == ".git" || rel.starts_with(".git/") {
+    let lower_rel = rel.to_lowercase();
+    if lower_rel == GIT_DIR || lower_rel.starts_with(".git/") {
         return Err(format!(
             "`{rel}`: `.git/` is managed by git and the guard; agents never write it, not even \
              in an unlocked session (ADR-0043). Ask the human to make this change."
@@ -283,7 +321,7 @@ fn check_file_write(root: &Path, session: &Session, rel: &str) -> Result<(), Str
              change to the human; they unlock with QOOB3D_HARNESS_UNLOCK=1."
         ));
     }
-    if rel.starts_with(paths::FIXTURES) && root.join(rel).exists() {
+    if lower_rel.starts_with(paths::FIXTURES) && root.join(rel).exists() {
         return Err(format!(
             "`{rel}` is a format fixture and immutable (ADR-0030). \
              New format version → new fixture + migration."
@@ -367,6 +405,10 @@ fn collapse(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+fn lower(path: &Path) -> PathBuf {
+    PathBuf::from(path.to_string_lossy().to_lowercase())
 }
 
 /// Canonicalises the longest existing ancestor, so new files and symlinked

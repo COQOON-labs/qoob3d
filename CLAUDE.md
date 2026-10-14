@@ -25,7 +25,7 @@ eframe/egui 0.36.2 · wgpu 30 (only via `qoob3d_render::wgpu`) · glam 0.34 · e
 
 ```sh
 cargo run                                   # start the app
-cargo xtask check                           # DEFINITION OF "DONE" (fmt, clippy, test, arch, docs, i18n, models, deny, smoke)
+cargo xtask check                           # DEFINITION OF "DONE" (fmt, clippy, test, hooks, hygiene, rules, arch, docs, i18n, models, deny, smoke)
 cargo xtask check --fast                    # without smoke + deny (runs automatically in the Stop hook,
                                             #   .claude/hooks/check-on-stop.sh)
 cargo xtask setup                           # once: activate Git hooks from .githooks/ (ADR-0037)

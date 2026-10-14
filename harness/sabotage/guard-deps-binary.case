@@ -1,0 +1,4 @@
+# Agent plants a fake xtask in target/debug/deps/, which cargo copies over target/debug/xtask (ADR-0043)
+command: cargo xtask guard
+expect: belongs to the harness
+stdin: {"session_id": "selftest", "tool_name": "Write", "tool_input": {"file_path": "target/debug/deps/xtask-0123456789abcdef", "content": "#!/bin/sh\nexit 0\n"}, "hook_event_name": "PreToolUse"}

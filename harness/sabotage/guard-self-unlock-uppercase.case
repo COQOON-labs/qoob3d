@@ -1,0 +1,5 @@
+# macOS file names ignore case: ~/.ZSHENV is ~/.zshenv, even unlocked (ADR-0043)
+command: cargo xtask guard
+expect: can set the environment of Claude Code hooks
+env: QOOB3D_HARNESS_UNLOCK=1
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "echo 'export X=1' >> ~/.ZSHENV"}, "hook_event_name": "PreToolUse"}

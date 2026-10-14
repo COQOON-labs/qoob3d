@@ -11,10 +11,12 @@ export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 
 input=$(cat)
 # Call the binary directly (cargo adds ~1 s per tool call); rebuild when stale.
-# CARGO_TARGET_DIR is honoured so that the self-test can run this script.
-bin="${CARGO_TARGET_DIR:-target}/debug/xtask"
+# It lives under `.git/`, which agents never write (ADR-0043); an inherited
+# CARGO_TARGET_DIR is ignored so that nothing can point the guard elsewhere.
+target=".git/qoob3d/guard-target"
+bin="$target/debug/xtask"
 if [ ! -x "$bin" ] || [ -n "$(find xtask Cargo.lock -newer "$bin" -print -quit)" ]; then
-  if ! cargo build --quiet --package xtask; then
+  if ! CARGO_TARGET_DIR="$target" cargo build --quiet --package xtask; then
     if [ ! -x "$bin" ]; then
       echo "guard: xtask does not build and no guard binary exists – call blocked." >&2
       exit 2

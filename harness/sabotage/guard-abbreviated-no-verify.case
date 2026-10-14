@@ -1,0 +1,4 @@
+# git accepts unambiguous abbreviations: `--no-veri` skips the hooks like --no-verify (ADR-0037)
+command: cargo xtask guard
+expect: `--no-verify` bypasses the quality gates
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "git push --no-veri origin feature"}, "hook_event_name": "PreToolUse"}

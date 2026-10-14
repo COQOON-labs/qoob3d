@@ -13,7 +13,7 @@ pub(crate) enum Kind {
 }
 
 /// The harness itself (ADR-0037): changes need an unlocked session locally
-/// and an owner review on GitHub.
+/// and an owner review on GitHub. Entries ending in `/` or `-` are prefixes.
 pub(crate) const HARNESS: &[&str] = &[
     ".claude/",
     ".githooks/",
@@ -26,8 +26,9 @@ pub(crate) const HARNESS: &[&str] = &[
     "deny.toml",
     "rustfmt.toml",
     "rust-toolchain.toml",
-    // The guard hook runs this binary (ADR-0037).
+    // `cargo xtask` runs this binary, cargo links it from `deps/` (ADR-0037).
     "target/debug/xtask",
+    "target/debug/deps/xtask-",
 ];
 
 /// Format fixtures may be added, never modified or deleted (ADR-0030).
@@ -35,8 +36,13 @@ pub(crate) const FIXTURES: &str = "crates/qoob3d-core/tests/fixtures/";
 
 const CODE_EXTENSIONS: &[&str] = &[".rs", ".wgsl", ".cpp", ".hpp", ".h"];
 
+/// Ignores case: macOS file systems do (ADR-0043).
 pub(crate) fn is_harness(path: &str) -> bool {
-    HARNESS.iter().any(|h| if h.ends_with('/') { path.starts_with(h) } else { path == *h })
+    let path = path.to_lowercase();
+    HARNESS
+        .iter()
+        .map(|h| h.to_lowercase())
+        .any(|h| if h.ends_with(['/', '-']) { path.starts_with(&h) } else { path == h })
 }
 
 pub(crate) fn kind(path: &str) -> Kind {
