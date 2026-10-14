@@ -11,7 +11,7 @@ mod profiles;
 mod tessellate;
 mod worker;
 
-pub use model::{BodyId, BodyResult, ExportBody, RebuildResult, SketchResult};
+pub use model::{BodyId, BodyResult, ExportBody, RebuildResult, RebuildStats, SketchResult};
 pub use worker::{Kernel, Request, RequestId, Response};
 
 /// Errors reported by the kernel. They are plain data so they can be sent
