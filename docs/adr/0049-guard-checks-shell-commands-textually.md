@@ -36,11 +36,16 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    redirection to a file (`> path`, `>> path`). Anything else after the marker (a pipe,
    `;`, `&&`, `&`, a subshell or brace group, `>(…)`, a second redirection, another word)
    keeps the body as shell text, so `cat <<EOF | tee /tmp/x` is checked too.
-3. **Unless an interpreter reads the body:** when a pipeline with the heredoc names a shell
-   or interpreter (sh, bash, zsh, python with any version, perl, ruby, node, deno, also by path),
-   or `xargs`, `eval`, `source`, `.`, the body is checked like inline code, with the cargo
-   exceptions (`cargo xtask …`, `-p xtask`) as elsewhere. Any word of the pipeline on the
-   heredoc line counts, not only a program (`env bash <<EOF`, `FOO=1 bash <<EOF`).
+3. **Only a known data reader makes a body data:** the simple command carrying the heredoc
+   is `cat`, `tee`, `git` or `gh` (also by path), and only its words precede the marker,
+   counted from the start of the logical line or from right after a `$(` that is still open
+   (`git commit -m "$(cat <<'EOF'`, `gh pr create --body "$(cat <<'EOF'`; the command before
+   the `$(` must be such a reader too). No `;`, `&`, `|`, `(`, `)`, `{`, `}` before the
+   marker, no other program in front (`env cat`, `sudo cat`, `X=1 cat`, `cd /tmp && cat`).
+   Every other heredoc (`bash <<EOF`, `{ bash; } <<EOF`, `while read …; done <<EOF`, an
+   unknown reader) keeps its body as shell text, which is then checked like inline code with
+   the cargo exceptions (`cargo xtask …`, `-p xtask`) as elsewhere. This allowlist replaces
+   a list of interpreters, which could never be complete (dash, ksh, csh, groups, loops).
 4. **Fail closed:** comments and heredoc bodies are removed only when the guard models
    every construct of the command. A command that contains anywhere a backtick, ANSI-C
    quoting `$'`, a redirection with `&` (`|&`, `>&`, `&>`, `<&`, so also `2>&1` and `>&2`), or
@@ -51,20 +56,20 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
 ## Consequences
 
 - Commit messages, PR bodies and notes through a heredoc no longer trip the guard.
-- `bash <<EOF`, `cat <<EOF | sh` and friends cannot hide a harness write in the body.
+- `bash <<EOF`, `cat <<EOF | sh`, `{ bash; } <<EOF`, `while read … done <<EOF` and friends
+  cannot hide a harness write in the body.
 - The heuristic stays a heuristic: a body read through an indirection the guard does not
-  see is not checked. Examples are `while read f; do rm -rf "$f"; done <<EOF`, a command
-  substitution that turns the body into arguments (`rm -rf $(cat <<EOF` …), and a script
-  written first and run later. Heredocs inside `$(…)` stay data, because the PR body form
-  `gh pr create --body "$(cat <<'EOF' …)"` must pass. CI and CODEOWNERS remain the wall
-  (ADR-0037).
-- A word naming an interpreter anywhere on the heredoc line makes the body code, also as a
-  mere argument (`bash-notes` is none, `> /tmp/bash` is one); the guard denies rather than
-  guesses.
+  see is not checked. Examples are a reader inside a compound command opened on an earlier
+  line whose output goes on (`{` newline `cat <<EOF` … `}` `| bash`), and a script written
+  first and run later. Heredocs of a reader inside `$(…)` stay data, because the commit and
+  PR body forms `git commit -m "$(cat <<'EOF' …)"` and `gh pr create --body "$(cat <<'EOF'
+  …)"` must pass; an unknown command in front of the `$(` (`rm -rf $(cat <<EOF`) keeps the
+  body. CI and CODEOWNERS remain the wall (ADR-0037).
 - A commit message or note that names a harness directory is denied when the same command
-  uses an unmodelled construct (`2>&1`, backticks, `$((…))`) or pipes the heredoc on
-  (`cat <<EOF | tee /tmp/x`). Agents write the note with `cat > file <<EOF`, `git commit -F -
-  <<'EOF'` or split the command.
+  uses an unmodelled construct (`2>&1`, backticks, `$((…))`), pipes the heredoc on
+  (`cat <<EOF | tee /tmp/x`) or puts anything in front of the reader (`cd /tmp && cat`).
+  Agents write the note with `cat > file <<EOF`, `git commit -F - <<'EOF'` or split the
+  command.
 - Clarifies ADR-0043 decision 4 without changing it for Edit/Write.
 
 ## Rejected alternatives
@@ -79,8 +84,8 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
 
 ## References
 
-- Code: `xtask/src/guard.rs` (`models_prose`, `without_prose`, `feeds_interpreter`,
-  `harness_in_shell`)
+- Code: `xtask/src/guard.rs` (`models_prose`, `without_prose`, `reads_data`,
+  `only_redirects_to_file`, `harness_in_shell`)
 - Sabotage cases: `harness/sabotage/guard-harness-shell-after-heredoc.case`,
   `guard-harness-shell-interpreter-heredoc.case`, `guard-prose-heredoc-body-checked.case`,
   `guard-harness-shell-fail-closed-prose.case`, `guard-harness-shell-backtick-comment.case`

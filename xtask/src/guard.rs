@@ -10,8 +10,9 @@
 //! - shell commands must not bypass the git hooks or write harness files; a
 //!   harness directory counts also when named without its trailing slash, as a
 //!   whole shell argument outside comments (from a `#` that starts a word) and
-//!   outside heredoc bodies of the safe shape: nothing after the marker but one
-//!   file redirection, and no shell or interpreter on the heredoc line. A
+//!   outside heredoc bodies of the safe shape: a known data reader (`cat`,
+//!   `tee`, `git`, `gh`) as the heredoc's command, with nothing but its words
+//!   before the marker and nothing after it but one file redirection. A
 //!   command with a construct the guard does not model (backticks, `$'`,
 //!   redirections with `&`, arithmetic `((`) keeps its comments and heredoc
 //!   bodies: fail closed (ADR-0049).
@@ -122,6 +123,9 @@ const ARGUMENT_ENDS: &str = ";|&)<>`*?[";
 /// `&>`, `<&0`), and arithmetic, whose `<<` is a shift (`((`, `$((`). A
 /// command with one keeps its prose (fail closed, ADR-0049).
 const UNMODELLED: &[&str] = &["`", "$'", "|&", ">&", "&>", "<&", "(("];
+/// Programs that read a heredoc body as data: it ends up in a file, a commit
+/// message or a PR body, never runs (ADR-0049).
+const DATA_READERS: &[&str] = &["cat", "tee", "git", "gh"];
 /// Unquoted, unescaped characters after which a `#` starts a comment. Not `)`:
 /// after `$(…)` or `$((…))` the word goes on (`$(true)#`).
 const COMMENT_STARTS: &str = ";|&(";
@@ -252,9 +256,9 @@ fn models_prose(command: &str) -> bool {
 /// Quotes, backslashes and `$(…)` in double quotes are followed, so a quoted
 /// `#` or `<<` starts neither; a `#` after a closing quote, `)` or an escaped
 /// character is part of a word. A heredoc body is removed only in the safe
-/// shape: the only heredoc of its line, with nothing after the marker but one
-/// file redirection ([`only_redirects_to_file`]), and no interpreter on the
-/// line ([`feeds_interpreter`]; ADR-0049). A backslash-newline continues the
+/// shape: the only heredoc of its line, read by a known data reader
+/// ([`reads_data`]), with nothing after the marker but one file redirection
+/// ([`only_redirects_to_file`]; ADR-0049). A backslash-newline continues the
 /// line. Only for commands that [`models_prose`].
 fn without_prose(command: &str) -> String {
     let mut out = String::with_capacity(command.len());
@@ -298,7 +302,10 @@ fn without_prose(command: &str) -> String {
             (_, '\n') if !markers.is_empty() => {
                 if markers.len() == 1
                     && only_redirects_to_file(&out[after_marker..])
-                    && !feeds_interpreter(&out[line_start..])
+                    && reads_data(
+                        &out[line_start..after_marker],
+                        open.iter().filter(|&&o| o == '(').count(),
+                    )
                 {
                     end += heredoc_bodies(&command[end..], &markers).unwrap_or(0);
                 }
@@ -337,28 +344,23 @@ fn only_redirects_to_file(tail: &str) -> bool {
     !target.is_empty() && !target.contains(|c: char| c.is_whitespace() || "|&;<>(){}".contains(c))
 }
 
-/// The heredoc `line` (comments removed) feeds a shell or interpreter, so its
-/// heredoc bodies are code, not data: a pipeline of `line` with a heredoc has
-/// a word that [`is_interpreter`] (`bash <<EOF`, `cat <<EOF | /bin/sh`; any
-/// word counts, `env bash <<EOF`).
-fn feeds_interpreter(line: &str) -> bool {
-    line.split([';', '&']).filter(|pipeline| pipeline.contains("<<")).any(|pipeline| {
-        pipeline.split(|c: char| c.is_whitespace() || "|()".contains(c)).any(is_interpreter)
-    })
-}
-
-/// `word`, also by path or quoted, names a program that runs the text it
-/// reads: the programs of [`INLINE_CODE`], python (a writer in [`WRITES`];
-/// also versioned, `python3.12`), `xargs`, and the builtins `eval`, `source`
-/// and `.`.
-fn is_interpreter(word: &str) -> bool {
-    let word = unquoted(word).to_ascii_lowercase();
-    let name = word.rsplit('/').next().unwrap_or_default();
-    INLINE_CODE.iter().any(|(programs, ..)| programs.contains(&name))
-        || name
-            .strip_prefix("python")
-            .is_some_and(|version| version.chars().all(|c| c.is_ascii_digit() || c == '.'))
-        || matches!(name, "xargs" | "eval" | "source" | ".")
+/// `head`, a heredoc line up to its marker (comments removed), hands the body
+/// to a [`DATA_READERS`] program: before the `<<` stand only the words of
+/// simple commands of such programs, also by path, one from the line start
+/// and one after each `$(` (`git commit -m "$(cat <<'EOF'`), and those `$(`
+/// are the `open_parens` still open. No `;&|(){}` (a list, a pipe, a subshell,
+/// a group), no other program in front (`env cat`, `X=1 cat`).
+fn reads_data(head: &str, open_parens: usize) -> bool {
+    let prefix = head.rfind("<<").map_or(head, |i| &head[..i]);
+    prefix.matches("$(").count() == open_parens
+        && prefix.split("$(").all(|command| {
+            !command.contains(|c: char| ";&|(){}".contains(c))
+                && command
+                    .split_whitespace()
+                    .next()
+                    .and_then(|program| program.rsplit('/').next())
+                    .is_some_and(|name| DATA_READERS.contains(&name))
+        })
 }
 
 /// The heredoc that `rest` starts with (`<<EOF`, `<<-'EOF'`): the length of
