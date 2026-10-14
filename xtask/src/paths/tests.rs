@@ -36,6 +36,26 @@ fn source_files_are_code() {
     }
 }
 
+// ADR-0039, critic finding K-13: `.hxx` is the C++ header extension this
+// repository actually uses (`crates/qoob3d-kernel/cpp/qoob3d_occt.hxx`, the
+// header of the cxx wrappers, ADR-0014). It is production code like the
+// `.cpp` next to it; as `Other` it escapes role separation, the commit
+// policy and the critic review.
+#[test]
+fn cxx_header_hxx_is_code() {
+    for path in [
+        "crates/qoob3d-kernel/cpp/qoob3d_occt.hxx",
+        "crates/qoob3d-kernel/cpp/other.hxx",
+        "xtask/src/native/helper.hxx",
+    ] {
+        assert_eq!(kind(path), Kind::Code, "{path}");
+    }
+    // The extension does not make a test-tree file code, and outside the
+    // source tree it stays `Other` (same rules as for `.cpp`).
+    assert_eq!(kind("crates/qoob3d-kernel/tests/support/fake.hxx"), Kind::Test);
+    assert_eq!(kind("third_party/occt/include/gp_Pnt.hxx"), Kind::Other);
+}
+
 // ADR-0039: only a whole path component `tests` or the file name `tests.rs`
 // marks a test; names that merely contain "tests" are code.
 #[test]

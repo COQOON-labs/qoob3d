@@ -111,6 +111,24 @@ fn rejects_tests_mixed_with_code() {
     assert!(!check_files(&with_oracle, "Change gear").is_empty());
 }
 
+// ADR-0039, critic finding K-13: the real C++ header of the kernel wrappers
+// is production code, so a commit with it and a test needs the trailer.
+#[test]
+fn rejects_tests_mixed_with_cxx_header() {
+    let mixed = files(&[
+        ("M", "crates/qoob3d-kernel/cpp/qoob3d_occt.hxx"),
+        ("M", "crates/qoob3d-kernel/tests/features.rs"),
+    ]);
+    let problems = check_files(&mixed, "Add loft wrapper");
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].contains("changes tests and production code together (ADR-0039)"),
+        "{problems:?}"
+    );
+    let excused = "Add loft wrapper\n\nMixed-Change: new wrapper with its kernel test\n";
+    assert!(check_files(&mixed, excused).is_empty());
+}
+
 // ADR-0039: a `Mixed-Change:` line allows mixing; it must start the line.
 #[test]
 fn mixed_change_trailer_allows_mixing() {

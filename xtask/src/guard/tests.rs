@@ -710,6 +710,27 @@ fn role_agents_are_fixed_by_type() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+// ADR-0039, critic finding K-13: the C++ header of the kernel wrappers is
+// production code; the test author may not edit it, the implementer may.
+#[test]
+fn test_author_may_not_edit_cxx_header() {
+    const HEADER: &str = "crates/qoob3d-kernel/cpp/qoob3d_occt.hxx";
+    let root = repo("cxx_header");
+    let s = locked();
+    let author = write("Edit", &abs(&root, HEADER), "s", Some("t1"), Some("test-author"));
+    assert_denied(
+        pre_tool_use(&root, &s, &author),
+        &[
+            "This agent context already writes tests;",
+            &format!("`{HEADER}` must be changed by another context (ADR-0039)"),
+        ],
+        "test-author on .hxx",
+    );
+    let implementer = write("Edit", &abs(&root, HEADER), "s", Some("i1"), Some("implementer"));
+    assert_eq!(pre_tool_use(&root, &s, &implementer), Ok(()));
+    fs::remove_dir_all(&root).unwrap();
+}
+
 // ADR-0039: any other context is bound by its first write of tests or code;
 // switching is denied, the same kind passes; the ledger is in `.git/qoob3d/roles/`.
 #[test]
