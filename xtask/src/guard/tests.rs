@@ -4890,3 +4890,85 @@ fn reads_with_quotes_in_comments_pass() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Every sed in command position is read (critic finding M1 on 08dd645, user
+// decision 2026-10-15): the tokenizer started no comment right after `$(` or
+// a backtick, so `x=$(# it's` + newline + `sed 's/a/b/w …'` hid the sed in
+// both readings. Generic fail closed: every `sed`/`gsed` (also by path) that
+// a naive split of the raw text puts in command position (after a line
+// start, `;`, `|`, `&`, `(`, `$(`, a backtick, `{`, `then`/`do`/`else` and
+// whitespace, ignoring quotes) must be found by a tokenizer reading as a
+// program with a readable script, or the command counts as writing; and a
+// `#` right after `$(` or a backtick starts a comment in the comment-skip
+// reading. Probed in the test author's scratchpad with `touch` as the
+// payload: Homebrew bash 5.3.20 and zsh 5.9 run the command after
+// `x=$(# it's`; /bin/bash 3.2.57 does not. All three run it after
+// `` x=`# it's `` and after `{ # it's`. None runs it after an odd `"` on an
+// `echo` line (a syntax error), so that shape is not asserted.
+// ---------------------------------------------------------------------------
+
+/// sed hidden from the tokenizer behind a comment with a quote right after an
+/// opening `$(`, backtick, `{`, `(` or `then`, with the fragment the denial
+/// must name. Must be denied in a locked session.
+const SED_AFTER_A_COMMENT_AT_AN_OPENING: &[(&str, &str)] = &[
+    // The finding's examples (M1 on 08dd645, user decision 2026-10-15).
+    ("x=$(# it's\nsed 's/a/b/w xtask/foo' f)", "xtask/"),
+    ("x=`# it's\nsed 's/a/b/w xtask/foo' f`", "xtask/"),
+    // Derived: a group (named by the task), a subshell, `then` (these three
+    // were denied already before M1, regression guards), a `"` in the
+    // comment, sed by path, the `e` command.
+    ("{ # it's\nsed -n 'w xtask/f' /tmp/in; }", "xtask/"),
+    ("(# it's\nsed -n 'w xtask/f' /tmp/in)", "xtask/"),
+    ("if true; then # it's\nsed -n 'w xtask/f' /tmp/in; fi", "xtask/"),
+    ("x=$(# say \"hi\nsed -n 'w xtask/f' /tmp/in)", "xtask/"),
+    ("x=$(# it's\n/usr/bin/sed -n 'w harness/x' /tmp/in)", "harness/"),
+    ("x=$(# it's\ngsed '1e git stash push -- xtask' /tmp/in)", "xtask"),
+];
+
+/// sed in command positions that only reads, and the word sed inside quotes,
+/// which is no command. Must pass in a locked session.
+const SED_READS_IN_COMMAND_POSITIONS: &[&str] = &[
+    // The finding's examples (user decision 2026-10-15). The quoted `sed`
+    // names no harness path, so even a conservative denial of it would be
+    // harmless; it stays a must-pass because the word follows `use `, which
+    // is no command position.
+    "sed -n 1p xtask/src/guard.rs",
+    "x=$(sed -n 1p Cargo.toml)",
+    "echo \"use sed to read\" > /tmp/x",
+    // Derived: a backtick, a group, `then`, a subshell.
+    "x=`sed -n 1p Cargo.toml`",
+    "{ sed -n 1p xtask/src/guard.rs; }",
+    "if true; then sed -n 1,5p harness/rules.md; fi",
+    "(sed -n '$p' xtask/src/guard.rs)",
+];
+
+// ADR-0037/ADR-0043 (critic finding M1 on 08dd645): a sed behind a comment at
+// an opening `$(`, backtick, `{`, `(` or `then` is read or counts as writing.
+// Locked denied naming the fragment, unlocked allowed; spec root and a temp
+// repo.
+#[test]
+fn sed_after_a_comment_at_an_opening_is_read() {
+    let root = repo("sed_after_comment_opening");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in SED_AFTER_A_COMMENT_AT_AN_OPENING {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15): sed that only reads passes in every
+// command position; `sed` inside quotes is no command. Locked, spec root and
+// a temp repo.
+#[test]
+fn sed_reads_in_command_positions_pass() {
+    let root = repo("sed_reads_command_positions");
+    for command in SED_READS_IN_COMMAND_POSITIONS {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
