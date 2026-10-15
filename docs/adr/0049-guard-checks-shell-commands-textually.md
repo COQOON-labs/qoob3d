@@ -29,9 +29,11 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    (`rm -rf missing/../xtask`) is a known gap, like the `cd xtask && …` indirection.
 2. **Comments and heredoc bodies of the safe shape are data:** a bare harness directory
    name in them is no path. A path with its slash (`xtask/…`) still counts everywhere. A
-   comment starts only where the shell starts one: at an unquoted, unescaped `#` that starts
-   a word (`$(true)#`, `\ #` and `'a'#` start none), and never inside an open `${…}`, also
-   nested and inside double quotes or `$(…)` (`${x:- #}` is one word). A heredoc body is
+   comment starts only at an unquoted `#` at the start of a line or directly after unquoted
+   whitespace, never glued to `;`, `|`, `&`, `(` or `)` (fail closed: bash reads `true;#x`
+   as a comment, but zsh starts none in `(#i)XA` or `x(|#)`), so `$(true)#`, `\ #` and
+   `'a'#` start none either; and never inside an open `${…}`, also nested and inside double
+   quotes or `$(…)` (`${x:- #}` is one word). A heredoc body is
    data only when its logical line (comments removed, backslash-newlines joined) has a
    single heredoc and nothing after `<<MARKER` (also `<<-`, `<<'M'`, `<<"M"`) but at most
    one output redirection to a file (`> path`, `>> path`). Anything else after the marker

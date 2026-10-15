@@ -9,14 +9,14 @@
 //! - one agent context writes either tests or production code, never both,
 //! - shell commands must not bypass the git hooks or write harness files; a
 //!   harness directory counts also when named without its trailing slash, as a
-//!   whole shell argument outside comments (from a `#` that starts a word,
-//!   not inside `${…}`) and
-//!   outside heredoc bodies of the safe shape: an exact message form as the
-//!   heredoc's command (`git commit|tag -F -`, `gh pr|issue create|edit
-//!   --body-file -`, their `"$(cat <<EOF"` messages, `cat` writing one regular
-//!   file with a literal name), with nothing after the marker but one file
-//!   redirection, standing alone as the whole command (around it only
-//!   comments, blank lines and the closing `)"`), under an unquoted marker
+//!   whole shell argument outside comments (from a `#` at a line start or after
+//!   unquoted whitespace, not inside `${…}`) and outside heredoc bodies of the
+//!   safe shape: an exact message form as the heredoc's command (`git
+//!   commit|tag -F -`, `gh pr|issue create|edit --body-file -`, their `"$(cat
+//!   <<EOF"` messages, `cat` writing one regular file with a literal name),
+//!   with nothing after the marker but one file redirection, standing alone
+//!   as the whole command (around it only comments, blank lines and the
+//!   closing `)"`), under an unquoted marker
 //!   without `$(`, `${` or a line ending in a backslash in the body, and
 //!   inside `$(…)` without a body line starting with the marker word. A
 //!   command with a construct the guard does not model (backticks, `$'`,
@@ -133,9 +133,6 @@ const ARGUMENT_ENDS: &str = ";|&)<>`*?[";
 /// `&>`, `<&0`), and arithmetic, whose `<<` is a shift (`((`, `$((`). A
 /// command with one keeps its prose (fail closed, ADR-0049).
 const UNMODELLED: &[&str] = &["`", "$'", "|&", ">&", "&>", "<&", "(("];
-/// Unquoted, unescaped characters after which a `#` starts a comment. Not `)`:
-/// after `$(…)` or `$((…))` the word goes on (`$(true)#`).
-const COMMENT_STARTS: &str = ";|&(";
 
 /// Files in the home directory that every new shell reads (ADR-0043).
 const SHELL_STARTUP: &[&str] =
@@ -268,11 +265,12 @@ fn models_prose(command: &str) -> bool {
 
 /// `command` without what the shell reads as no words: heredoc bodies (from
 /// the line after `<<MARKER` through the line `MARKER`) and comments (from an
-/// unquoted, unescaped `#` that starts a word to the end of its line).
-/// Quotes, backslashes, `$(…)` and `${…}` (also in double quotes) are
-/// followed, so a quoted `#` or `<<` starts neither and no comment starts
-/// inside `${…}` (`${x:- #}`); a `#` after a closing quote, `)` or an escaped
-/// character is part of a word. A heredoc body is removed only in the safe
+/// unquoted `#` at a line start or right after unquoted whitespace to the end
+/// of its line). Quotes, backslashes, `$(…)` and `${…}` (also in double
+/// quotes) are followed, so a quoted `#` or `<<` starts neither and no comment
+/// starts inside `${…}` (`${x:- #}`); a `#` glued to anything else (`;|&()`,
+/// a closing quote, an escaped character) starts none (fail closed: zsh's
+/// `(#i)`). A heredoc body is removed only in the safe
 /// shape: the only heredoc of its line, read as a message or written to a file
 /// ([`is_message_form`]), with nothing after the marker but one file redirection
 /// ([`only_redirects_to_file`]), as the whole command ([`stands_alone`]), and
@@ -367,10 +365,10 @@ fn without_prose(command: &str) -> String {
         if outside_quotes && c == '\n' {
             line_start = out.len();
         }
-        // No comment starts inside `${…}` (`${x:- #}`), also nested.
-        word_start = outside_quotes
-            && !open.iter().any(|o| matches!(o, '{' | '}'))
-            && (c.is_whitespace() || COMMENT_STARTS.contains(c));
+        // A comment starts only after whitespace, never glued to `;|&()`
+        // (zsh's `(#i)`) and never inside `${…}` (`${x:- #}`), also nested.
+        word_start =
+            outside_quotes && !open.iter().any(|o| matches!(o, '{' | '}')) && c.is_whitespace();
         i = end;
     }
     if markers.is_empty() { out } else { command.to_owned() }
@@ -838,12 +836,12 @@ fn end_word(words: &mut Vec<Word>, word: Option<Word>, target: &mut bool, redire
 }
 
 /// A `#` after `previous`, starting a word, starts a comment in
-/// [`simple_commands`]: outside quotes and `${…}` (also nested), after a blank
-/// or one of [`COMMENT_STARTS`].
+/// [`simple_commands`]: outside quotes and `${…}` (also nested), at the start
+/// or after whitespace, never glued to `;|&()` (zsh's `(#i)`).
 fn starts_comment(open: &[char], previous: Option<char>) -> bool {
     matches!(open.last(), None | Some('(' | '`'))
         && !open.iter().any(|o| matches!(o, '{' | '}'))
-        && previous.is_none_or(|p| p.is_whitespace() || COMMENT_STARTS.contains(p))
+        && previous.is_none_or(char::is_whitespace)
 }
 
 /// What `c`, followed by `next`, opens inside `top` in [`simple_commands`]: a
