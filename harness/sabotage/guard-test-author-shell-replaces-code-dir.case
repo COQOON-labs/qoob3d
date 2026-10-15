@@ -1,0 +1,6 @@
+# The test author replaces a whole production source directory through the
+# shell: a named code directory goes through the role check (ADR-0039;
+# critic finding R3 on c54699d)
+command: cargo xtask guard
+expect: This agent context already writes tests
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "git checkout HEAD~5 -- crates/qoob3d-sketch/src"}, "hook_event_name": "PreToolUse", "agent_type": "test-author", "agent_id": "a1"}

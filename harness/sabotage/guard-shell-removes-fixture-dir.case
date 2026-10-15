@@ -1,0 +1,5 @@
+# Agent removes the whole fixture directory through the shell: the directory
+# and its ancestors count as fixtures (ADR-0030; critic finding R2 on c54699d)
+command: cargo xtask guard
+expect: is a format fixture and immutable
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "rm -rf crates/qoob3d-core/tests/fixtures"}, "hook_event_name": "PreToolUse"}

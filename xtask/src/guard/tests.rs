@@ -5661,3 +5661,240 @@ fn shell_role_and_fixture_checks_cover_every_non_read() {
     assert_eq!(pre_tool_use(&root, &s, &edit), Ok(()), "test edit after git add");
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Pure reads that run programs (critic finding R1 on c54699d, blocker; R4;
+// user decision 2026-10-15): `git grep -O<cmd>`/`--open-files-in-pager[=…]`
+// (also abbreviated, `--op=`, and bundled, `-nO<cmd>`) runs a program on the
+// matching files, and `file -C`/`--compile` writes a compiled magic file, so
+// neither is a pure read. Audit of the other pure reads: `git cat-file
+// --filters` runs the configured filters (like `--textconv`); `git
+// log/show/diff --output`/`--ext-diff`/`--textconv` are denied already.
+// cat, head, tail, grep, ls, stat, wc, diff, test, du, cut, tr, nl,
+// basename, dirname, realpath, md5, shasum, shellcheck have no option that
+// writes a file or runs an arbitrary program. Probed in the test author's
+// scratchpad (git 2.54, macOS file): `git grep -nO'touch M'`, `--op='touch
+// M'` and `--open-files-in-pager='touch M'` each ran `touch`; `file -C -m
+// magic` wrote `magic.mgc`; `git grep -o` is `--only-matching`, a read.
+// ---------------------------------------------------------------------------
+
+/// Read programs with an option that runs a program or writes a file, naming
+/// a harness path, with the fragment the denial must name. Must be denied in
+/// a locked session.
+const READS_THAT_RUN_OR_WRITE: &[(&str, &str)] = &[
+    // The finding's examples (R1/R4 on c54699d, user decision 2026-10-15).
+    ("git grep -O'sed -i.bak s/x/y/' fn -- xtask/src/guard.rs", "xtask/"),
+    ("git grep --open-files-in-pager='sed -i s/x/y/' fn -- harness/rules.md", "harness/"),
+    ("git grep --op=vim fn -- xtask", "xtask"),
+    ("file -C -m harness/rules.md", "harness/"),
+    // Derived: `-O` bundled after `-n`, the long option without a value (the
+    // default pager), `file --compile`, `git cat-file --filters`, and
+    // `--textconv` on cat-file and grep (denied already, regression guards).
+    ("git grep -nOvim fn -- xtask", "xtask"),
+    ("git grep --open-files-in-pager fn -- harness", "harness"),
+    ("file --compile -m harness/rules.md", "harness/"),
+    ("git cat-file --filters --path=xtask/src/guard.rs HEAD", "xtask/"),
+    ("git cat-file --textconv --path=xtask/src/guard.rs HEAD", "xtask/"),
+    ("git grep --textconv fn -- harness", "harness"),
+];
+
+/// Reads that stay pure: `git grep -o` is `--only-matching`, plain `file`.
+/// Must pass in a locked session.
+const READS_WITHOUT_A_PROGRAM: &[&str] = &[
+    // The finding's examples (user decision 2026-10-15).
+    "git grep -n foo -- xtask",
+    "git grep -o foo -- harness",
+    "file harness/rules.md",
+    // Derived: the long spelling of `-o`, `file -b`.
+    "git grep --only-matching foo -- xtask",
+    "file -b xtask/src/guard.rs",
+];
+
+// ADR-0037/ADR-0043 (critic finding R1 on c54699d): read programs with an
+// option that runs a program or writes a file are no pure reads. Locked
+// denied naming the fragment, unlocked allowed; spec root and a temp repo.
+#[test]
+fn reads_that_run_programs_or_write_files_are_no_pure_reads() {
+    let root = repo("reads_that_run_or_write");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in READS_THAT_RUN_OR_WRITE {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15): `git grep -o` and plain `file` stay
+// pure reads. Locked, spec root and a temp repo.
+#[test]
+fn reads_without_a_program_pass() {
+    let root = repo("reads_without_a_program");
+    for command in READS_WITHOUT_A_PROGRAM {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0039/ADR-0030 (critic finding R1 on c54699d): `git grep -O` is no read
+// for the role and fixture checks either.
+#[test]
+fn git_grep_pager_is_checked_for_roles_and_fixtures() {
+    let root = repo("git_grep_pager_roles");
+    let s = locked();
+    let implementer = bash_as(
+        "git grep -O'sed -i s/a/b/' x -- crates/qoob3d-core/src/mesh/tests.rs",
+        Some("i1"),
+        Some("implementer"),
+    );
+    assert_denied(
+        pre_tool_use(&root, &s, &implementer),
+        &[MSG_ROLE_CODE, "`test-author`"],
+        "implementer git grep -O",
+    );
+    let fixture = bash_as(
+        "git grep -O'rm' x -- crates/qoob3d-core/tests/fixtures/v1.qbd",
+        Some("t1"),
+        Some("test-author"),
+    );
+    assert_denied(pre_tool_use(&root, &s, &fixture), &[MSG_FIXTURE], "git grep -O on a fixture");
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// The fixture directory and its ancestors (critic finding R2 on c54699d,
+// major; user decision 2026-10-15): removing, moving or restoring the
+// fixture directory or any directory above it touches every fixture, so a
+// shell command that is no pure read and names one of them is denied with
+// the fixture message, for every agent and in an unlocked session; so is an
+// Edit/Write of the directory path itself. Reads pass.
+// ---------------------------------------------------------------------------
+
+// ADR-0030 (critic finding R2 on c54699d): the fixture directory and its
+// ancestors are fixtures for shell commands and file tools.
+#[test]
+fn fixture_directory_and_ancestors_are_fixtures() {
+    let root = repo("fixture_ancestors");
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &unused_home());
+        for (id, kind) in
+            [(None, None), (Some("i1"), Some("implementer")), (Some("t1"), Some("test-author"))]
+        {
+            for command in [
+                // The finding's examples.
+                "rm -rf crates/qoob3d-core/tests/fixtures",
+                "rm -rf crates/qoob3d-core/tests/fixtures/",
+                "rm -rf ./crates/qoob3d-core/tests/fixtures/.",
+                "git rm -r -q crates/qoob3d-core/tests",
+                "mv crates/qoob3d-core/tests/fixtures /tmp/old",
+                "rm -rf crates",
+                // Named by the task under R3; `crates` is an ancestor of the
+                // fixtures, so the fixture message comes first.
+                "git restore -s HEAD~5 crates",
+                // Derived: the crate root, a git rewrite of the directory.
+                "rm -rf crates/qoob3d-core",
+                "git checkout HEAD~5 -- crates/qoob3d-core/tests/fixtures",
+            ] {
+                assert_denied(
+                    pre_tool_use(&root, &s, &bash_as(command, id, kind)),
+                    &[MSG_FIXTURE],
+                    &format!("{kind:?}: {command} (unlocked: {unlocked})"),
+                );
+            }
+            for command in [
+                "ls crates/qoob3d-core/tests/fixtures",
+                "git status -- crates/qoob3d-core/tests",
+                "find crates -name '*.qbd'",
+            ] {
+                assert_eq!(
+                    pre_tool_use(&root, &s, &bash_as(command, id, kind)),
+                    Ok(()),
+                    "{kind:?}: {command} (unlocked: {unlocked})"
+                );
+            }
+        }
+        for tool in ["Edit", "Write"] {
+            let dir = abs(&root, "crates/qoob3d-core/tests/fixtures");
+            let input = write(tool, &dir, "s", Some("t1"), Some("test-author"));
+            assert_denied(
+                pre_tool_use(&root, &s, &input),
+                &[MSG_FIXTURE],
+                &format!("{tool} of the fixture directory (unlocked: {unlocked})"),
+            );
+        }
+    });
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Directories and roles (critic finding R3 on c54699d, major; user decision
+// 2026-10-15): a named source-tree directory counts for the role check. A
+// directory that only holds code (`crates/qoob3d-sketch/src`, also with a
+// trailing `/`) is code unless `paths::kind` makes it a test directory
+// (`…/tests`); a directory that holds both (a crate root such as
+// `crates/qoob3d-sketch`) conflicts with every role, also for a context
+// without an agent type, which would be bound to both.
+// ---------------------------------------------------------------------------
+
+// ADR-0039 (critic finding R3 on c54699d): directories go through the role
+// check.
+#[test]
+fn directories_go_through_the_role_check() {
+    let root = repo("directory_roles");
+    let s = locked();
+    let author = |c: &str| bash_as(c, Some("t1"), Some("test-author"));
+    let implementer = |c: &str| bash_as(c, Some("i1"), Some("implementer"));
+    for command in [
+        // The finding's examples.
+        "git checkout HEAD~5 -- crates/qoob3d-sketch/src",
+        "git checkout HEAD~5 -- crates/qoob3d-sketch/src/",
+        "rm -rf crates/qoob3d-sketch/src",
+        "cp -r /tmp/src crates/qoob3d-sketch/src",
+        "mv /tmp/x crates/qoob3d-sketch/src",
+        "rm -rf crates/qoob3d-sketch",
+        // Derived: another crate's source directory, another crate root.
+        "git restore -s HEAD~5 crates/qoob3d-render/src",
+        "rm -rf crates/qoob3d-app",
+    ] {
+        assert_denied(
+            pre_tool_use(&root, &s, &author(command)),
+            &[MSG_ROLE_TESTS, "`implementer`"],
+            &format!("test-author: {command}"),
+        );
+    }
+    for command in [
+        // The finding's examples.
+        "rm -rf crates/qoob3d-sketch/tests",
+        "rm -rf crates/qoob3d-sketch",
+        // Derived: a test directory with a trailing `/`, a crate root via git.
+        "rm -rf crates/qoob3d-app/tests/",
+        "git checkout HEAD~5 -- crates/qoob3d-app",
+    ] {
+        assert_denied(
+            pre_tool_use(&root, &s, &implementer(command)),
+            &[MSG_ROLE_CODE, "`test-author`"],
+            &format!("implementer: {command}"),
+        );
+    }
+    // The finding's passes, and derived: a test author writing below a test
+    // directory, an implementer writing a new code file.
+    for (input, what) in [
+        (author("ls crates/qoob3d-sketch/src"), "test-author ls src"),
+        (implementer("cp /tmp/x crates/qoob3d-sketch/src/new.rs"), "implementer new code file"),
+        (author("cp /tmp/x crates/qoob3d-sketch/tests/new.rs"), "test-author new test file"),
+        (author("rm -rf crates/qoob3d-sketch/tests/support"), "test-author test directory"),
+    ] {
+        assert_eq!(pre_tool_use(&root, &s, &input), Ok(()), "{what}");
+    }
+    // A context without an agent type: a crate root binds both roles and is
+    // denied; a code directory binds code, so a later test Edit is denied.
+    let crate_root = bash_as("rm -rf crates/qoob3d-sketch", Some("m6"), None);
+    assert!(pre_tool_use(&root, &s, &crate_root).is_err(), "main context crate root");
+    let src = bash_as("rm -rf crates/qoob3d-sketch/src", Some("m7"), None);
+    assert_eq!(pre_tool_use(&root, &s, &src), Ok(()), "main context code directory");
+    let edit = write("Edit", &abs(&root, TEST), "s", Some("m7"), None);
+    assert_denied(pre_tool_use(&root, &s, &edit), &[MSG_ROLE_CODE], "test edit after src");
+    fs::remove_dir_all(&root).unwrap();
+}
