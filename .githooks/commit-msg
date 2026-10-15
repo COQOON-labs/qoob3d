@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Rejects commit messages that name an AI as (co-)author or generator (ADR-0038).
 # Installed by `cargo xtask setup`.
+set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 exec cargo xtask commits --message "$1"

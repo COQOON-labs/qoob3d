@@ -77,11 +77,16 @@ pub(crate) fn build_xtask(worktree: &Path, target_dir: &Path) -> Result<(), Stri
     }
     #[cfg(target_os = "macos")]
     {
-        // Without the attribute (no GUI client involved) `xattr -d` fails; nothing to do then.
-        let _ = Command::new("xattr")
+        // A non-zero exit means the attribute is missing (no GUI client involved): nothing
+        // to do. If xattr cannot be started at all, say so and let the check show whether
+        // Gatekeeper blocks the binary.
+        if let Err(e) = Command::new("xattr")
             .args(["-d", "com.apple.quarantine"])
             .arg(xtask_binary(target_dir))
-            .output();
+            .output()
+        {
+            eprintln!("check-rev: could not run xattr: {e}");
+        }
     }
     Ok(())
 }
