@@ -4340,14 +4340,15 @@ const SPLIT_SUBSTITUTIONS_IN_UNQUOTED_BODIES: &[(&str, &str)] = &[
     ("cat > /tmp/n <<-EOF\n\t$\\\n(rm -rf xtask)\n\tEOF", "xtask"),
 ];
 
-/// The same split bodies under a quoted marker (no expansion), and unquoted
-/// bodies with a continuation that forms no substitution. Must pass in a
-/// locked session.
+/// The same split bodies under a quoted marker (no expansion), and an
+/// unquoted body with a `$` at a line end but no backslash. Must pass in a
+/// locked session. (The unquoted continuation `line one \` moved to
+/// SPLIT_TERMINATORS_IN_UNQUOTED_BODIES: since G3 an unquoted body with a
+/// backslash at a line end is never data.)
 const SPLIT_BODIES_THAT_STAY_DATA: &[&str] = &[
     // The finding's examples (user decision 2026-10-15).
     "cat > /tmp/note.txt <<'EOF'\n$\\\n(rm -rf xtask)\nEOF",
     "git commit -F - <<'EOF'\nmsg\n$\\\n(rm -rf xtask)\nEOF",
-    "git commit -F - <<EOF\nline one \\\ncontinued harness notes\nEOF",
     // Derived: `"EOF"` and `\EOF` markers, a `$` at a line end without a
     // backslash (the lines are not joined).
     "git commit -F - <<\"EOF\"\nmsg\n$\\\n(rm -rf xtask)\nEOF",
@@ -4457,6 +4458,81 @@ fn heredoc_terminators_inside_substitutions_keep_the_body() {
 fn marker_words_that_end_no_heredoc_stay_data() {
     let root = repo("marker_words_end_nothing");
     for command in MARKER_WORDS_THAT_END_NOTHING {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// A terminator split by backslash-newline (implementer finding G3 on the G1/G2
+// code, decided by the user 2026-10-15): under an unquoted marker the shell
+// joins backslash-newlines before comparing a line with the terminator, so
+// `EO\` + newline + `F` ends the heredoc and the lines after it run. Probed in
+// the test author's scratchpad (`touch` as the payload): /bin/bash 3.2.57,
+// Homebrew bash 5.3.20 and /bin/zsh 5.9 all end the heredoc at the joined
+// `EOF` under `<<EOF`; under `<<'EOF'` all three keep reading to the real
+// `EOF`. All three also join `line one \` + newline + `continued …` under
+// `<<EOF`. Fail closed: a body under an unquoted marker with a line ending in
+// a backslash is never data; it stays shell text. Quoted markers are
+// unaffected.
+// ---------------------------------------------------------------------------
+
+/// Unquoted heredoc bodies with a line ending in a backslash, with the
+/// directory the denial must name. Must be denied in a locked session.
+const SPLIT_TERMINATORS_IN_UNQUOTED_BODIES: &[(&str, &str)] = &[
+    // The finding's examples (G3, user decision 2026-10-15).
+    ("cat > /tmp/n <<EOF\nnotes\nEO\\\nF\nrm -rf xtask\nEOF", "xtask"),
+    ("git commit -F - <<EOF\nnotes\nEO\\\nF\nrm -rf xtask\nEOF", "xtask"),
+    // Derived: the marker split twice, `<<-` with tabs, the `"$(cat <<EOF`
+    // form, the gh `--body-file -` form.
+    ("git commit -F - <<EOF\nnotes\nE\\\nO\\\nF\nrm -rf xtask\nEOF", "xtask"),
+    ("cat > /tmp/n <<-EOF\n\tnotes\n\tEO\\\nF\nrm -rf xtask\n\tEOF", "xtask"),
+    ("git commit -m \"$(cat <<EOF\nnotes\nEO\\\nF\nrm -rf xtask\nEOF\n)\"", "xtask"),
+    ("gh pr create --title X --body-file - <<EOF\nnotes\nEO\\\nF\nrm -rf .claude\nEOF", ".claude"),
+    // Moved from SPLIT_BODIES_THAT_STAY_DATA (was must-pass, G3): the shell
+    // joins this continuation too.
+    ("git commit -F - <<EOF\nline one \\\ncontinued harness notes\nEOF", "harness"),
+];
+
+/// The same bodies under quoted markers (the shell joins nothing there), and
+/// an unquoted body with a backslash that does not end a line. Must pass in a
+/// locked session.
+const SPLIT_TERMINATORS_UNDER_QUOTED_MARKERS: &[&str] = &[
+    // The finding's examples (user decision 2026-10-15).
+    "cat > /tmp/n <<'EOF'\nnotes\nEO\\\nF\nrm -rf xtask\nEOF",
+    "git commit -F - <<'EOF'\nnotes\nEO\\\nF\nrm -rf xtask\nEOF",
+    // Derived: the marker split twice, `"EOF"` and `\EOF`, the continuation
+    // under a quoted marker, a backslash inside a line.
+    "git commit -F - <<'EOF'\nnotes\nE\\\nO\\\nF\nrm -rf xtask\nEOF",
+    "git commit -F - <<\"EOF\"\nnotes\nEO\\\nF\nrm -rf xtask\nEOF",
+    "cat > /tmp/n <<\\EOF\nnotes\nEO\\\nF\nrm -rf harness\nEOF",
+    "git commit -F - <<'EOF'\nline one \\\ncontinued harness notes\nEOF",
+    "git commit -F - <<EOF\nthe path C:\\dir in the harness notes\nEOF",
+];
+
+// ADR-0037/ADR-0043/ADR-0049 (implementer finding G3): an unquoted body with a
+// line ending in a backslash keeps the body as shell text. Locked denied
+// naming the directory, unlocked allowed; spec root and a temp repo.
+#[test]
+fn unquoted_heredoc_bodies_with_continuations_are_shell_text() {
+    let root = repo("split_terminators");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in SPLIT_TERMINATORS_IN_UNQUOTED_BODIES {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15): under quoted markers a split marker is
+// no terminator and the body stays data. Locked, spec root and a temp repo.
+#[test]
+fn split_terminators_under_quoted_markers_stay_data() {
+    let root = repo("split_terminators_quoted");
+    for command in SPLIT_TERMINATORS_UNDER_QUOTED_MARKERS {
         assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
         assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
     }
