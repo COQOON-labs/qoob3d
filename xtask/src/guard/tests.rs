@@ -4588,3 +4588,71 @@ fn kept_heredoc_bodies_remove_no_prose() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// A `#` inside `${…}` starts no comment (critic finding I1 on b6fa565, a
+// regression against bd0fade; decided by the user 2026-10-15): bash and zsh
+// read `${x:- #}` as one word, so the command after it runs. No comment
+// starts inside an open `${…}`, also nested, in both scanners (prose removal
+// and the quote-aware tokenizer of the sed and in-place rules). A real
+// comment after a closed `${…}` stays a comment, and a quoted message body
+// with `${…}` stays data (QUOTED_HEREDOC_SUBSTITUTIONS), so the fix is no
+// blanket fail-closed on `${`.
+// ---------------------------------------------------------------------------
+
+/// A `#` inside an open `${…}`, followed by a harness write, with the
+/// fragment the denial must name. Must be denied in a locked session.
+const HASH_INSIDE_PARAMETER_EXPANSION: &[(&str, &str)] = &[
+    // The finding's examples (I1 on b6fa565, user decision 2026-10-15).
+    ("echo ${x:- #}; rm -rf xtask", "xtask"),
+    ("echo ${x:- #}; sed 's/a/b/w xtask/f' /tmp/in", "xtask/"),
+    // Derived (named by the task): an assignment, `:` with `:=`, nested
+    // expansions, inside `$(…)`.
+    ("x=${y:-a #}; mv xtask /tmp/x", "xtask"),
+    (": ${x:= #}; rm -rf .claude", ".claude"),
+    ("echo ${x:-${y:- #}}; rm -rf harness", "harness"),
+    ("echo $(echo ${x:- #}); rm -rf xtask", "xtask"),
+    // Derived, both denied already before I1 (regression guards): the
+    // in-place rule after the expansion, a `#` that starts no word (`:-#`).
+    ("echo ${x:- #}; sed -i '' s/a/b/ Cargo.toml", "Cargo.toml"),
+    ("echo ${x:-#}; rm -rf xtask", "xtask"),
+];
+
+/// Real comments after a closed `${…}` (also `${#x}` and `${x#p}`, whose `#`
+/// is an operator). Must pass in a locked session.
+const COMMENTS_AFTER_PARAMETER_EXPANSION: &[&str] = &[
+    // The task's example.
+    "echo ${HOME} > /tmp/x # harness",
+    // Derived: the length and prefix-removal operators, a nested expansion.
+    "echo ${#HOME} > /tmp/x # harness",
+    "echo ${HOME#/} > /tmp/x # xtask notes",
+    "echo ${x:-${HOME}} > /tmp/x # harness",
+];
+
+// ADR-0037/ADR-0043 (critic finding I1 on b6fa565): a `#` inside `${…}`
+// starts no comment, so the command after it is checked. Locked denied naming
+// the fragment, unlocked allowed; spec root and a temp repo.
+#[test]
+fn hash_inside_parameter_expansion_starts_no_comment() {
+    let root = repo("hash_in_parameter_expansion");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in HASH_INSIDE_PARAMETER_EXPANSION {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15): a comment after a closed `${…}` stays
+// a comment. Locked, spec root and a temp repo.
+#[test]
+fn comments_after_parameter_expansions_pass() {
+    let root = repo("comments_after_parameter_expansion");
+    for command in COMMENTS_AFTER_PARAMETER_EXPANSION {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
