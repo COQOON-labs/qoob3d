@@ -2869,25 +2869,25 @@ fn harness_list_drift_every_directory_is_guarded_without_slash() {
 // (critic K-15 on bd0fade, decided by the user): before it a token start
 // (whitespace, line start, `;|&()`, `./`, the root), after it the end,
 // whitespace or `;|&)`. Heredoc bodies (between `<<MARKER` and the line
-// `MARKER`, also `<<'EOF'`, `<<"EOF"`, `<<-EOF`), comments (from a `#` at a
-// token start to the end of its line) and words followed by `:` or `,` are
-// prose. `-p xtask`/`--package xtask`/`--package=xtask` and the subcommand
+// `MARKER`, also `<<'EOF'`, `<<"EOF"`, `<<-EOF`) and words followed by `:` or
+// `,` are prose. Comments were prose until the user's decision of 2026-10-15
+// (K1, see COMMENTS_ARE_NO_PROSE). `-p xtask`/`--package xtask`/`--package=xtask` and the subcommand
 // `xtask` are package and subcommand names, but only when cargo is the
 // program of the segment.
 // ---------------------------------------------------------------------------
 
 /// Commands that write outside the harness and name a harness directory only
-/// in prose: a heredoc body, a comment, a word with `:` or `,` after it. Each
-/// one writes (`<<`, `>`, `tee`), so only the harness detection decides. Must
-/// pass in a locked session (critic K-15 on bd0fade).
+/// in prose: a heredoc body, a word with `:` or `,` after it. Each one writes
+/// (`<<`, `>`, `tee`), so only the harness detection decides. Must pass in a
+/// locked session (critic K-15 on bd0fade). The comment entries moved to
+/// COMMENTS_ARE_NO_PROSE (K1, comments are no longer prose).
 const HARNESS_WORDS_IN_PROSE: &[&str] = &[
     // The finding's examples: heredoc commit messages with the subject
-    // `xtask: …` or a body naming the harness, a note, a comment, the PR body
-    // form of Claude Code (`--body "$(cat <<'EOF' … EOF\n)"`).
+    // `xtask: …` or a body naming the harness, a note, the PR body form of
+    // Claude Code (`--body "$(cat <<'EOF' … EOF\n)"`).
     "git commit -F - <<'EOF'\nxtask: fix the guard\nEOF",
     "git commit -F - <<'EOF'\ntests: cover the harness guard\n\nThe harness denies writes.\nEOF",
     "cat > /tmp/note <<EOF\nupdate the harness docs\nEOF",
-    "echo done > /tmp/x # harness",
     "gh pr create --title \"Guard prose\" --body \"$(cat <<'EOF'\n## Summary\n- the harness \
      guard skips prose\n- xtask guard: heredoc bodies\n\n## Test plan\n- cargo xtask \
      selftest\nEOF\n)\"",
@@ -2902,10 +2902,6 @@ const HARNESS_WORDS_IN_PROSE: &[&str] = &[
     "cat > /tmp/n <<END\nEOF\n.github and .cargo\nEND",
     "cat > /tmp/n <<EOF\nEOF is not alone on this line\nharness\nEOF",
     "git commit -F - <<'EOF'\nxtask: guard\n\n.githooks and .github stay protected\nEOF",
-    // Derived: a comment at line start, after a separator, glued to the `#`.
-    "# clean up the harness notes\necho done > /tmp/x",
-    "echo done > /tmp/x; # xtask and harness",
-    "echo done > /tmp/x #harness",
     // Derived: words with `:` or `,` directly after are no whole argument.
     "git commit -m \"xtask: fix the guard\" 2>&1 | tee /tmp/log",
     "echo xtask, harness, .claude: noted > /tmp/x",
@@ -3449,19 +3445,18 @@ const ARITHMETIC_COMMANDS: &[(&str, &str)] = &[
 ];
 
 /// Data heredocs of the safe shape: nothing after the marker but at most one
-/// output redirection to a file, also with a comment after it. Must pass in
-/// a locked session. (The commit, note and PR body forms are in
+/// output redirection to a file. Must pass in a locked session. (The form with
+/// a comment after the redirection moved to COMMENTS_ARE_NO_PROSE: K1,
+/// comments are no longer prose.) (The commit, note and PR body forms are in
 /// HARNESS_WORDS_IN_PROSE, the continued commit form in
 /// MULTI_LINE_DATA_HEREDOCS.)
 const HEREDOC_DATA_SHAPES: &[&str] = &[
     // The task's examples.
     "cat <<EOF > /tmp/note\nupdate the harness docs\nEOF",
     "cat <<'EOF' >> /tmp/note\nxtask notes\nEOF",
-    // Derived: `<<-`, `<<"M"`, no space after `>`, a comment after the
-    // redirection.
+    // Derived: `<<-`, `<<"M"`, no space after `>`.
     "cat <<-EOF > /tmp/note\n\tthe harness\n\tEOF",
     "cat <<\"EOF\" >/tmp/note\nharness\nEOF",
-    "cat <<EOF > /tmp/note # harness notes\nxtask\nEOF",
 ];
 
 // ADR-0037/ADR-0043 (critic finding on 0cf5dd6): a heredoc line with
@@ -3755,8 +3750,9 @@ fn heredoc_message_forms_stay_data() {
 // into a shell (`exec > >(bash)`, a fifo read by bash, a symlink to
 // /dev/stdout), a command after it can run the file it wrote. On top of every
 // earlier condition, a heredoc body is data only when the whole Bash command
-// is the message-form command alone: outside comments and blank lines,
-// nothing before the heredoc line and nothing after the terminator line. For
+// is the message-form command alone: nothing but blank lines before the
+// heredoc line and after the terminator line (since K1 a comment line is no
+// longer nothing; user decision 2026-10-15). For
 // the `"$(cat <<'EOF'` forms the closing line `)"` may follow, optionally
 // with further plain arguments on that same line (no `;`, `&`, `|`, `<`, `>`,
 // `(`, `)`, backtick, `$`). Otherwise the body is checked as shell text.
@@ -3790,21 +3786,20 @@ const HEREDOCS_NOT_ALONE: &[(&str, &str)] = &[
     ("cd /tmp\ngit commit -m \"$(cat <<'EOF'\nfix the xtask guard\nEOF\n)\"", "xtask"),
 ];
 
-/// Message forms standing alone: around them only comments, blank lines and
-/// a trailing newline, and plain arguments after the closing `)"`. Must pass
-/// in a locked session. (Every earlier must-pass message form stays in its
+/// Message forms standing alone: around them only blank lines and a trailing
+/// newline, and plain arguments after the closing `)"`. Must pass in a locked
+/// session. (The forms with a comment line before or after moved to
+/// COMMENTS_ARE_NO_PROSE: K1, a comment line no longer counts as nothing.) (Every earlier must-pass message form stays in its
 /// table: HARNESS_WORDS_IN_PROSE, MULTI_LINE_DATA_HEREDOCS,
 /// HEREDOC_DATA_SHAPES, HEREDOC_DATA_READERS, PROSE_WITH_CLOSING_WORDS,
 /// HEREDOC_MESSAGE_FORMS.)
 const MESSAGE_FORMS_STANDING_ALONE: &[&str] = &[
     // The task's examples (user decision 2026-10-15).
     "gh pr create --title X --body \"$(cat <<'EOF'\nharness notes\nEOF\n)\" --base main",
-    "# commit the guard fix\ngit commit -F - <<'EOF'\nfix the harness\nEOF",
     "git commit -F - <<'EOF'\nfix the harness\nEOF\n",
     "git commit -F - <<'EOF'\nfix the harness\nEOF\n\n",
-    // Derived: a comment after the terminator, blank lines before the
-    // command, a quoted argument after `)"`, a trailing newline after `)"`.
-    "git commit -F - <<'EOF'\nfix the harness\nEOF\n# done",
+    // Derived: blank lines before the command, a quoted argument after `)"`,
+    // a trailing newline after `)"`.
     "\n\ncat > /tmp/note <<EOF\nxtask notes\nEOF",
     "gh pr create --body \"$(cat <<'EOF'\nharness\nEOF\n)\" --title \"Guard fix\" --draft",
     "git commit -m \"$(cat <<'EOF'\nfix the harness\nEOF\n)\"\n",
@@ -3826,8 +3821,8 @@ fn heredoc_body_is_data_only_when_the_message_form_stands_alone() {
     fs::remove_dir_all(&root).unwrap();
 }
 
-// ADR-0037 (user decision 2026-10-15): a message form alone, with comments,
-// blank lines and plain arguments after `)"`, stays data. Locked, spec root
+// ADR-0037 (user decision 2026-10-15): a message form alone, with blank
+// lines and plain arguments after `)"`, stays data. Locked, spec root
 // and a temp repo.
 #[test]
 fn message_forms_standing_alone_stay_data() {
@@ -4594,10 +4589,11 @@ fn kept_heredoc_bodies_remove_no_prose() {
 // regression against bd0fade; decided by the user 2026-10-15): bash and zsh
 // read `${x:- #}` as one word, so the command after it runs. No comment
 // starts inside an open `${…}`, also nested, in both scanners (prose removal
-// and the quote-aware tokenizer of the sed and in-place rules). A real
-// comment after a closed `${…}` stays a comment, and a quoted message body
-// with `${…}` stays data (QUOTED_HEREDOC_SUBSTITUTIONS), so the fix is no
-// blanket fail-closed on `${`.
+// and the quote-aware tokenizer of the sed and in-place rules). A quoted
+// message body with `${…}` stays data (QUOTED_HEREDOC_SUBSTITUTIONS), so the
+// fix is no blanket fail-closed on `${`. Since K1 no comment is removed at
+// all; the must-pass comments after a closed `${…}` moved to
+// COMMENTS_ARE_NO_PROSE.
 // ---------------------------------------------------------------------------
 
 /// A `#` inside an open `${…}`, followed by a harness write, with the
@@ -4618,17 +4614,6 @@ const HASH_INSIDE_PARAMETER_EXPANSION: &[(&str, &str)] = &[
     ("echo ${x:-#}; rm -rf xtask", "xtask"),
 ];
 
-/// Real comments after a closed `${…}` (also `${#x}` and `${x#p}`, whose `#`
-/// is an operator). Must pass in a locked session.
-const COMMENTS_AFTER_PARAMETER_EXPANSION: &[&str] = &[
-    // The task's example.
-    "echo ${HOME} > /tmp/x # harness",
-    // Derived: the length and prefix-removal operators, a nested expansion.
-    "echo ${#HOME} > /tmp/x # harness",
-    "echo ${HOME#/} > /tmp/x # xtask notes",
-    "echo ${x:-${HOME}} > /tmp/x # harness",
-];
-
 // ADR-0037/ADR-0043 (critic finding I1 on b6fa565): a `#` inside `${…}`
 // starts no comment, so the command after it is checked. Locked denied naming
 // the fragment, unlocked allowed; spec root and a temp repo.
@@ -4645,18 +4630,6 @@ fn hash_inside_parameter_expansion_starts_no_comment() {
     fs::remove_dir_all(&root).unwrap();
 }
 
-// ADR-0037 (user decision 2026-10-15): a comment after a closed `${…}` stays
-// a comment. Locked, spec root and a temp repo.
-#[test]
-fn comments_after_parameter_expansions_pass() {
-    let root = repo("comments_after_parameter_expansion");
-    for command in COMMENTS_AFTER_PARAMETER_EXPANSION {
-        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
-        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
-    }
-    fs::remove_dir_all(&root).unwrap();
-}
-
 // ---------------------------------------------------------------------------
 // A `#` starts a comment only after whitespace (implementer finding J1 on the
 // I1 code, decided by the user 2026-10-15): in zsh a `(` or `|` inside a glob
@@ -4664,7 +4637,9 @@ fn comments_after_parameter_expansions_pass() {
 // runs. Fail closed: a `#` starts a comment only at the start of a line or
 // directly after unquoted whitespace, never directly after `;`, `|`, `&`,
 // `(` or `)`, in both scanners (prose removal and the tokenizer of the sed
-// and in-place rules).
+// and in-place rules). Since K1 no comment is removed at all; the must-pass
+// comments after whitespace moved to COMMENTS_ARE_NO_PROSE or, naming no
+// harness directory, to COMMENTS_THAT_NEED_NO_REMOVAL.
 // ---------------------------------------------------------------------------
 
 /// A `#` glued to `;|&()`, followed by a harness write, with the fragment the
@@ -4687,20 +4662,6 @@ const HASH_GLUED_TO_A_SEPARATOR: &[(&str, &str)] = &[
     ("echo x(#) ; sed -i '' s/a/b/ Cargo.toml", "Cargo.toml"),
 ];
 
-/// Real comments at a line start or after whitespace, also right after a
-/// separator and a space. Must pass in a locked session.
-const COMMENTS_AFTER_WHITESPACE: &[&str] = &[
-    // The task's examples.
-    "echo done > /tmp/x; # xtask and harness",
-    "echo done > /tmp/x # harness",
-    "# note\necho done",
-    // Derived: a comment line naming a harness directory before a write, a
-    // comment after `|` and a space, after a tab.
-    "# clean up the harness\necho done > /tmp/x",
-    "echo done | # xtask\ntee /tmp/x",
-    "echo done > /tmp/x\t# harness",
-];
-
 // ADR-0037/ADR-0043 (implementer finding J1): a `#` glued to `;|&()` starts no
 // comment, so the command after it is checked. Locked denied naming the
 // fragment, unlocked allowed; spec root and a temp repo.
@@ -4717,12 +4678,101 @@ fn hash_glued_to_a_separator_starts_no_comment() {
     fs::remove_dir_all(&root).unwrap();
 }
 
-// ADR-0037 (user decision 2026-10-15): comments at a line start or after
-// whitespace stay comments. Locked, spec root and a temp repo.
+// ---------------------------------------------------------------------------
+// Comments are no prose (user decision 2026-10-15, option 3, K1): every
+// comment rule so far was bypassable (`${…}`, `(#`, zsh glob groups
+// `x(a| #)`), so the guard removes no comment anywhere, neither in the prose
+// removal nor in the tokenizer of the sed and in-place rules. A bare harness
+// directory after a `#` counts like any other word. Heredoc message forms stay
+// data, but "stands alone" now means nothing but blank lines before the
+// heredoc line and after the terminator (and the `)"` line), and a comment
+// after the marker keeps the body.
+// ---------------------------------------------------------------------------
+
+/// Writing commands that name a harness directory only in a comment, and the
+/// bypasses of the comment rules, with the fragment the denial must name.
+/// Where a command names two directories, the guard names the first of its
+/// list (`xtask` before `harness`). Must be denied in a locked session.
+const COMMENTS_ARE_NO_PROSE: &[(&str, &str)] = &[
+    // The task's examples (K1, user decision 2026-10-15). The quoted
+    // newline and the backslash-newline before `#` were denied already before
+    // K1 (regression guards).
+    ("setopt nonomatch; echo x(a| #) ; rm -rf xtask", "xtask"),
+    ("echo '\n#' ; rm -rf xtask", "xtask"),
+    ("echo a\\\n#; rm -rf xtask", "xtask"),
+    // Moved from HARNESS_WORDS_IN_PROSE (were must-pass; K1, comments are no
+    // longer prose).
+    ("echo done > /tmp/x # harness", "harness"),
+    ("# clean up the harness notes\necho done > /tmp/x", "harness"),
+    ("echo done > /tmp/x; # xtask and harness", "xtask"),
+    ("echo done > /tmp/x #harness", "harness"),
+    // Moved from HEREDOC_DATA_SHAPES (was must-pass; K1): a comment after the
+    // marker keeps the body.
+    ("cat <<EOF > /tmp/note # harness notes\nxtask\nEOF", "xtask"),
+    // Moved from MESSAGE_FORMS_STANDING_ALONE (were must-pass; K1): a comment
+    // line before or after the message form is no longer nothing.
+    ("# commit the guard fix\ngit commit -F - <<'EOF'\nfix the harness\nEOF", "harness"),
+    ("git commit -F - <<'EOF'\nfix the harness\nEOF\n# done", "harness"),
+    // Moved from COMMENTS_AFTER_PARAMETER_EXPANSION (were must-pass; K1).
+    ("echo ${HOME} > /tmp/x # harness", "harness"),
+    ("echo ${#HOME} > /tmp/x # harness", "harness"),
+    ("echo ${HOME#/} > /tmp/x # xtask notes", "xtask"),
+    ("echo ${x:-${HOME}} > /tmp/x # harness", "harness"),
+    // Moved from COMMENTS_AFTER_WHITESPACE (were must-pass; K1; its first two
+    // entries are the same as two moved from HARNESS_WORDS_IN_PROSE above).
+    ("# clean up the harness\necho done > /tmp/x", "harness"),
+    ("echo done | # xtask\ntee /tmp/x", "xtask"),
+    ("echo done > /tmp/x\t# harness", "harness"),
+    // Derived: a command in a comment, the sed `w` rule and the in-place rule
+    // after a `#` (the tokenizer removes no comment either; the in-place one
+    // was denied already before K1, a regression guard).
+    ("echo done > /tmp/x # rm -rf .claude", ".claude"),
+    ("echo x # ; sed 's/a/b/w xtask/f' /tmp/in", "xtask/"),
+    ("echo x # ; sed -i '' s/a/b/ Cargo.toml", "Cargo.toml"),
+];
+
+/// Comments that need no removal: they name no harness directory, or the
+/// command writes nothing, or the cargo exceptions apply. Must pass in a
+/// locked session.
+const COMMENTS_THAT_NEED_NO_REMOVAL: &[&str] = &[
+    // The task's examples (user decision 2026-10-15).
+    "cargo test > /tmp/log # check",
+    "ls # harness",
+    "cargo xtask check # harness",
+    // Moved from COMMENTS_AFTER_WHITESPACE (still must-pass).
+    "# note\necho done",
+    // Derived: git without a write, a writing command with a harmless
+    // comment, the cargo package exception before a comment, a comment line
+    // before a message form whose body names no harness directory.
+    "git status # xtask and harness",
+    "echo done > /tmp/x # done",
+    "cargo test -p xtask > /tmp/log # check",
+    "# note\ngit commit -F - <<'EOF'\nfix the guard\nEOF",
+];
+
+// ADR-0037/ADR-0043 (user decision 2026-10-15, K1): no comment is removed, so
+// a harness directory after a `#` is checked. Locked denied naming the
+// fragment, unlocked allowed; spec root and a temp repo.
 #[test]
-fn comments_after_whitespace_pass() {
-    let root = repo("comments_after_whitespace");
-    for command in COMMENTS_AFTER_WHITESPACE {
+fn comments_are_no_prose() {
+    let root = repo("comments_are_no_prose");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in COMMENTS_ARE_NO_PROSE {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15, K1): comments that name no harness
+// directory, or stand in a command that writes nothing, pass. Locked, spec
+// root and a temp repo.
+#[test]
+fn comments_that_need_no_removal_pass() {
+    let root = repo("comments_need_no_removal");
+    for command in COMMENTS_THAT_NEED_NO_REMOVAL {
         assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
         assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
     }
