@@ -61,8 +61,36 @@ pub(crate) fn check_rev_target_dir(root: &Path, cargo_target_dir: Option<&str>) 
 /// `cargo xtask check` in `worktree`, building into `target_dir`, which
 /// persists across checks so that OCCT is not rebuilt.
 pub(crate) fn check_command(worktree: &Path, target_dir: &Path) -> Command {
+    cargo(worktree, target_dir, &["xtask", "check"])
+}
+
+/// Builds the xtask of `worktree` into `target_dir` before the check runs it.
+/// GUI git clients such as Sourcetree quarantine every file their child
+/// processes create, and Gatekeeper refuses to start a quarantined xtask, so
+/// on macOS the attribute is removed from the built binary (ADR-0051).
+pub(crate) fn build_xtask(worktree: &Path, target_dir: &Path) -> Result<(), String> {
+    let status = cargo(worktree, target_dir, &["build", "--quiet", "--package", "xtask"])
+        .status()
+        .map_err(|e| format!("could not start cargo in {}: {e}", worktree.display()))?;
+    if !status.success() {
+        return Err(format!("build of xtask in {} failed ({status})", worktree.display()));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Without the attribute (no GUI client involved) `xattr -d` fails; nothing to do then.
+        let _ = Command::new("xattr")
+            .args(["-d", "com.apple.quarantine"])
+            .arg(target_dir.join("debug/xtask"))
+            .output();
+    }
+    Ok(())
+}
+
+/// `cargo` with `args` in `worktree`, building into `target_dir`, without the
+/// hook's [`GIT_ENV`].
+fn cargo(worktree: &Path, target_dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("cargo");
-    command.args(["xtask", "check"]).current_dir(worktree).env("CARGO_TARGET_DIR", target_dir);
+    command.args(args).current_dir(worktree).env("CARGO_TARGET_DIR", target_dir);
     for key in GIT_ENV {
         command.env_remove(key);
     }
