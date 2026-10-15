@@ -216,3 +216,75 @@ fn pre_push_checks_the_tip_of_each_pushed_ref_not_the_working_tree() {
         assert!(!bare, "pre-push runs `cargo xtask check` in the working tree: {line}");
     }
 }
+
+/// Why the hooks must strip the quarantine; part of every failure message.
+const QUARANTINE_REASON: &str = "ADR-0051: GUI git clients such as Sourcetree quarantine the \
+     xtask binary a hook builds, and Gatekeeper refuses to start it";
+
+/// The lines of a shell script that run, trimmed (comment and empty lines dropped).
+fn shell_code(script: &str) -> Vec<&str> {
+    script.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect()
+}
+
+// ADR-0051: each hook that runs xtask sources `lib.sh` before its first
+// `cargo xtask` line; `lib.sh` builds xtask and, on macOS only, removes
+// `com.apple.quarantine` from the built binary, after the build.
+#[test]
+fn hooks_build_xtask_and_strip_the_macos_quarantine_before_running_it() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    for hook in [".githooks/commit-msg", ".githooks/pre-push"] {
+        let text = fs::read_to_string(root.join(hook)).unwrap();
+        let code = shell_code(&text);
+        let source = code
+            .iter()
+            .position(|l| {
+                (l.starts_with("source ") || l.starts_with(". ")) && l.contains("/lib.sh")
+            })
+            .unwrap_or_else(|| panic!("{hook} does not source lib.sh ({QUARANTINE_REASON})"));
+        let first_xtask = code
+            .iter()
+            .position(|l| l.contains("cargo xtask"))
+            .unwrap_or_else(|| panic!("{hook} has no `cargo xtask` line"));
+        assert!(
+            source < first_xtask,
+            "{hook} must source lib.sh before its first `cargo xtask` line ({QUARANTINE_REASON})"
+        );
+    }
+
+    let lib = fs::read_to_string(root.join(".githooks/lib.sh")).unwrap();
+    let code = shell_code(&lib);
+    let build = code
+        .iter()
+        .position(|l| l.starts_with("cargo build") && l.contains("--package xtask"))
+        .unwrap_or_else(|| {
+            panic!(
+                "lib.sh must build xtask with `cargo build --package xtask` ({QUARANTINE_REASON})"
+            )
+        });
+    let binary = "\"${CARGO_TARGET_DIR:-target}/debug/xtask\"";
+    let strip = code
+        .iter()
+        .position(|l| l.starts_with("xattr -d com.apple.quarantine") && l.contains(binary))
+        .unwrap_or_else(|| {
+            panic!(
+                "lib.sh must remove com.apple.quarantine from {binary} with `xattr -d` \
+                 ({QUARANTINE_REASON})"
+            )
+        });
+    assert!(
+        build < strip,
+        "lib.sh must strip the quarantine after the build ({QUARANTINE_REASON})"
+    );
+    // The `xattr` call sits in an `if` on `uname` = Darwin that is still open:
+    // no `fi` between the guard and the call.
+    let guard = code[..strip]
+        .iter()
+        .rposition(|l| l.starts_with("if ") && l.contains("$(uname)") && l.contains("Darwin"))
+        .unwrap_or_else(|| {
+            panic!("lib.sh must guard the xattr call with a Darwin check ({QUARANTINE_REASON})")
+        });
+    assert!(
+        !code[guard + 1..strip].contains(&"fi"),
+        "the xattr call in lib.sh must sit inside the Darwin check ({QUARANTINE_REASON})"
+    );
+}
