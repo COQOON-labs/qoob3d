@@ -1,0 +1,13 @@
+# lib.sh reports a missing xtask binary on stdout instead of stderr, so the
+# hint that the quarantine was not removed is lost in the hook output (ADR-0051)
+command: cargo test -p xtask --quiet hooks_build_xtask_and_strip_the_macos_quarantine_before_running_it
+expect: writes nothing to stderr
+--- patch
+diff --git a/.githooks/lib.sh b/.githooks/lib.sh
+--- a/.githooks/lib.sh
++++ b/.githooks/lib.sh
+@@ -16,3 +16,3 @@
+   else
+-    echo "hooks: $xtask_binary not found, quarantine not removed" >&2
++    echo "hooks: $xtask_binary not found, quarantine not removed"
+   fi

@@ -6,7 +6,7 @@ expect: lib.sh must remove com.apple.quarantine
 diff --git a/.githooks/lib.sh b/.githooks/lib.sh
 --- a/.githooks/lib.sh
 +++ b/.githooks/lib.sh
-@@ -12,3 +12,2 @@
- if [ "$(uname)" = Darwin ]; then
--  xattr -d com.apple.quarantine "${CARGO_TARGET_DIR:-target}/debug/xtask" 2>/dev/null || true
- fi
+@@ -14,3 +14,2 @@
+   if [ -f "$xtask_binary" ]; then
+-    xattr -d com.apple.quarantine "$xtask_binary" 2>/dev/null || true
+   else
