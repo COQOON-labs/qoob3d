@@ -4778,3 +4778,115 @@ fn comments_that_need_no_removal_pass() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// A comment never makes the guard check less (critic findings on 2928a78,
+// regressions from K1; user decision 2026-10-15): wherever a `#` may start a
+// comment for the shell, the guard takes the reading that checks more. It
+// never removes or skips text because of a comment, and a comment never
+// hides a writer.
+// - L1: a `#` anywhere on the heredoc line (before or after `<<`) means no
+//   message form; the body stays shell text (for the shell `#<<EOF` is a
+//   comment, so the "body" lines run).
+// - L2: sed `w`/`e`, in-place editors and inline code count as writing if
+//   the quote-aware tokenizer finds them under either reading, with comments
+//   skipped or not (an odd quote in a comment shifts the quote state).
+// ---------------------------------------------------------------------------
+
+/// Heredoc lines with a `#`, so the shell may read no heredoc and run the
+/// "body", with the directory the denial must name. Must be denied in a
+/// locked session.
+const HASH_ON_THE_HEREDOC_LINE: &[(&str, &str)] = &[
+    // The finding's examples (L1 on 2928a78, user decision 2026-10-15).
+    ("git commit -F - #<<EOF\nrm -rf harness\nEOF", "harness"),
+    ("git commit -F - # <<EOF\nrm -rf harness\nEOF", "harness"),
+    ("gh pr create --title X --body-file - #<<EOF\nrm -rf xtask\nEOF", "xtask"),
+    // Derived: a comment after a backslash-newline before the marker (the
+    // shell joins the lines, so `# <<EOF` is a comment), a quoted marker.
+    ("git commit -F - \\\n# <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("git commit -F - #<<'EOF'\nrm -rf .claude\nEOF", ".claude"),
+    // Derived, denied conservatively and already since K1 (regression
+    // guards): a `#` after the marker (the shell reads a real heredoc there,
+    // but any `#` on the heredoc line keeps the body).
+    ("git commit -F - <<EOF #\nrm -rf xtask\nEOF", "xtask"),
+    ("git commit -m \"$(cat <<'EOF' # x\nrm -rf xtask\nEOF\n)\"", "xtask"),
+    // Derived, denied already before L1 (regression guards): the `$(cat` form
+    // (the comment ends `$(cat`, the lines run inside the substitution), the
+    // cat form.
+    ("git commit -m \"$(cat #<<'EOF'\nrm -rf xtask\nEOF\n)\"", "xtask"),
+    ("cat > /tmp/n #<<EOF\nrm -rf xtask\nEOF", "xtask"),
+];
+
+/// Writers after a comment with an odd quote, or between comments with
+/// balanced quotes, with the fragment the denial must name. Must be denied in
+/// a locked session.
+const WRITERS_AFTER_COMMENTS_WITH_QUOTES: &[(&str, &str)] = &[
+    // The finding's examples (L2 on 2928a78, user decision 2026-10-15).
+    ("# it's\nsed 's/a/b/w xtask/f' /tmp/in", "xtask/"),
+    ("# it's\ngsed '1e git stash push -- xtask' /tmp/in", "xtask"),
+    ("echo a # it's\nsed -n 'w xtask/f' /tmp/in", "xtask/"),
+    ("# it's\nsed 's/a/b/w xtask/f' /tmp/in # '", "xtask/"),
+    ("# say \"hi\nsed -n 'w xtask/f' /tmp/in", "xtask/"),
+    // Derived: a sed script file after a comment with an odd quote.
+    ("# it's\nsed -f /tmp/s.sed xtask/src/guard.rs", "xtask/"),
+    // Derived, denied already before L2 (regression guards, the task's probe
+    // list): in-place editors and inline code after a comment with an odd
+    // quote.
+    ("# '\nperl -pi -e s/a/b/ Cargo.toml", "Cargo.toml"),
+    ("# it's\nsed -i '' s/a/b/ clippy.toml", "clippy.toml"),
+    ("# it's\nruby -e 'File.write(%q(harness/x), 1)'", "harness/"),
+];
+
+/// Reads with a comment that holds an odd quote. Must pass in a locked
+/// session.
+const READS_WITH_QUOTES_IN_COMMENTS: &[&str] = &[
+    // The finding's examples (user decision 2026-10-15).
+    "sed -n 1p xtask/src/guard.rs # it's fine",
+    "# it's\nsed -n 1,5p harness/rules.md",
+    // Derived: a `"` in the comment, a print script after it.
+    "# say \"hi\nsed -n '/w x/p' xtask/src/guard.rs",
+];
+
+// ADR-0037/ADR-0043/ADR-0049 (critic finding L1 on 2928a78): a `#` on the
+// heredoc line keeps the body as shell text. Locked denied naming the
+// directory, unlocked allowed; spec root and a temp repo.
+#[test]
+fn a_hash_on_the_heredoc_line_keeps_the_body() {
+    let root = repo("hash_on_heredoc_line");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in HASH_ON_THE_HEREDOC_LINE {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037/ADR-0043 (critic finding L2 on 2928a78): a comment with quotes
+// does not hide a writer from the tokenizer. Locked denied naming the
+// fragment, unlocked allowed; spec root and a temp repo.
+#[test]
+fn comments_with_quotes_hide_no_writer() {
+    let root = repo("comments_hide_no_writer");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in WRITERS_AFTER_COMMENTS_WITH_QUOTES {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15): reads with quotes in a comment pass.
+// Locked, spec root and a temp repo.
+#[test]
+fn reads_with_quotes_in_comments_pass() {
+    let root = repo("reads_quotes_in_comments");
+    for command in READS_WITH_QUOTES_IN_COMMENTS {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}

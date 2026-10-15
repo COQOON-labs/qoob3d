@@ -1,0 +1,6 @@
+# Agent puts `#` before the heredoc operator: the shell reads `#<<EOF` as a
+# comment and runs the "body" lines, so a `#` on the heredoc line means no
+# message form (ADR-0037, ADR-0043, ADR-0049; critic finding L1 on 2928a78)
+command: cargo xtask guard
+expect: could modify the harness file `harness
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "git commit -F - #<<EOF\nrm -rf harness\nEOF"}, "hook_event_name": "PreToolUse"}
