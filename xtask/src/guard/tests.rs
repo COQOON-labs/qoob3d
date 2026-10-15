@@ -4315,3 +4315,150 @@ fn in_place_and_inline_code_count_inside_substitutions() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Backslash-newline in an unquoted heredoc body (critic finding G1 on 76ffdfc,
+// decided by the user 2026-10-15): bash and zsh remove backslash-newline in
+// the body of an unquoted marker before expansion, so `$\` + newline + `(`
+// is a command substitution. The rule "an unquoted body is data only without
+// `$(` and `${`" holds after joining backslash-newlines. Quoted markers keep
+// the body literal.
+// ---------------------------------------------------------------------------
+
+/// Unquoted heredoc bodies with a substitution split by backslash-newline,
+/// with the directory the denial must name. Must be denied in a locked
+/// session.
+const SPLIT_SUBSTITUTIONS_IN_UNQUOTED_BODIES: &[(&str, &str)] = &[
+    // The finding's examples (G1 on 76ffdfc, user decision 2026-10-15).
+    ("cat > /tmp/note.txt <<EOF\n$\\\n(rm -rf xtask)\nEOF", "xtask"),
+    ("git commit -F - <<EOF\nmsg\n$\\\n(rm -rf xtask)\nEOF", "xtask"),
+    // Derived: a split `${` around a split `$(`, a double continuation, the
+    // gh `--body-file -` form, `<<-` with a tab-indented line.
+    ("git commit -F - <<EOF\nmsg\n$\\\n{x:=$\\\n(rm -rf harness)}\nEOF", "harness"),
+    ("git commit -F - <<EOF\n$\\\n\\\n(rm -rf xtask)\nEOF", "xtask"),
+    ("gh pr create --title X --body-file - <<EOF\n$\\\n(rm -rf .claude)\nEOF", ".claude"),
+    ("cat > /tmp/n <<-EOF\n\t$\\\n(rm -rf xtask)\n\tEOF", "xtask"),
+];
+
+/// The same split bodies under a quoted marker (no expansion), and unquoted
+/// bodies with a continuation that forms no substitution. Must pass in a
+/// locked session.
+const SPLIT_BODIES_THAT_STAY_DATA: &[&str] = &[
+    // The finding's examples (user decision 2026-10-15).
+    "cat > /tmp/note.txt <<'EOF'\n$\\\n(rm -rf xtask)\nEOF",
+    "git commit -F - <<'EOF'\nmsg\n$\\\n(rm -rf xtask)\nEOF",
+    "git commit -F - <<EOF\nline one \\\ncontinued harness notes\nEOF",
+    // Derived: `"EOF"` and `\EOF` markers, a `$` at a line end without a
+    // backslash (the lines are not joined).
+    "git commit -F - <<\"EOF\"\nmsg\n$\\\n(rm -rf xtask)\nEOF",
+    "git commit -F - <<\\EOF\nmsg\n$\\\n{x:=$\\\n(rm -rf harness)}\nEOF",
+    "git commit -F - <<EOF\ncosts $\n(not a substitution) for the harness\nEOF",
+];
+
+// ADR-0037/ADR-0043/ADR-0049 (critic finding G1 on 76ffdfc): a substitution
+// split by backslash-newline in an unquoted body keeps the body as shell text.
+// Locked denied naming the directory, unlocked allowed; spec root and a temp
+// repo.
+#[test]
+fn split_substitutions_in_unquoted_heredoc_bodies_are_shell_text() {
+    let root = repo("split_substitutions");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in SPLIT_SUBSTITUTIONS_IN_UNQUOTED_BODIES {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15): split bodies under quoted markers and
+// continuations without a substitution stay data. Locked, spec root and a
+// temp repo.
+#[test]
+fn split_heredoc_bodies_without_substitution_stay_data() {
+    let root = repo("split_bodies_data");
+    for command in SPLIT_BODIES_THAT_STAY_DATA {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Terminators inside `$(…)` (critic finding G2 on 76ffdfc, decided by the
+// user 2026-10-15): inside `"$(cat <<'EOF'` bash ends the heredoc at a line
+// such as `EOF)` (only a warning), so the guard must not read the body past
+// it. A heredoc body with a line bash or zsh takes as its terminator, other
+// than the exact marker line, keeps the body as shell text (fail closed).
+// Probed in the test author's scratchpad with /bin/bash 3.2.57, Homebrew bash
+// 5.3.20, /bin/zsh 5.9 and /bin/sh, inside `x="$(cat <<'EOF'`: both bash
+// versions and sh end the heredoc at `EOF)`, `EOF )`, `EOF\t)`, `EOF  )`,
+// `EOFX)` and, under `<<-`, `\tEOF)`, for every marker spelling (`'EOF'`,
+// `"EOF"`, `\EOF`, unquoted); bash 3.2 also at ` EOF)` and at `\tEOF)` under
+// plain `<<`. None ends it at `EOF;`, `EOF #)` or `EOF\)`, and zsh at none
+// of them. Outside `$(…)` (`cat > f <<'EOF'` … `EOF)`) no shell ends it.
+// ---------------------------------------------------------------------------
+
+/// Message forms inside `$(…)` whose body has a line the shell takes as the
+/// terminator, followed by shell text, with the directory the denial must
+/// name. Must be denied in a locked session.
+const TERMINATORS_INSIDE_SUBSTITUTIONS: &[(&str, &str)] = &[
+    // The finding's examples (G2 on 76ffdfc, user decision 2026-10-15).
+    ("git commit -m \"$(cat <<'EOF'\nmsg\nEOF)\" ; rm -rf xtask ; echo \"\nEOF\n)\"", "xtask"),
+    ("git commit -m \"$(cat <<EOF\nmsg\nEOF)\" ; rm -rf xtask ; echo \"\nEOF\n)\"", "xtask"),
+    (
+        "gh pr create --title X --body \"$(cat <<'EOF'\nmsg\nEOF)\" ; rm -rf harness ; echo \
+         \"\nEOF\n)\"",
+        "harness",
+    ),
+    // Derived from the probe: every variant one of the shells accepts.
+    ("git commit -m \"$(cat <<'EOF'\nmsg\nEOF )\" ; rm -rf xtask ; echo \"\nEOF\n)\"", "xtask"),
+    ("git commit -m \"$(cat <<'EOF'\nmsg\nEOF\t)\" ; rm -rf xtask ; echo \"\nEOF\n)\"", "xtask"),
+    ("git commit -m \"$(cat <<'EOF'\nmsg\nEOF  )\" ; rm -rf xtask ; echo \"\nEOF\n)\"", "xtask"),
+    ("git commit -m \"$(cat <<'EOF'\nmsg\nEOFX)\" ; rm -rf xtask ; echo \"\nEOF\n)\"", "xtask"),
+    ("git commit -m \"$(cat <<-'EOF'\n\tmsg\n\tEOF)\" ; rm -rf xtask ; echo \"\nEOF\n)\"", "xtask"),
+    ("git commit -m \"$(cat <<\"EOF\"\nmsg\nEOF)\" ; rm -rf xtask ; echo \"\nEOF\n)\"", "xtask"),
+    ("git commit -m \"$(cat <<\\EOF\nmsg\nEOF)\" ; rm -rf xtask ; echo \"\nEOF\n)\"", "xtask"),
+    ("git commit -m \"$(cat <<'EOF'\nmsg\n EOF)\" ; rm -rf xtask ; echo \"\nEOF\n)\"", "xtask"),
+    ("git commit -m \"$(cat <<'EOF'\nmsg\n\tEOF)\" ; rm -rf xtask ; echo \"\nEOF\n)\"", "xtask"),
+];
+
+/// Bodies with `EOF)` that no shell takes as a terminator. Must pass in a
+/// locked session. (The existing message forms stay in their tables.)
+const MARKER_WORDS_THAT_END_NOTHING: &[&str] = &[
+    // The finding's example (user decision 2026-10-15).
+    "git commit -m \"$(cat <<'EOF'\nfix: EOF) handling in the harness\nEOF\n)\"",
+    // Derived from the probe: outside `$(…)` no shell ends the heredoc at
+    // `EOF)`.
+    "cat > /tmp/n <<'EOF'\nEOF)\nharness notes\nEOF",
+];
+
+// ADR-0037/ADR-0043/ADR-0049 (critic finding G2 on 76ffdfc): a body with a
+// line the shell takes as the terminator inside `$(…)` keeps the body as
+// shell text. Locked denied naming the directory, unlocked allowed; spec root
+// and a temp repo.
+#[test]
+fn heredoc_terminators_inside_substitutions_keep_the_body() {
+    let root = repo("terminators_inside_substitutions");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in TERMINATORS_INSIDE_SUBSTITUTIONS {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15): `EOF)` that ends no heredoc stays
+// data. Locked, spec root and a temp repo.
+#[test]
+fn marker_words_that_end_no_heredoc_stay_data() {
+    let root = repo("marker_words_end_nothing");
+    for command in MARKER_WORDS_THAT_END_NOTHING {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}

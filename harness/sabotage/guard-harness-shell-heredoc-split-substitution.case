@@ -1,0 +1,7 @@
+# Agent splits a command substitution with backslash-newline in an unquoted
+# heredoc body: the shell joins the lines before expansion, so the rule
+# "no `$(` and no `${`" holds after joining (ADR-0037, ADR-0043, ADR-0049;
+# critic finding G1 on 76ffdfc)
+command: cargo xtask guard
+expect: could modify the harness file `xtask
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "git commit -F - <<EOF\nmsg\n$\\\n(rm -rf xtask)\nEOF"}, "hook_event_name": "PreToolUse"}
