@@ -37,6 +37,10 @@ Every input cancels a running camera animation.
 | Right-click on a timeline entry | Edit / Delete | ✅ M3a |
 | 👁 in the browser | Show/hide sketch | ✅ M3a |
 
+A double click counts even right after a click elsewhere, where egui reports it as a triple
+click: code uses `navigation::double_clicked_by`, never `Response::double_clicked`; an entry
+that is already being edited ignores it.
+
 ## Sketching
 
 | Input | Action | Status |
