@@ -4049,3 +4049,269 @@ fn sed_scripts_that_only_read_pass() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// An unquoted heredoc marker expands the body (critic finding F1 on 445650c,
+// confirmed by the verifier; decided by the user 2026-10-15): bash and zsh
+// run `$(…)` and `${…}` in the body of `<<EOF` before git, gh or cat reads
+// it. A body under an unquoted marker (the marker word has no `'`, `"` or
+// `\`) is data only if it contains no `$(` and no `${`. Quoted markers
+// (`<<'EOF'`, `<<"EOF"`, `<<\EOF`, `<<E'O'F`, `<<-'EOF'`) keep the body
+// literal, so it stays data. `$NAME` and `$5` run nothing.
+// ---------------------------------------------------------------------------
+
+/// Message forms with an unquoted marker whose body has a command or
+/// parameter substitution, with the directory the denial must name. Must be
+/// denied in a locked session.
+const UNQUOTED_HEREDOC_SUBSTITUTIONS: &[(&str, &str)] = &[
+    // The finding's examples (F1 on 445650c, user decision 2026-10-15).
+    ("git commit --allow-empty -F - <<EOF\n$(rm -rf xtask)\nEOF", "xtask"),
+    ("cat > /tmp/note <<EOF\n$(rm -rf xtask)\nEOF", "xtask"),
+    ("git commit -m \"$(cat <<EOF\n$(rm -rf xtask)\nEOF\n)\"", "xtask"),
+    ("gh pr create --title X --body-file - <<EOF\n$(rm -rf xtask)\nEOF", "xtask"),
+    ("git commit -F - <<EOF\nfix\n${X:=$(rm -rf harness)}\nEOF", "harness"),
+    ("git commit -F - <<EOF\n$( rm -rf .claude )\nEOF", ".claude"),
+    // Derived: `<<-` unquoted with a tab-indented body, a substitution in
+    // the middle of a body line, `${` alone, a gh body form.
+    ("cat > /tmp/n <<-EOF\n\t$(rm -rf harness)\n\tEOF", "harness"),
+    ("git commit -F - <<EOF\nfix the guard $(rm -rf xtask) now\nEOF", "xtask"),
+    ("cat >> /tmp/n <<EOF\n${HOME}\nrm -rf xtask\nEOF", "xtask"),
+    ("gh issue create --title X --body \"$(cat <<EOF\n$(rm -rf .github)\nEOF\n)\"", ".github"),
+];
+
+/// Quoted markers keep a substitution in the body literal; an unquoted body
+/// with `$NAME` or `$5` expands no command. Must pass in a locked session.
+const QUOTED_HEREDOC_SUBSTITUTIONS: &[&str] = &[
+    // The finding's examples (user decision 2026-10-15).
+    "git commit -F - <<'EOF'\n$(rm -rf xtask)\nEOF",
+    "git commit -F - <<\"EOF\"\n$(rm -rf xtask)\nEOF",
+    "git commit -F - <<\\EOF\n$(rm -rf xtask)\nEOF",
+    "git commit -F - <<EOF\nfix the harness, costs $5 and $HOME\nEOF",
+    // Derived: the other quoted spellings of the decision, the PR body form
+    // with a quoted marker, `${` under a quoted marker.
+    "git commit -F - <<E'O'F\n$(rm -rf xtask)\nEOF",
+    "cat > /tmp/n <<-'EOF'\n\t$(rm -rf harness)\n\tEOF",
+    "gh pr create --title X --body \"$(cat <<'EOF'\n$(rm -rf xtask)\nEOF\n)\"",
+    "cat > /tmp/n <<'EOF'\n${X:=$(rm -rf harness)}\nEOF",
+];
+
+// ADR-0037/ADR-0043/ADR-0049 (critic finding F1 on 445650c): a body under an
+// unquoted marker with `$(` or `${` is shell text. Locked denied naming the
+// directory, unlocked allowed; spec root and a temp repo.
+#[test]
+fn unquoted_heredoc_bodies_with_substitutions_are_shell_text() {
+    let root = repo("unquoted_heredoc_substitutions");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in UNQUOTED_HEREDOC_SUBSTITUTIONS {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15): quoted markers keep substitutions in
+// the body literal, `$NAME` runs nothing. Locked, spec root and a temp repo.
+#[test]
+fn quoted_heredoc_bodies_with_substitutions_stay_data() {
+    let root = repo("quoted_heredoc_substitutions");
+    for command in QUOTED_HEREDOC_SUBSTITUTIONS {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// The cat target is literal (implementer finding F2 on 445650c, decided by
+// the user 2026-10-15): the shell expands `$`, `*`, `?`, `[`, `{` and
+// backticks in a redirection target, so `/de?/stdout` or `$TTY` can be a
+// device. A target with one of them keeps the body as shell text. `~` is no
+// device and stays allowed.
+// ---------------------------------------------------------------------------
+
+/// cat heredocs whose target the shell expands, with the directory the
+/// denial must name. Must be denied in a locked session.
+const CAT_TARGETS_THE_SHELL_EXPANDS: &[(&str, &str)] = &[
+    // The finding's examples (F2 on 445650c, user decision 2026-10-15).
+    // `/tmp/{a,b}` was denied already before F2: a `{` in the target is no
+    // file redirection of the safe shape.
+    ("cat > /de?/stdout <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("cat > $TTY <<EOF\nxtask\nEOF", "xtask"),
+    ("cat > /tmp/{a,b} <<EOF\nxtask\nEOF", "xtask"),
+    ("cat > /d[e]v/stdout <<EOF\nxtask\nEOF", "xtask"),
+    ("cat > /tmp/x* <<EOF\nxtask\nEOF", "xtask"),
+    // Derived: `${…}` (denied already before F2 by its `{`), the target
+    // after the marker, `>>`, a backtick (already fail closed as an
+    // unmodelled construct).
+    ("cat > ${TTY} <<EOF\nharness\nEOF", "harness"),
+    ("cat <<EOF > /de?/stdout\nxtask\nEOF", "xtask"),
+    ("cat >> /tmp/n* <<EOF\nharness\nEOF", "harness"),
+    ("cat > /tmp/`echo x` <<EOF\nxtask\nEOF", "xtask"),
+];
+
+/// cat heredocs to a literal target. Must pass in a locked session.
+const CAT_LITERAL_TARGETS: &[&str] = &[
+    // The finding's examples (user decision 2026-10-15).
+    "cat > /tmp/note.md <<EOF\nharness\nEOF",
+    "cat > ~/notes/x.md <<EOF\nharness\nEOF",
+    // Derived: digits and dashes, the target after the marker with `>>`.
+    "cat > /tmp/notes-2026.md <<EOF\nxtask\nEOF",
+    "cat <<EOF >> /tmp/note.md\nharness\nEOF",
+];
+
+// ADR-0037/ADR-0043/ADR-0049 (implementer finding F2 on 445650c): a cat
+// target the shell expands keeps the body as shell text. Locked denied naming
+// the directory, unlocked allowed; spec root and a temp repo.
+#[test]
+fn cat_heredoc_targets_must_be_literal() {
+    let root = repo("cat_targets_expanded");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in CAT_TARGETS_THE_SHELL_EXPANDS {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15): a literal cat target, also under `~`,
+// stays data. Locked, spec root and a temp repo.
+#[test]
+fn cat_heredocs_to_literal_targets_stay_data() {
+    let root = repo("cat_literal_targets");
+    for command in CAT_LITERAL_TARGETS {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// A sed script the guard cannot read is a writer (implementer finding F3 on
+// 445650c, decided by the user 2026-10-15): a script from a file (`-f`,
+// `--file`, `--file=`), a script word the shell expands (`$` outside single
+// quotes, a backtick, `$'…'`), or the xargs/find placeholder `{}` as the
+// script may hold `w file` or `e command`.
+// ---------------------------------------------------------------------------
+
+/// sed with a script that is no literal, naming a harness path, with the
+/// fragment the denial must name. Must be denied in a locked session.
+const SED_SCRIPTS_NOT_LITERAL: &[(&str, &str)] = &[
+    // The finding's examples (F3 on 445650c, user decision 2026-10-15).
+    // `"${W} xtask/f"` was denied already before F3: as literal text it reads
+    // as `$` `{` and the command `W` with the file `} xtask/f`.
+    ("sed -n $'\\x77 xtask/f' /tmp/in", "xtask/"),
+    ("x=w; sed -n \"$x xtask/f\" /tmp/in", "xtask/"),
+    ("sed -n \"${W} xtask/f\" /tmp/in", "xtask/"),
+    ("sed -n \"$(echo w) xtask/f\" /tmp/in", "xtask/"),
+    ("sed -f /tmp/s.sed xtask/src/guard.rs", "xtask/"),
+    ("sed --file=/tmp/s.sed harness/rules.md", "harness/"),
+    ("echo 'w xtask/f' | xargs -I{} sed -n {} /tmp/in", "xtask/"),
+    // Derived: `--file` with a separate argument, `-f` in a flag group, an
+    // expanded `-e` script, an unquoted variable as the whole script on a
+    // harness file, a backtick script, gsed by path.
+    ("sed --file /tmp/s.sed Cargo.toml", "Cargo.toml"),
+    ("sed -nf /tmp/s.sed xtask/src/guard.rs", "xtask/"),
+    ("sed -e \"$x\" harness/rules.md", "harness/"),
+    ("sed -n $x xtask/src/guard.rs", "xtask/"),
+    ("sed -n \"`echo w` xtask/f\" /tmp/in", "xtask/"),
+    ("/opt/homebrew/bin/gsed -f /tmp/s.sed .github/workflows/ci.yml", ".github/"),
+];
+
+/// sed with a literal script that only prints: `$` as the last-line address
+/// inside single quotes, an escaped `$` in a regex, a double-quoted script
+/// without `$`. Must pass in a locked session.
+const SED_LITERAL_READS: &[&str] = &[
+    // The finding's examples (user decision 2026-10-15).
+    "sed -n '$p' xtask/src/guard.rs",
+    "sed -n '1,$p' harness/rules.md",
+    "sed -n \"1,10p\" xtask/src/guard.rs",
+    "sed -n '/\\$x/p' xtask/src/guard.rs",
+    // Derived: `$=` (line count), several `-e` scripts with `$`.
+    "sed -n '$=' xtask/src/guard.rs",
+    "sed -n -e '$p' -e 1p harness/rules.md",
+];
+
+// ADR-0037/ADR-0043 (implementer finding F3 on 445650c): a sed script from a
+// file, expanded by the shell or given as `{}` is a writer. Locked denied
+// naming the fragment, unlocked allowed; spec root and a temp repo.
+#[test]
+fn sed_scripts_that_are_not_literal_are_writers() {
+    let root = repo("sed_scripts_not_literal");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in SED_SCRIPTS_NOT_LITERAL {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(spec_shell(true, command), Ok(()), "{command:?} (unlocked)");
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15): a literal sed script that only prints
+// passes, also with `$` addresses in single quotes. Locked, spec root and a
+// temp repo.
+#[test]
+fn sed_literal_reads_pass() {
+    let root = repo("sed_literal_reads");
+    for command in SED_LITERAL_READS {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// In-place editors and inline-code interpreters inside substitutions and
+// subshells (implementer finding F4 on 445650c, decided by the user
+// 2026-10-15): the programs of IN_PLACE and INLINE_CODE count also as the
+// first word inside `$(…)`, backticks and `(…)`.
+// ---------------------------------------------------------------------------
+
+/// In-place edits and inline code inside a substitution or subshell, with the
+/// fragment the denial must name. Must be denied in a locked session.
+const IN_PLACE_IN_SUBSTITUTIONS: &[(&str, &str)] = &[
+    // The finding's examples (F4 on 445650c, user decision 2026-10-15).
+    ("echo $(sed -i '' s/a/b/ Cargo.toml)", "Cargo.toml"),
+    ("echo `sed -i '' s/a/b/ Cargo.toml`", "Cargo.toml"),
+    ("(sed -i '' s/a/b/ clippy.toml)", "clippy.toml"),
+    ("x=$(perl -pi -e s/a/b/ xtask/src/main.rs)", "xtask/"),
+    ("echo \"$(ruby -e 'File.write(%q(harness/x), 1)')\"", "harness/"),
+    // Derived: sed by path in a substitution (denied already before F4: the
+    // path's last component is `sed`), gsed in a subshell, gsed's
+    // long option, awk's inplace, node and a shell with inline code in a
+    // substitution, a nested substitution.
+    ("echo $(/usr/bin/sed -i '' s/a/b/ deny.toml)", "deny.toml"),
+    ("(gsed -i s/a/b/ rustfmt.toml)", "rustfmt.toml"),
+    ("echo $(gsed --in-place s/a/b/ harness/rules.md)", "harness/"),
+    ("echo $(gawk -i inplace 1 Cargo.toml)", "Cargo.toml"),
+    ("x=$(node -e 1 xtask/tool.js)", "xtask/"),
+    ("x=$(bash -c 'git clean -fdx xtask')", "xtask"),
+    ("echo $(echo $(sed -i '' s/a/b/ Cargo.toml))", "Cargo.toml"),
+];
+
+// ADR-0037/ADR-0043 (implementer finding F4 on 445650c): in-place editors and
+// inline-code interpreters count inside `$(…)`, backticks and subshells.
+// Locked denied naming the fragment, unlocked allowed; spec root and a temp
+// repo. `echo $(sed -n 1p Cargo.toml)` only prints and passes.
+#[test]
+fn in_place_and_inline_code_count_inside_substitutions() {
+    let root = repo("in_place_in_substitutions");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in IN_PLACE_IN_SUBSTITUTIONS {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(spec_shell(true, command), Ok(()), "{command:?} (unlocked)");
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    for command in ["echo $(sed -n 1p Cargo.toml)", "echo `sed -n 1p Cargo.toml`"] {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}

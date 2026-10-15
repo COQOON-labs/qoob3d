@@ -1,0 +1,6 @@
+# Agent builds sed's `w` command from a variable: a script the shell
+# expands is not literal, so sed counts as writing (ADR-0037, ADR-0043;
+# implementer finding F3 on 445650c)
+command: cargo xtask guard
+expect: could modify the harness file `xtask/
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "x=w; sed -n \"$x xtask/f\" /tmp/in"}, "hook_event_name": "PreToolUse"}
