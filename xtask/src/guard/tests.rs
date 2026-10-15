@@ -5135,3 +5135,108 @@ fn rewrites_without_a_harness_path_pass() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Writers inside subshells and substitutions, `git worktree`, and roles that
+// ignore case (critic findings P1/P2 on 0b27154 and implementer finding P3,
+// user decision 2026-10-15):
+// - P1: the deletion and rewrite writers (find with an action, every git
+//   subcommand that rewrites the work tree or index) count also inside
+//   `(…)`, `$(…)` and backticks, like in-place editors and inline code
+//   (ADR-0049 decision 6).
+// - P3: `git worktree` counts as a git writer.
+// - P2: role separation classifies paths ignoring case (`tests.RS` is a test
+//   file).
+// ---------------------------------------------------------------------------
+
+/// Deletions and git rewrites inside a subshell or substitution, and `git
+/// worktree`, naming a harness path, with the fragment the denial must name.
+/// Must be denied in a locked session.
+const WRITERS_INSIDE_SUBSHELLS: &[(&str, &str)] = &[
+    // The finding's examples (P1 on 0b27154, user decision 2026-10-15).
+    ("(git clean -fdx xtask)", "xtask"),
+    ("$(find harness -delete)", "harness"),
+    ("(git stash -- harness/rules.md)", "harness/"),
+    ("`git reset --hard` harness", "harness"),
+    ("(git switch other) harness", "harness"),
+    ("(find xtask -exec true {} +)", "xtask"),
+    ("(git -C . clean -fdx xtask)", "xtask"),
+    ("echo $(git rebase -X subtree=harness main)", "harness"),
+    // P3 (implementer finding, user decision 2026-10-15) and derived:
+    // `worktree remove`, a global option before `worktree`, inside `$(…)`.
+    ("git worktree add xtask/wt", "xtask/"),
+    ("git worktree remove harness/wt", "harness/"),
+    ("git -C . worktree add .claude/wt", ".claude/"),
+    ("x=$(git worktree add xtask/wt)", "xtask/"),
+];
+
+/// Reads inside subshells and substitutions, and `git worktree list`. Must
+/// pass in a locked session.
+const READS_INSIDE_SUBSHELLS: &[&str] = &[
+    // The finding's example (P3).
+    "git worktree list",
+    // Derived: find without an action and a git read in a subshell and a
+    // substitution.
+    "(find xtask -name '*.rs')",
+    "echo $(git log -1 -- harness)",
+    "(git status -- xtask)",
+];
+
+// ADR-0037/ADR-0043/ADR-0049 (critic finding P1 on 0b27154, implementer
+// finding P3): deletion and rewrite writers count inside subshells and
+// substitutions; `git worktree` is a writer. Locked denied naming the
+// fragment, unlocked allowed; spec root and a temp repo.
+#[test]
+fn writers_inside_subshells_and_git_worktree_are_writers() {
+    let root = repo("writers_inside_subshells");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in WRITERS_INSIDE_SUBSHELLS {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15): reads inside subshells and `git
+// worktree list` pass. Locked, spec root and a temp repo.
+#[test]
+fn reads_inside_subshells_pass() {
+    let root = repo("reads_inside_subshells");
+    for command in READS_INSIDE_SUBSHELLS {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0039 (critic finding P2 on 0b27154): role separation ignores case. An
+// implementer writing `tests.RS` is denied like `tests.rs`; a test author
+// writing `Foo.RS` below `src/` is denied like production code; each may
+// write its own kind in upper case.
+#[test]
+fn roles_classify_paths_ignoring_case() {
+    let root = repo("roles_ignore_case");
+    let s = locked();
+    let implementer =
+        |rel: &str| write("Write", &abs(&root, rel), "s", Some("i1"), Some("implementer"));
+    let author = |rel: &str| write("Edit", &abs(&root, rel), "s", Some("t1"), Some("test-author"));
+    for test in ["crates/qoob3d-core/src/foo/tests.RS", "crates/qoob3d-core/TESTS/expr.rs"] {
+        assert_denied(
+            pre_tool_use(&root, &s, &implementer(test)),
+            &["This agent context already writes production code;", "`test-author`"],
+            &format!("implementer on {test}"),
+        );
+        assert_eq!(pre_tool_use(&root, &s, &author(test)), Ok(()), "test-author on {test}");
+    }
+    for code in ["crates/qoob3d-core/src/Foo.RS", "CRATES/qoob3d-core/src/foo.rs"] {
+        assert_denied(
+            pre_tool_use(&root, &s, &author(code)),
+            &["This agent context already writes tests;", "`implementer`"],
+            &format!("test-author on {code}"),
+        );
+        assert_eq!(pre_tool_use(&root, &s, &implementer(code)), Ok(()), "implementer on {code}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}

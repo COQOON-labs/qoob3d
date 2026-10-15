@@ -192,6 +192,17 @@ fn parses_name_status() {
     assert!(parse_name_status("").is_empty());
 }
 
+// ADR-0030 (critic finding P2 on 0b27154, user decision 2026-10-15): the
+// fixture directory is matched ignoring case, as macOS file systems do.
+#[test]
+fn fixtures_are_matched_ignoring_case() {
+    for path in
+        ["crates/qoob3d-core/tests/Fixtures/v1.qbd", "CRATES/qoob3d-core/TESTS/FIXTURES/V1.QBD"]
+    {
+        assert_eq!(check_files(&files(&[("M", path)]), "Edit").len(), 1, "{path}");
+    }
+}
+
 // ADR-0030/ADR-0039: renaming a fixture away is caught via both parsed paths.
 #[test]
 fn renamed_fixture_is_rejected() {

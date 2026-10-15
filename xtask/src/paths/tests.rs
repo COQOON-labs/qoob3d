@@ -337,3 +337,38 @@ fn workflow_step_parser() {
     assert_eq!(workflow_step(workflow, "Two"), Some(vec!["      - name: Two", "        run: z"]));
     assert_eq!(workflow_step(workflow, "Three"), None);
 }
+
+// ADR-0039 (critic finding P2 on 0b27154, user decision 2026-10-15): `kind`
+// ignores case like `is_harness`, because macOS file systems do: an
+// upper-case extension, file name or directory names the same file, so a
+// test file stays a test and production code stays code.
+#[test]
+fn kind_ignores_case() {
+    for path in [
+        // The finding's examples.
+        "crates/qoob3d-core/src/foo/tests.RS",
+        "crates/qoob3d-core/tests/fixtures/X.QBD",
+        // Derived: the file name, the test directory, the source tree, the
+        // models oracle, the proptest directory.
+        "crates/qoob3d-core/src/foo/Tests.rs",
+        "crates/qoob3d-core/TESTS/document.rs",
+        "Crates/qoob3d-core/tests/expr.rs",
+        "MODELS/gear.EXPECT.JSON",
+        "crates/qoob3d-core/Proptest-Regressions/expr.txt",
+    ] {
+        assert_eq!(kind(path), Kind::Test, "{path}");
+    }
+    for path in [
+        // The finding's example.
+        "crates/qoob3d-core/src/Foo.RS",
+        // Derived: the source tree, xtask, a C++ header, the vendored forks.
+        "CRATES/qoob3d-core/src/foo.rs",
+        "Xtask/src/Main.Rs",
+        "crates/qoob3d-kernel/cpp/qoob3d_occt.HXX",
+        "Third_Party/opencascade/src/lib.rs",
+    ] {
+        assert_eq!(kind(path), Kind::Code, "{path}");
+    }
+    // Outside the source trees an upper-case extension stays `Other`.
+    assert_eq!(kind("docs/X.RS"), Kind::Other);
+}
