@@ -4656,3 +4656,75 @@ fn comments_after_parameter_expansions_pass() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// A `#` starts a comment only after whitespace (implementer finding J1 on the
+// I1 code, decided by the user 2026-10-15): in zsh a `(` or `|` inside a glob
+// group (`(#i)`, `(#qN)`, `x(|#)`) starts no comment, so the command after it
+// runs. Fail closed: a `#` starts a comment only at the start of a line or
+// directly after unquoted whitespace, never directly after `;`, `|`, `&`,
+// `(` or `)`, in both scanners (prose removal and the tokenizer of the sed
+// and in-place rules).
+// ---------------------------------------------------------------------------
+
+/// A `#` glued to `;|&()`, followed by a harness write, with the fragment the
+/// denial must name. Must be denied in a locked session.
+const HASH_GLUED_TO_A_SEPARATOR: &[(&str, &str)] = &[
+    // The finding's examples (J1, user decision 2026-10-15).
+    ("setopt nonomatch; echo (#i)XA ; rm -rf xtask", "xtask"),
+    ("setopt extendedglob; echo xa(#qN) ; rm -rf xtask", "xtask"),
+    ("setopt nonomatch; echo x(|#) ; rm -rf xtask", "xtask"),
+    // Derived (named by the task): `(#)`, `|#`, the sed `w` rule behind
+    // `(#)`, and `;#`, which bash reads as a comment but the fail-closed rule
+    // does not.
+    ("echo x(#) ; rm -rf harness", "harness"),
+    ("echo a|#b ; rm -rf .claude", ".claude"),
+    ("echo x(#) ; sed 's/a/b/w xtask/f' /tmp/in", "xtask/"),
+    ("true;#x ; rm -rf xtask", "xtask"),
+    // Derived: `&#`, and the in-place rule behind `(#)` (denied already
+    // before J1, a regression guard).
+    ("true&#x ; rm -rf xtask", "xtask"),
+    ("echo x(#) ; sed -i '' s/a/b/ Cargo.toml", "Cargo.toml"),
+];
+
+/// Real comments at a line start or after whitespace, also right after a
+/// separator and a space. Must pass in a locked session.
+const COMMENTS_AFTER_WHITESPACE: &[&str] = &[
+    // The task's examples.
+    "echo done > /tmp/x; # xtask and harness",
+    "echo done > /tmp/x # harness",
+    "# note\necho done",
+    // Derived: a comment line naming a harness directory before a write, a
+    // comment after `|` and a space, after a tab.
+    "# clean up the harness\necho done > /tmp/x",
+    "echo done | # xtask\ntee /tmp/x",
+    "echo done > /tmp/x\t# harness",
+];
+
+// ADR-0037/ADR-0043 (implementer finding J1): a `#` glued to `;|&()` starts no
+// comment, so the command after it is checked. Locked denied naming the
+// fragment, unlocked allowed; spec root and a temp repo.
+#[test]
+fn hash_glued_to_a_separator_starts_no_comment() {
+    let root = repo("hash_glued_to_separator");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in HASH_GLUED_TO_A_SEPARATOR {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15): comments at a line start or after
+// whitespace stay comments. Locked, spec root and a temp repo.
+#[test]
+fn comments_after_whitespace_pass() {
+    let root = repo("comments_after_whitespace");
+    for command in COMMENTS_AFTER_WHITESPACE {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
