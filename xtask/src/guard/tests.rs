@@ -5052,3 +5052,86 @@ fn find_and_git_reads_pass() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// More deletions and rewrites without a writer word (implementer finding O1
+// on a1314f6, user decision 2026-10-15): `rm` as the last word or before
+// `;|&)` (`… | xargs rm`), `rmdir`, `shred`, and the git subcommands that
+// rewrite the work tree or index — `switch`, `rebase`, `merge`, `pull`,
+// `cherry-pick`, `revert`, `am`, `read-tree`, `checkout-index`,
+// `update-index`, `sparse-checkout`, `submodule`, also after global options
+// (`git -C .`) — count as writers, so the harness check runs. Only shapes
+// that name a harness path are asserted: without one there is nothing to
+// deny.
+// ---------------------------------------------------------------------------
+
+/// Deletions and work-tree rewrites naming a harness path, with the fragment
+/// the denial must name. Must be denied in a locked session.
+const MORE_DELETIONS_AND_REWRITES: &[(&str, &str)] = &[
+    // The finding's examples (O1, user decision 2026-10-15).
+    ("find xtask -type f | xargs rm", "xtask"),
+    ("rmdir harness/x", "harness/"),
+    ("find harness -type f | xargs shred", "harness"),
+    ("git -C . checkout-index -f -- xtask/src/guard.rs", "xtask/"),
+    ("git update-index --assume-unchanged xtask/src/guard.rs", "xtask/"),
+    ("git sparse-checkout set harness", "harness"),
+    ("git submodule add ../x xtask/sub", "xtask/"),
+    ("git am --directory=harness /tmp/p.mbox", "harness"),
+    // Derived: `rm` before `;` and after `xargs -0`, `shred` and `rmdir`
+    // directly, and per remaining subcommand a realistic shape naming a
+    // harness path (a subtree strategy option, a read-tree prefix, a switch
+    // run from a harness directory).
+    ("echo xtask | xargs rm;", "xtask"),
+    ("find harness -name '*.md' -print0 | xargs -0 rm", "harness"),
+    ("shred -u Cargo.toml", "Cargo.toml"),
+    ("rmdir .github/x", ".github/"),
+    ("git merge -X subtree=harness other", "harness"),
+    ("git pull -s subtree -X subtree=xtask origin main", "xtask"),
+    ("git cherry-pick -X subtree=harness abc123", "harness"),
+    ("git revert -X subtree=xtask HEAD", "xtask"),
+    ("git rebase -X subtree=harness main", "harness"),
+    ("git read-tree --prefix=xtask/ HEAD", "xtask/"),
+    ("git -C xtask switch main", "xtask"),
+];
+
+/// Work-tree commands that name no harness path, and reads of harness
+/// directories. Must pass in a locked session.
+const REWRITES_WITHOUT_A_HARNESS_PATH: &[&str] = &[
+    // The finding's examples (user decision 2026-10-15).
+    "git switch main",
+    "git merge --ff-only origin/main",
+    "git log -- xtask",
+    "ls harness | wc -l",
+    // Derived: pull, rebase and submodule without a harness path.
+    "git pull --ff-only",
+    "git rebase main",
+    "git submodule status",
+];
+
+// ADR-0037/ADR-0043 (implementer finding O1): `rm` at the end, rmdir, shred
+// and the git work-tree rewrites are writers. Locked denied naming the
+// fragment, unlocked allowed; spec root and a temp repo.
+#[test]
+fn more_deletions_and_rewrites_are_writers() {
+    let root = repo("more_deletions_rewrites");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in MORE_DELETIONS_AND_REWRITES {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15): rewrites without a harness path and
+// reads of harness directories pass. Locked, spec root and a temp repo.
+#[test]
+fn rewrites_without_a_harness_path_pass() {
+    let root = repo("rewrites_without_harness_path");
+    for command in REWRITES_WITHOUT_A_HARNESS_PATH {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}

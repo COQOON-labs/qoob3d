@@ -1,0 +1,17 @@
+# `cargo xtask commits` reads `git diff-tree` without `-z` again: git quotes a
+# non-ASCII, tab, `"` or `\` path, the quoted name is no test or code path,
+# and a commit mixing tests and code passes (ADR-0039; critic finding N3 on
+# 0600f48)
+command: cargo test -p xtask --quiet check_range_sees_mixing_under_quoted_paths
+expect: check_range_sees_mixing_under_quoted_paths
+--- patch
+diff --git a/xtask/src/commits.rs b/xtask/src/commits.rs
+--- a/xtask/src/commits.rs
++++ b/xtask/src/commits.rs
+@@ -146,5 +146,5 @@
+         // `-z`: paths unquoted, as they are (git quotes non-ASCII, tab, `"`, `\`).
+         let args =
+-            ["diff-tree", "--root", "--no-commit-id", "-r", "--name-status", "-M", "-z", sha];
++            ["diff-tree", "--root", "--no-commit-id", "-r", "--name-status", "-M", sha];
+         let listing = git(root, &args).map_err(|e| vec![e])?;
+         let files = parse_name_status(&listing);
