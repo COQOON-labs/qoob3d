@@ -167,7 +167,9 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    arithmetic `((` (its assignments, `$((IFS=1))`), zsh's parameter flags `${(…)}`
    (`${(e)x}` evaluates), `${…@…}` (bash's `@P` prompt expansion runs `$(…)`), `printf
    -v`, and an assignment on its own to a name with an upper-case letter (`PATH`, `IFS`)
-   or to zsh's tied arrays (`path`, `fpath` …). Anything else is denied (`ed`, `vim -es`,
+   or to zsh's tied arrays (`path`, `fpath` …), and an unquoted `(` glued to a word, a zsh
+   glob qualifier or group that can run code (`*(e:'…':)`, `x(#qe:…:)`; `$(` and a
+   subshell after a blank are none). Anything else is denied (`ed`, `vim -es`,
    `git archive -o`, `cmake -E`, `unzip`, `php -r` were missed by a list of writers). This
    replaces the writer list of decisions 5 to 7: the sed rules of decision 5 now decide
    whether a sed only reads; the programs of decisions 6 and 7 are simply no reads.
@@ -190,8 +192,10 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    unit tests in `tests.rs`) and conflicts with every role (a context without an agent
    type is denied rather than bound to both). So does a source-tree path with a glob or
    brace in any component, unless a literal `tests` directory (or `models`) comes before
-   it. Only unquoted `*?[{` make a pattern. With a file redirection, a heredoc or a lost
-   sed, every word of the command counts as a possible path, split at blanks; the
+   it. Only unquoted `*?[{` make a pattern. Assignments on their own stay in the path
+   lists of a command that is no pure read (`d=…/fixtures; rm -rf $d`). With a file
+   redirection, a heredoc, a zsh glob qualifier or a lost sed, every word of the command
+   counts as a possible path, split at blanks; the
    tokenizer skips heredoc bodies (to their terminator) and takes their words literally.
 
 ## Consequences

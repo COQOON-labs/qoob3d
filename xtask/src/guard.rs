@@ -246,6 +246,7 @@ fn pure_read(command: &str) -> bool {
         && !(command.contains("${") && command.contains('@'))
         && !redirects_to_file(command)
         && !has_heredoc(command)
+        && !has_qualifier(command)
         && !hides_sed(command, &commands)
         && commands.iter().all(|words| reads(words))
 }
@@ -268,6 +269,12 @@ fn has_heredoc(command: &str) -> bool {
             .iter()
             .any(|(operator, _)| operator.starts_with("<<") && !operator.starts_with("<<<"))
     })
+}
+
+/// `command` has a zsh glob qualifier or group in either comment reading
+/// ([`Tokens`]): no [`pure_read`], and every word counts as a path.
+fn has_qualifier(command: &str) -> bool {
+    [false, true].into_iter().any(|comments| simple_commands(command, comments).qualifier)
 }
 
 /// A simple command that only reads: nothing but assignments (their
@@ -358,7 +365,10 @@ fn check_shell_paths(root: &Path, input: &Value, command: &str) -> Result<(), St
     }
     let text = if models_prose(command) { without_prose(command) } else { command.to_owned() };
     let commands = both_readings(&text);
-    let every = redirects_to_file(&text) || has_heredoc(&text) || hides_sed(&text, &commands);
+    let every = redirects_to_file(&text)
+        || has_heredoc(&text)
+        || has_qualifier(&text)
+        || hides_sed(&text, &commands);
     let targets: Vec<Word> = [false, true]
         .into_iter()
         .filter(|_| every)
@@ -370,7 +380,8 @@ fn check_shell_paths(root: &Path, input: &Value, command: &str) -> Result<(), St
     // is a pattern of the shell.
     let lists: Vec<Vec<(&str, bool)>> = commands
         .iter()
-        .filter(|words| every || !reads(words))
+        // Assignments stay: `d=…/fixtures; rm -rf $d`.
+        .filter(|words| every || !reads(words) || words.iter().all(|w| is_assignment(&w.text)))
         .chain([&targets])
         .map(|words| {
             words.iter().flat_map(|w| w.text.split_whitespace().map(|p| (p, w.pattern))).collect()
@@ -912,7 +923,8 @@ struct Word {
 /// comment never hides a command (ADR-0049). Each word records where it starts
 /// in `command`.
 fn simple_commands(command: &str, comments: bool) -> Tokens {
-    let (mut commands, mut words, mut targets) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut commands, mut words, mut targets, mut qualifier) =
+        (Vec::new(), Vec::new(), Vec::new(), false);
     // The word being read, and the operator whose target it is.
     let (mut word, mut target): (Option<Word>, Option<String>) = (None, None);
     // Open quotes and substitutions, innermost last: `'`, `"`, `$` for
@@ -941,6 +953,8 @@ fn simple_commands(command: &str, comments: bool) -> Tokens {
             word.get_or_insert_default().expanded = true;
         }
         if substitution || separator {
+            // An unquoted `(` glued to a word: a zsh glob qualifier or group.
+            qualifier |= c == '(' && word.is_some();
             let word = word.take().map(|w| Word { start, ..w });
             end_word(&mut words, &mut targets, word, &mut target, matches!(c, '<' | '>'));
         }
@@ -970,9 +984,7 @@ fn simple_commands(command: &str, comments: bool) -> Tokens {
                         chars.next();
                         open.push('(');
                     }
-                    (_, Some('`')) => {
-                        open.pop();
-                    }
+                    (_, Some('`')) => _ = open.pop(),
                     _ => open.push('`'),
                 }
             }
@@ -1020,15 +1032,17 @@ fn simple_commands(command: &str, comments: bool) -> Tokens {
     let word = word.map(|w| Word { start, ..w });
     end_word(&mut words, &mut targets, word, &mut target, false);
     commands.push(words);
-    Tokens { commands, targets }
+    Tokens { commands, targets, qualifier }
 }
 
 /// What [`simple_commands`] reads from a command: its simple commands as
-/// words, and its redirections as operator (`>`, `>>`, `2>`'s `>`, `>&`, `<<`)
-/// and target word.
+/// words, its redirections as operator (`>`, `>>`, `2>`'s `>`, `>&`, `<<`)
+/// and target word, and whether an unquoted `(` is glued to a word: a zsh
+/// glob qualifier or group (`*(e:'…':)`, `x(#qe:…:)`) can run code.
 struct Tokens {
     commands: Vec<Vec<Word>>,
     targets: Vec<(String, Word)>,
+    qualifier: bool,
 }
 
 /// A redirection writes a file: an operator with `>` (also `<>`, `>|`) to a
