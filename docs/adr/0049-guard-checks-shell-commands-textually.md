@@ -27,18 +27,18 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    harness fragment counts at the start of a token, after a `./` that starts a token, or right
    after the repository root (ADR-0043 decision 3). A detour through `..` in a shell command
    (`rm -rf missing/../xtask`) is a known gap, like the `cd xtask && …` indirection.
-2. **Comments and heredoc bodies of the safe shape are data:** a bare harness directory
-   name in them is no path. A path with its slash (`xtask/…`) still counts everywhere. A
-   comment starts only at an unquoted `#` at the start of a line or directly after unquoted
-   whitespace, never glued to `;`, `|`, `&`, `(` or `)` (fail closed: bash reads `true;#x`
-   as a comment, but zsh starts none in `(#i)XA` or `x(|#)`), so `$(true)#`, `\ #` and
-   `'a'#` start none either; and never inside an open `${…}`, also nested and inside double
-   quotes or `$(…)` (`${x:- #}` is one word). A heredoc body is
-   data only when its logical line (comments removed, backslash-newlines joined) has a
-   single heredoc and nothing after `<<MARKER` (also `<<-`, `<<'M'`, `<<"M"`) but at most
-   one output redirection to a file (`> path`, `>> path`). Anything else after the marker
+2. **Comments are not removed; heredoc bodies of the safe shape are data:** a bare harness
+   directory name in such a body is no path. A path with its slash (`xtask/…`) still counts
+   everywhere. Comments are checked like any other words, also `#harness`: every rule for
+   where the shell starts a comment was bypassable, because the guard's scanner and the
+   shell disagreed on it (`${x:- #}` is one word, zsh starts no comment in `(#i)XA`,
+   `x(|#)` or the glob group `x(a| #)`, and an odd quote across lines shifts the quote
+   state). A heredoc body is data only when its logical line (backslash-newlines joined)
+   has a single heredoc and nothing after `<<MARKER` (also `<<-`, `<<'M'`, `<<"M"`) but at
+   most one output redirection to a file (`> path`, `>> path`). Anything else after the marker
    (a pipe, `;`, `&&`, `&`, a subshell or brace group, `>(…)`, a second redirection,
-   another word) keeps the body as shell text, so `cat <<EOF | tee /tmp/x` is checked too.
+   another word, also a comment) keeps the body as shell text, so `cat <<EOF | tee /tmp/x`
+   is checked too.
 3. **Only the exact message forms make a body data**, where the body ends up in a message
    or a file and never runs (programs also by path):
    - `git commit` / `git tag` reading it with `-F -` (`--file=-`, `--file -`), or as
@@ -68,8 +68,8 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    reader programs, whose other subcommands read a heredoc as paths, config or code.
 
    **The message form stands alone:** the whole Bash command is the message-form command.
-   Outside comments and blank lines there is nothing before the heredoc's logical line
-   (backslash-newline joins lines) and nothing after the terminator line. For the
+   Nothing but blank lines comes before the heredoc's logical line (backslash-newline joins
+   lines) and after the terminator line; a comment line is not blank. For the
    `"$(cat <<'EOF'` forms the closing line `)"` may follow, optionally with further plain
    arguments on that line (closed quotes; no `;`, `&`, `|`, `<`, `>`, `(`, `)`, backtick,
    `$` or backslash). Otherwise the body is shell text. A command before the heredoc can
@@ -93,13 +93,13 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    So inside `$(…)` the body is data only if no body line before the terminator starts,
    after optional blanks and tabs, with the marker word (fail closed). Outside `$(…)` no
    shell does this and nothing changes.
-4. **Fail closed:** comments and heredoc bodies are removed only when the guard models
-   every construct of the command. A command that contains anywhere a backtick, ANSI-C
+4. **Fail closed:** heredoc bodies are removed only when the guard models every construct
+   of the command. A command that contains anywhere a backtick, ANSI-C
    quoting `$'`, a redirection with `&` (`|&`, `>&`, `&>`, `<&`, so also `2>&1` and `>&2`), or
    arithmetic `((` (also `$((`, whose `<<` is a shift and whose `$(…)` runs) keeps its prose:
-   every word is checked, as if there were no comments or heredocs. The same holds when any
-   heredoc keeps its body as shell text or has no terminator: the quote and comment tracking
-   cannot follow a body (`it's`), so no comment and no other body is removed. A heredoc
+   every word is checked, as if there were no heredocs. The same holds when any heredoc
+   keeps its body as shell text or has no terminator: the quote tracking cannot follow a
+   body (`it's`), so no other body is removed. A heredoc
    inside a compound command (`{` newline `cat <<EOF` … `}` `| bash`) never stands alone
    (decision 3), so its body is shell text. Rare spellings are denied rather than parsed;
    the word rules (`xtask:`, the cargo exceptions) still apply.
@@ -109,12 +109,12 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    other flags, any delimiter), or GNU's command `e` or `e` flag of `s`, which runs a shell
    command. A script is the first non-option argument before any `-e`/`-f` (BSD sed's
    script) and the `-e`/`--expression` arguments joined by newlines. The command is split
-   into words quote-aware (quotes, backslashes, comments, redirections, `$(…)` and
-   backticks also inside double quotes), and the script is read with the grammar of BSD
-   and GNU sed: a `w`/`e` in a regex, replacement, `a`/`i`/`c` text, `y` list or label is
-   none. The regex is read twice, with and without BSD's bracket expressions (in BSD sed
-   `s/[/]/x/` has the regex `[/]`), and either reading counts. A syntax error ends the
-   scan, because sed then runs nothing.
+   into words quote-aware (quotes, backslashes, `${…}`, redirections, `$(…)` and backticks
+   also inside double quotes; a comment's words are words too), and the script is read
+   with the grammar of BSD and GNU sed: a `w`/`e` in a regex, replacement, `a`/`i`/`c`
+   text, `y` list or label is none. The regex is read twice, with and without BSD's
+   bracket expressions (in BSD sed `s/[/]/x/` has the regex `[/]`), and either reading
+   counts. A syntax error ends the scan, because sed then runs nothing.
 
    **A script the guard cannot read counts as writing:** a script file (`-f`, `--file`,
    `--file=`, also in a group like `-nf`), a script word the shell expands (a `$` outside
@@ -150,6 +150,8 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
   command into separate Bash calls.
 - sed with a script file or an expanded script is denied next to a harness path even when
   the script only reads; agents write the script literally in the command.
+- Rare false alarms: a writing command that names a harness directory only in a comment
+  (`echo done > /tmp/x # harness`) is denied. Agents drop the comment or split the command.
 - Clarifies ADR-0043 decision 4 without changing it for Edit/Write.
 
 ## Rejected alternatives
@@ -158,6 +160,10 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
   each word or which words are paths; collapsing text would invent paths and still miss `cd`.
 - **Checking every heredoc body:** denies ordinary commit messages and notes that name the
   harness, which pushes agents towards workarounds.
+- **Removing comments where the shell starts one:** each refinement (word start, not
+  inside `${…}`, only after whitespace) was followed by another construct where the
+  scanner saw a comment and the shell did not (zsh glob groups `x(a| #)`). The cost of
+  checking comments is a rare false alarm.
 - **Parsing the rare constructs too** (backticks, `$'…'`, `|&`, pipelines continued after the
   body over comment and blank lines): each one was a way to hide a harness write behind
   "prose", and every parser addition is a new place for such a gap. Denying them costs little.
@@ -173,6 +179,7 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
   `guard-harness-shell-heredoc-{tee,cat-stderr,device,not-alone}.case`,
   `guard-harness-shell-heredoc-{unquoted-substitution,cat-target-glob}.case`,
   `guard-harness-shell-heredoc-{split-substitution,paren-terminator}.case`,
+  `guard-harness-shell-hash-in-glob-group.case`,
   `guard-harness-shell-sed-{write,execute,expanded-script,script-file}.case`,
   `guard-harness-shell-in-place-in-substitution.case`
 - Related: ADR-0037, ADR-0043

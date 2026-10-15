@@ -124,7 +124,8 @@ Crate-specific pitfalls are in the respective `crates/<crate>/CLAUDE.md`.
   (ADR-0039, `xtask hygiene`).
 - **The guard blocks shell commands** that name a harness path of this repository (token
   start, `./`, repo root) and could write (`>`, `sed -i`, `cp` …; `2>/dev/null`, `>/dev/null`,
-  `&>/dev/null` and `2>&1` do not count); also any command naming
+  `&>/dev/null` and `2>&1` do not count); a harness directory named in a comment of a
+  writing command counts too (ADR-0049); also any command naming
   `QOOB3D_HARNESS_UNLOCK`/`QOOB3D_SKIP_REVIEW`. Then run the command with a different target,
   or edit with Edit/Write.
 - **Never change fixtures** under `crates/qoob3d-core/tests/fixtures/`. New format version →
@@ -154,6 +155,10 @@ Crate-specific pitfalls are in the respective `crates/<crate>/CLAUDE.md`.
 
 ## Open items
 
+- **OS sandbox for the harness** (agreed 2026-10-15): the shell guard is a textual speed
+  bump (ADR-0049); write-protect `xtask/`, `harness/`, `.claude/`, `.github/`, `.githooks/`
+  with Claude Code's sandbox (Seatbelt/bubblewrap) in an own ADR. Open: how the human unlock
+  maps to it, whether cargo/OCCT build/git hooks work inside the sandbox.
 - **Set up the GitHub wall** (ADR-0037, `docs/harness.md`): ruleset for `main` with
   required checks, CODEOWNERS, separate identity for agents without merge rights. Until then,
   CI is only as strong as the rights the agent pushes with.
