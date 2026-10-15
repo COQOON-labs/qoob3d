@@ -1,0 +1,5 @@
+# Agent deletes the guard hook script with unlink, a deletion without a
+# listed writer word (ADR-0037, ADR-0043; critic finding N1 on 0600f48)
+command: cargo xtask guard
+expect: could modify the harness file `.claude/
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "unlink .claude/hooks/guard.sh"}, "hook_event_name": "PreToolUse"}

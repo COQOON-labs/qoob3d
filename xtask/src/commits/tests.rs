@@ -369,3 +369,90 @@ fn check_range_without_identity_file_fails() {
     );
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Paths git quotes (critic finding N3 on 0600f48, user decision 2026-10-15):
+// with `core.quotePath` (git's default) `git diff-tree --name-status` prints
+// a non-ASCII, tab, `"` or `\` path in C quotes (`"crates/…/\303\244.rs"`).
+// `cargo xtask commits` must classify such a path as the file it names. The
+// repositories set `core.quotePath=true` locally, so a global `false` cannot
+// hide the case; a space is never quoted and is a regression guard.
+// ---------------------------------------------------------------------------
+
+/// A repository whose git quotes unusual paths, with `harness/identity.txt`
+/// naming Alice committed.
+fn quoting_repo(test: &str) -> PathBuf {
+    let root = git_repo(test);
+    git_in(&root, &[], &["config", "core.quotePath", "true"]);
+    fs::create_dir_all(root.join("harness")).unwrap();
+    fs::write(root.join(IDENTITY_FILE), "Alice <alice@example.com>\n").unwrap();
+    commit_files(&root, &[], "Add the identity");
+    root
+}
+
+/// Appends a line to each of `files` (creating parent directories) and
+/// commits everything as Alice.
+fn commit_files(root: &Path, files: &[&str], message: &str) {
+    for file in files {
+        let path = root.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let old = fs::read_to_string(&path).unwrap_or_default();
+        fs::write(&path, format!("{old}{file}\n")).unwrap();
+    }
+    git_in(root, &[], &["add", "-A"]);
+    let env = [
+        ("GIT_AUTHOR_NAME", "Alice"),
+        ("GIT_AUTHOR_EMAIL", "alice@example.com"),
+        ("GIT_COMMITTER_NAME", "Alice"),
+        ("GIT_COMMITTER_EMAIL", "alice@example.com"),
+    ];
+    git_in(root, &env, &["commit", "-q", "-m", message]);
+}
+
+// ADR-0039 (critic finding N3 on 0600f48): a commit with a test and a
+// production file is mixed also when git quotes one of the names (non-ASCII,
+// tab, `"`, `\`, a quoted test file name); a space is never quoted (control).
+#[test]
+fn check_range_sees_mixing_under_quoted_paths() {
+    let root = quoting_repo("quoted_mixing");
+    for (i, (test, code)) in [
+        ("crates/qoob3d-core/tests/q0.rs", "crates/qoob3d-core/src/\u{e4}.rs"),
+        ("crates/qoob3d-core/tests/q1.rs", "crates/qoob3d-core/src/a\tb.rs"),
+        ("crates/qoob3d-core/tests/q2.rs", "crates/qoob3d-core/src/\"q\".rs"),
+        ("crates/qoob3d-core/tests/q3.rs", "crates/qoob3d-core/src/a\\b.rs"),
+        ("crates/qoob3d-core/tests/\u{e4}.rs", "crates/qoob3d-core/src/plain.rs"),
+        ("crates/qoob3d-core/tests/q5.rs", "crates/qoob3d-core/src/a b.rs"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        commit_files(&root, &[test, code], &format!("Change {i}"));
+        let Err(problems) = check_range(&root, &["HEAD~1..HEAD".to_owned()]) else {
+            panic!("{test:?} + {code:?}: passed, expected a mixed commit");
+        };
+        assert!(
+            problems.iter().any(|p| p.contains("changes tests and production code together")),
+            "{test:?} + {code:?}: {problems:?}"
+        );
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0030 (critic finding N3 on 0600f48): a fixture with a non-ASCII name may
+// be added but not modified; the problem names the real path.
+#[test]
+fn check_range_sees_modified_fixtures_under_quoted_paths() {
+    let root = quoting_repo("quoted_fixture");
+    let fixture = "crates/qoob3d-core/tests/fixtures/\u{e4}.qbd";
+    commit_files(&root, &[fixture], "Add a fixture");
+    assert_eq!(check_range(&root, &["HEAD~1..HEAD".to_owned()]), Ok(()));
+    commit_files(&root, &[fixture], "Modify the fixture");
+    let Err(problems) = check_range(&root, &["HEAD~1..HEAD".to_owned()]) else {
+        panic!("{fixture:?}: modified fixture passed");
+    };
+    assert!(
+        problems.iter().any(|p| p.contains(&format!("fixture {fixture} modified/deleted"))),
+        "{problems:?}"
+    );
+    fs::remove_dir_all(&root).unwrap();
+}

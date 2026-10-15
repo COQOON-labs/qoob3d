@@ -232,3 +232,69 @@ fn f5_minor_never_blocks() {
         assert!(problems.is_empty(), "{f}: {problems:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Paths git quotes (critic finding N3 on 0600f48, user decision 2026-10-15):
+// `git log --name-only` prints a non-ASCII, tab, `"` or `\` path in C quotes
+// under `core.quotePath` (git's default, set locally here so a global `false`
+// cannot hide the case). `cargo xtask review` must still see a production
+// code change and require a critic record.
+// ---------------------------------------------------------------------------
+
+/// Runs git as Alice in `root` without global/system config or signing (a
+/// fresh repository has no active hooks).
+fn git_in(root: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .current_dir(root)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Alice")
+        .env("GIT_AUTHOR_EMAIL", "alice@example.com")
+        .env("GIT_COMMITTER_NAME", "Alice")
+        .env("GIT_COMMITTER_EMAIL", "alice@example.com")
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+/// A fresh repository with `core.quotePath=true` and one commit of `file`.
+fn repo_with_commit(test: &str, file: &str) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!("qoob3d-review-{test}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    git_in(&root, &["init", "-q", "-b", "main"]);
+    git_in(&root, &["config", "core.quotePath", "true"]);
+    let path = root.join(file);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "fn f() {}\n").unwrap();
+    git_in(&root, &["add", "-A"]);
+    git_in(&root, &["commit", "-q", "-m", "Add code"]);
+    root
+}
+
+// ADR-0041 (critic finding N3 on 0600f48): a code change whose path git quotes
+// needs a critic record like any other. The plain name and the name with a
+// space (never quoted) are controls that the setup reaches the check.
+#[test]
+fn quoted_code_paths_need_a_critic_record() {
+    for (i, file) in [
+        "crates/qoob3d-core/src/plain.rs",
+        "crates/qoob3d-core/src/a b.rs",
+        "crates/qoob3d-core/src/\u{e4}.rs",
+        "crates/qoob3d-core/src/a\tb.rs",
+        "crates/qoob3d-core/src/\"q\".rs",
+        "crates/qoob3d-core/src/a\\b.rs",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let root = repo_with_commit(&format!("quoted_{i}"), file);
+        let Err(problems) = check(&root, "HEAD", &["HEAD".to_owned()]) else {
+            panic!("{file:?}: passed without a critic record");
+        };
+        assert!(problems.iter().any(|p| p.contains("no critic review")), "{file:?}: {problems:?}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}

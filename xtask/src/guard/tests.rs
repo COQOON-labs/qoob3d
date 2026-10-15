@@ -4972,3 +4972,83 @@ fn sed_reads_in_command_positions_pass() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Deletions without a listed writer word (critic finding N1 on 0600f48,
+// pre-existing; user decision 2026-10-15): `unlink`, `find` with an action
+// primary of FIND_ACTIONS (`-delete`, `-exec`/`-execdir`, `-ok`/`-okdir`,
+// `-fprint*`, `-fls`), `git clean`, `git stash` (any subcommand, also bare)
+// and `git reset` remove or rewrite files, so they count as writers and the
+// harness check runs. A reset without a path names no harness path and stays
+// out of a text check.
+// ---------------------------------------------------------------------------
+
+/// Deletions and git rewrites naming a harness path, with the fragment the
+/// denial must name. Must be denied in a locked session.
+const DELETIONS_WITHOUT_A_WRITER_WORD: &[(&str, &str)] = &[
+    // The finding's examples (N1 on 0600f48, user decision 2026-10-15).
+    ("unlink .claude/hooks/guard.sh", ".claude/"),
+    ("find .claude/hooks -delete", ".claude/"),
+    ("find .claude/hooks -name guard.sh -exec unlink {} +", ".claude/"),
+    ("git clean -fdx xtask", "xtask"),
+    ("git stash push -- xtask/src/guard.rs", "xtask/"),
+    ("find xtask -delete", "xtask"),
+    ("unlink harness/rules.md", "harness/"),
+    // Derived (named by the task): find by path, a global option before
+    // `clean`, `git reset` with a harness path.
+    ("/usr/bin/find harness -delete", "harness"),
+    ("git -C . clean -f harness", "harness"),
+    ("git reset -- xtask/src/guard.rs", "xtask/"),
+    // Derived: bare `git stash` with a pathspec, the other find actions,
+    // unlink by path.
+    ("git stash -- harness/rules.md", "harness/"),
+    ("find .githooks -okdir unlink {} \\;", ".githooks"),
+    ("find xtask -execdir true {} +", "xtask"),
+    ("find harness -fprint /tmp/list", "harness"),
+    ("/bin/unlink Cargo.toml", "Cargo.toml"),
+    // Derived, denied already before N1 (regression guards): `git rm` and
+    // `git mv` contain the writer words `rm ` and `mv `.
+    ("git rm xtask/src/guard.rs", "xtask/"),
+    ("git mv harness /tmp/h", "harness"),
+];
+
+/// Reads of harness paths with find and git. Must pass in a locked session.
+const FIND_AND_GIT_READS: &[&str] = &[
+    // The finding's examples (user decision 2026-10-15).
+    "find xtask -name '*.rs'",
+    "find harness -type f | wc -l",
+    "git stash list",
+    "git status -- xtask",
+    "git log -- harness",
+    // Derived: find with a print primary, git diff of a harness file.
+    "find .claude -print",
+    "git diff -- xtask/src/guard.rs",
+];
+
+// ADR-0037/ADR-0043 (critic finding N1 on 0600f48): unlink, find actions,
+// git clean/stash/reset are writers. Locked denied naming the fragment,
+// unlocked allowed; spec root and a temp repo.
+#[test]
+fn deletions_without_a_writer_word_are_writers() {
+    let root = repo("deletions_without_writer_word");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in DELETIONS_WITHOUT_A_WRITER_WORD {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15): find without an action and git reads
+// pass. Locked, spec root and a temp repo.
+#[test]
+fn find_and_git_reads_pass() {
+    let root = repo("find_and_git_reads");
+    for command in FIND_AND_GIT_READS {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
