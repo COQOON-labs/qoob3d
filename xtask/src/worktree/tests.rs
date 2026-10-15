@@ -289,6 +289,37 @@ fn hooks_build_xtask_and_strip_the_macos_quarantine_before_running_it() {
     );
 }
 
+// ADR-0037, ADR-0051: each hook sets `set -euo pipefail` itself as its first
+// executed line (after shebang and comments), before it sources `lib.sh`. If
+// errexit came only from `lib.sh`, a failing `source` (missing or broken file)
+// would leave the hook running without errexit, and a failing check would no
+// longer stop the commit or push: the wall would fail open.
+#[test]
+fn hooks_set_errexit_themselves_before_sourcing_lib_sh() {
+    const REASON: &str = "a failing `source` of lib.sh must stop the hook; errexit set only \
+         inside lib.sh is lost when sourcing fails, and the wall must not fail open";
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    for hook in [".githooks/commit-msg", ".githooks/pre-push"] {
+        let text = fs::read_to_string(root.join(hook)).unwrap();
+        let code = shell_code(&text);
+        assert_eq!(
+            code.first().copied(),
+            Some("set -euo pipefail"),
+            "{hook}: the first executed line must be `set -euo pipefail` ({REASON})"
+        );
+        let source = code
+            .iter()
+            .position(|l| {
+                (l.starts_with("source ") || l.starts_with(". ")) && l.contains("/lib.sh")
+            })
+            .unwrap_or_else(|| panic!("{hook} does not source lib.sh ({REASON})"));
+        assert!(
+            source > 0,
+            "{hook} must set `set -euo pipefail` before sourcing lib.sh ({REASON})"
+        );
+    }
+}
+
 // ADR-0051: before the check, `check-rev` builds the xtask of the worktree
 // with `cargo build --quiet --package xtask`, in the worktree, into the shared
 // target dir (the one the check uses, so the check reuses this build), and
