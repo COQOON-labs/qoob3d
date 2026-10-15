@@ -135,6 +135,10 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    recognised as the first word inside `$(…)`, backticks and `(…)` subshells, using the
    same quote-aware split into simple commands as decision 5. `echo $(sed -n 1p f)` only
    reads and passes.
+7. **Deletions count as writers without a writer word:** `unlink` (also by path), `find`
+   (also by path) with an action primary (`-delete`, `-exec`/`-execdir`, `-ok`/`-okdir`,
+   `-fprint…`, `-fls`), and `git clean`, `git stash`, `git reset` (with `checkout`,
+   `restore` and `apply`), also after git's global options (`git -C . clean`).
 
 ## Consequences
 

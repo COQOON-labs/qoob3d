@@ -18,10 +18,11 @@ pub(crate) const RECORD_DIR: &str = "target/critic";
 
 /// Requires a record for `tip` if any commit in `rev_list_args` changes production code.
 pub(crate) fn check(root: &Path, tip: &str, rev_list_args: &[String]) -> Result<(), Vec<String>> {
-    let mut args = vec!["log", "--format=", "--name-only"];
+    // `-z`: paths unquoted, as they are (git quotes non-ASCII, tab, `"`, `\`).
+    let mut args = vec!["log", "--format=", "--name-only", "-z"];
     args.extend(rev_list_args.iter().map(String::as_str));
     let changed = git(root, &args).map_err(|e| vec![e])?;
-    if !changed.lines().any(|f| paths::kind(f) == Kind::Code) {
+    if !changed.split('\0').any(|f| paths::kind(f) == Kind::Code) {
         return Ok(());
     }
     let tree = git(root, &["rev-parse", &format!("{tip}^{{tree}}")]).map_err(|e| vec![e])?;

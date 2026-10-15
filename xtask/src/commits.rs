@@ -90,7 +90,8 @@ pub(crate) fn read_allowed_identity(root: &Path) -> Result<String, String> {
 }
 
 /// Problems with the files of one commit: `(status, path)` pairs as printed by
-/// `git diff-tree --name-status` (renames contribute both paths).
+/// `git diff-tree --name-status` ([`parse_name_status`]; renames contribute both
+/// paths).
 pub(crate) fn check_files(files: &[(String, String)], message: &str) -> Vec<String> {
     let mut problems = Vec::new();
     let kinds: Vec<Kind> = files.iter().map(|(_, p)| paths::kind(p)).collect();
@@ -142,9 +143,10 @@ pub(crate) fn check_range(root: &Path, rev_list_args: &[String]) -> Result<(), V
         let author = lines.next().unwrap_or_default();
         let committer = lines.next().unwrap_or_default();
         let message = lines.next().unwrap_or_default();
-        let listing =
-            git(root, &["diff-tree", "--root", "--no-commit-id", "-r", "--name-status", "-M", sha])
-                .map_err(|e| vec![e])?;
+        // `-z`: paths unquoted, as they are (git quotes non-ASCII, tab, `"`, `\`).
+        let args =
+            ["diff-tree", "--root", "--no-commit-id", "-r", "--name-status", "-M", "-z", sha];
+        let listing = git(root, &args).map_err(|e| vec![e])?;
         let files = parse_name_status(&listing);
 
         let found = check_identity("author", author, &allowed)
@@ -157,13 +159,21 @@ pub(crate) fn check_range(root: &Path, rev_list_args: &[String]) -> Result<(), V
     if problems.is_empty() { Ok(()) } else { Err(problems) }
 }
 
-/// `M\tpath`, `A\tpath`, `R100\told\tnew` → `(status, path)` per path.
+/// `(status, path)` per path of a `--name-status` listing; a rename or copy
+/// (`R100`, `C75`) contributes both paths. With `-z` every field ends with a
+/// NUL (`M\0path\0R100\0old\0new\0`) and paths may hold tabs and newlines;
+/// without, fields end with a tab or newline (`M\tpath\nR100\told\tnew\n`).
 pub(crate) fn parse_name_status(listing: &str) -> Vec<(String, String)> {
+    let fields: Vec<&str> = if listing.contains('\0') {
+        listing.split('\0').collect()
+    } else {
+        listing.split(['\t', '\n']).collect()
+    };
+    let mut fields = fields.into_iter().filter(|f| !f.is_empty());
     let mut files = Vec::new();
-    for line in listing.lines() {
-        let mut cols = line.split('\t');
-        let Some(status) = cols.next() else { continue };
-        files.extend(cols.map(|path| (status.to_string(), path.to_string())));
+    while let Some(status) = fields.next() {
+        let paths = if status.starts_with(['R', 'C']) { 2 } else { 1 };
+        files.extend(fields.by_ref().take(paths).map(|p| (status.to_owned(), p.to_owned())));
     }
     files
 }

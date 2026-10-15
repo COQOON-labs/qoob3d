@@ -4,7 +4,10 @@
 //!   `QOOB3D_HARNESS_UNLOCK=1` ([`Session::unlocked`]); the unlock lifts nothing else,
 //! - files that can set the environment of the hooks, and `.git/`, are never
 //!   written, so that no agent can unlock itself; a shell command naming `.git`
-//!   is denied unless it only reads or names `.git` only to exclude it,
+//!   is denied unless it only reads or names `.git` only to exclude it. Limit
+//!   (ADR-0043): an unlocked session may change the guard itself (`guard.rs`,
+//!   `.claude/hooks/guard.sh`, the project `.claude/settings.json`); the
+//!   owner's review covers that,
 //! - format fixtures are never modified,
 //! - one agent context writes either tests or production code, never both,
 //! - shell commands must not bypass the git hooks or write harness files; a
@@ -177,6 +180,12 @@ const READ_ONLY: &[&str] = &[
 ];
 /// Prefixes of the `find` primaries that write or run something.
 const FIND_ACTIONS: &[&str] = &["-exec", "-ok", "-delete", "-fprint", "-fls"];
+/// git subcommands that remove or rewrite files in the work tree ([`writes`]);
+/// `checkout`, `restore` and `apply` also as text in [`WRITES`].
+const GIT_WRITES: &[&str] = &["clean", "stash", "reset", "checkout", "restore", "apply"];
+/// git's global options that take the next word as their argument.
+const GIT_GLOBAL_ARGUMENTS: &[&str] =
+    &["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env", "--exec-path"];
 
 /// What the guard knows besides the hook input.
 pub(crate) struct Session {
@@ -637,12 +646,23 @@ fn file_name_positions<'a>(command: &'a str, name: &'a str) -> impl Iterator<Ite
 }
 
 /// A lower-cased command that (may) write files; in-place editors and
-/// inline-code interpreters in [`runs_with_flag`] need the case.
+/// inline-code interpreters in [`runs_with_flag`] need the case. Also `find`
+/// (also by path) with an action ([`FIND_ACTIONS`]) and the git subcommands of
+/// [`GIT_WRITES`], also after global options (`git -C . clean`).
 fn writes(command: &str) -> bool {
     WRITES.iter().any(|w| command.contains(w))
         || command
             .split(|c: char| !(c.is_ascii_alphanumeric() || "_-".contains(c)))
-            .any(|w| w == "dd" || w == "install")
+            .any(|w| matches!(w, "dd" | "install" | "unlink"))
+        || segments(command).any(|segment| {
+            let mut words = segment.split_whitespace();
+            words.any(|w| program_name(w) == "find") && runs_find_action(words)
+        })
+        || segments(command).any(|segment| {
+            let mut words = segment.split_whitespace();
+            words.any(|w| program_name(w) == "git")
+                && git_subcommand(words).is_some_and(|sub| GIT_WRITES.contains(&sub))
+        })
         || runs_with_option(command, &["curl"], 'o', &["--output", "--remote-name"])
         || runs_with_option(command, &["tar"], 'x', &["--extract"])
         || runs_with_option(command, &["git", "config"], 'f', &["--file"])
@@ -652,6 +672,24 @@ fn writes(command: &str) -> bool {
             words.any(|w| w == "tar")
                 && words.next().is_some_and(|w| !w.starts_with('-') && w.contains('x'))
         })
+}
+
+/// One of the `words` after `find` is an action primary ([`FIND_ACTIONS`]).
+fn runs_find_action<'a>(mut words: impl Iterator<Item = &'a str>) -> bool {
+    words.any(|w| FIND_ACTIONS.iter().any(|a| w.starts_with(a)))
+}
+
+/// The subcommand in the `words` after `git`: the first word that is no
+/// global option or argument of one (`git -C . clean` → `clean`).
+fn git_subcommand<'a>(mut words: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    while let Some(word) = words.next() {
+        if GIT_GLOBAL_ARGUMENTS.contains(&word) {
+            words.next();
+        } else if !word.starts_with('-') {
+            return Some(word);
+        }
+    }
+    None
 }
 
 /// A program of `table` ([`IN_PLACE`], [`INLINE_CODE`]), also by path,
@@ -1214,7 +1252,7 @@ fn reads_only(segment: &str) -> bool {
             matches!(w.split_once('=').map_or(w, |(name, _)| name), "--pre" | "--pre-glob")
         }),
         Some("uniq") => words.filter(|w| !w.starts_with('-')).count() <= 1,
-        Some("find") => !words.any(|w| FIND_ACTIONS.iter().any(|a| w.starts_with(a))),
+        Some("find") => !runs_find_action(words),
         Some("git") => words.next() == Some("rev-parse"),
         Some(program) => READ_ONLY.contains(&program),
         None => false,
