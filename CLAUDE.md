@@ -100,7 +100,9 @@ needed (rustup is installed keg-only via Homebrew).
 Crate-specific pitfalls are in the respective `crates/<crate>/CLAUDE.md`.
 
 - **CMake ≥ 4** needs `CMAKE_POLICY_VERSION_MINIMUM=3.5` (`.cargo/config.toml`). Do not remove.
-- **Changing `[profile.dev.package."*"]`** triggers a complete OCCT rebuild (~4 min).
+- **OCCT is built once into `target/OCCT`** and skipped while the pinned version is installed
+  (ADR-0050). After compiler, flag or profile changes that should reach OCCT, delete
+  `target/OCCT` (rebuild ~4 min).
 - **eframe 0.36:** the entry point is `App::ui(&mut self, ui, frame)`. For synthetic
   input there is `App::raw_input_hook`.
 - **egui deadlock:** no `Response`/`ctx` calls inside `ui.input(|i| …)`. In debug builds egui
