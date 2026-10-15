@@ -80,9 +80,10 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    no `'`, `"` or `\`) the body is data only if it contains no `$(` and no `${`; an escaped
    `\$(` counts too. Quoted markers (`<<'EOF'`, `<<"EOF"`, `<<\EOF`, `<<E'O'F`,
    `<<-'EOF'`) keep the body literal. `$NAME` and `$5` run nothing and stay data;
-   backticks and `$((` fail closed (decision 4). The search runs after joining
-   backslash-newlines (also repeated ones, and dropping the tabs `<<-` strips), because the
-   shell joins them before expanding: `$\` newline `(` is a substitution.
+   backticks and `$((` fail closed (decision 4). A body under an unquoted marker with a
+   line ending in a backslash is never data: bash and zsh join it with the next line before
+   expanding (`$\` newline `(` is a substitution) and before comparing it with the
+   terminator (`EO\` newline `F` ends the body, the lines after it run).
 
    **Early terminators inside `$(…)`:** bash (and sh) end a heredoc inside an open `$(` at a
    line such as `EOF)`, `EOF )`, `EOFX)`, bash 3.2 also after leading blanks; zsh does not.

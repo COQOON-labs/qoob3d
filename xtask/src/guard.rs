@@ -16,13 +16,13 @@
 //!   file with a literal name), with nothing after the marker but one file
 //!   redirection, standing alone as the whole command (around it only
 //!   comments, blank lines and the closing `)"`), under an unquoted marker
-//!   without `$(` or `${` in the body (backslash-newlines joined), and inside
-//!   `$(…)` without a body line starting with the marker word. A command with a construct the guard
-//!   does not model (backticks, `$'`, redirections with `&`, arithmetic `((`)
-//!   keeps its comments and heredoc bodies: fail closed (ADR-0049). In-place
-//!   editors and inline code count also inside `$(…)`, backticks and `(…)`; a
-//!   sed script with `w`/`W` or `e`, from a file (`-f`) or expanded by the
-//!   shell writes like `sed -i`.
+//!   without `$(`, `${` or a line ending in a backslash in the body, and
+//!   inside `$(…)` without a body line starting with the marker word. A
+//!   command with a construct the guard does not model (backticks, `$'`,
+//!   redirections with `&`, arithmetic `((`) keeps its comments and heredoc
+//!   bodies: fail closed (ADR-0049). In-place editors and inline code count
+//!   also inside `$(…)`, backticks and `(…)`; a sed script with `w`/`W` or
+//!   `e`, from a file (`-f`) or expanded by the shell writes like `sed -i`.
 //!
 //! Edit/Write paths are collapsed (`.`, `..`) before any check. Shell commands
 //! are checked as text, at the three anchors of ADR-0043 (token start, `./`,
@@ -273,8 +273,8 @@ fn models_prose(command: &str) -> bool {
 /// shape: the only heredoc of its line, read as a message or written to a file
 /// ([`is_message_form`]), with nothing after the marker but one file redirection
 /// ([`only_redirects_to_file`]), as the whole command ([`stands_alone`]), and
-/// under an unquoted marker only without `$(` and `${` in the body
-/// ([`expands`]), inside `$(…)` only without an early terminator
+/// under an unquoted marker only without `$(`, `${` or a line ending in a
+/// backslash in the body ([`expands`]), inside `$(…)` only without an early terminator
 /// ([`ends_early`]; ADR-0049). A backslash-newline continues the line. Only for
 /// commands that [`models_prose`].
 fn without_prose(command: &str) -> String {
@@ -355,13 +355,13 @@ fn without_prose(command: &str) -> String {
     out
 }
 
-/// A heredoc `body` under an unquoted marker runs commands: the shell expands
-/// `$(…)` and `${…}` in it (backticks and `$((` fail closed, [`UNMODELLED`]).
-/// The shell joins backslash-newlines first (`$\` newline `(`), here also
-/// with the tabs `<<-` strips; an escaped `\$(` counts too.
+/// A heredoc `body` under an unquoted marker is not what the program reads:
+/// the shell runs `$(…)` and `${…}` in it (an escaped `\$(` counts too;
+/// backticks and `$((` fail closed, [`UNMODELLED`]), and it joins a line
+/// ending in a backslash with the next one, also before comparing it with the
+/// terminator (`EO\` newline `F` ends the body, `$\` newline `(` runs).
 fn expands(body: &str) -> bool {
-    let joined: String = body.split("\\\n").map(|part| part.trim_start_matches('\t')).collect();
-    joined.contains("$(") || joined.contains("${")
+    body.lines().any(|line| line.ends_with('\\')) || body.contains("$(") || body.contains("${")
 }
 
 /// Inside `$(…)` bash ends a heredoc early at a line that starts with the
