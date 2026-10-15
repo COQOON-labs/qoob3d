@@ -69,7 +69,7 @@ pub(crate) fn check_command(worktree: &Path, target_dir: &Path) -> Command {
 /// processes create, and Gatekeeper refuses to start a quarantined xtask, so
 /// on macOS the attribute is removed from the built binary (ADR-0051).
 pub(crate) fn build_xtask(worktree: &Path, target_dir: &Path) -> Result<(), String> {
-    let status = cargo(worktree, target_dir, &["build", "--quiet", "--package", "xtask"])
+    let status = build_xtask_command(worktree, target_dir)
         .status()
         .map_err(|e| format!("could not start cargo in {}: {e}", worktree.display()))?;
     if !status.success() {
@@ -80,10 +80,20 @@ pub(crate) fn build_xtask(worktree: &Path, target_dir: &Path) -> Result<(), Stri
         // Without the attribute (no GUI client involved) `xattr -d` fails; nothing to do then.
         let _ = Command::new("xattr")
             .args(["-d", "com.apple.quarantine"])
-            .arg(target_dir.join("debug/xtask"))
+            .arg(xtask_binary(target_dir))
             .output();
     }
     Ok(())
+}
+
+/// `cargo build` of the xtask package in `worktree`, into `target_dir`.
+pub(crate) fn build_xtask_command(worktree: &Path, target_dir: &Path) -> Command {
+    cargo(worktree, target_dir, &["build", "--quiet", "--package", "xtask"])
+}
+
+/// The xtask binary that cargo builds with the dev profile into `target_dir`.
+pub(crate) fn xtask_binary(target_dir: &Path) -> PathBuf {
+    target_dir.join("debug").join("xtask")
 }
 
 /// `cargo` with `args` in `worktree`, building into `target_dir`, without the
