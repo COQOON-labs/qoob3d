@@ -191,3 +191,47 @@ fn no_module_but_main_spawns_git_itself() {
         offenders.join("; ")
     );
 }
+
+/// The text up to the next `"` after `prefix`, on the first line of `text`
+/// that starts with `prefix` (leading whitespace ignored); `None` if no line
+/// does.
+fn quoted_after<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    text.lines()
+        .find_map(|line| line.trim_start().strip_prefix(prefix))
+        .and_then(|rest| rest.split('"').next())
+}
+
+/// The `version` of the `[[package]]` named `name` in a Cargo.lock text.
+fn lock_version<'a>(lock: &'a str, name: &str) -> Option<&'a str> {
+    let header = format!("name = \"{name}\"\n");
+    lock.split("[[package]]")
+        .find(|block| block.contains(&header))
+        .and_then(|block| quoted_after(block, "version = \""))
+}
+
+// OCCT version pins agree (ADR-0050): the fork's build script skips the OCCT
+// build only when the install holds `BUILTIN_OCCT_VERSION`, while occt-sys
+// (pinned exactly in the fork's Cargo.toml, resolved in Cargo.lock) builds and
+// installs its own version. If the strings differ, the installed version never
+// matches the wanted one and OCCT is rebuilt (about 20 minutes) on every
+// build, silently. Expected: one and the same string in all three files, read
+// as text.
+#[test]
+fn occt_version_pins_agree() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let read =
+        |rel: &str| fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+    let build = read("third_party/opencascade-sys/build.rs");
+    let manifest = read("third_party/opencascade-sys/Cargo.toml");
+    let lock = read("Cargo.lock");
+    let constant = quoted_after(&build, "const BUILTIN_OCCT_VERSION: &str = \"");
+    let pin = quoted_after(&manifest, "occt-sys = { version = \"=");
+    let locked = lock_version(&lock, "occt-sys");
+    assert!(
+        constant.is_some() && constant == pin && pin == locked,
+        "OCCT version pins disagree: BUILTIN_OCCT_VERSION in \
+         third_party/opencascade-sys/build.rs = {constant:?}, occt-sys pin in \
+         third_party/opencascade-sys/Cargo.toml = {pin:?}, occt-sys in Cargo.lock = \
+         {locked:?}; a mismatch silently rebuilds OCCT on every build (ADR-0050)"
+    );
+}
