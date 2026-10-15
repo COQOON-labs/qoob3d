@@ -103,7 +103,7 @@ pub(crate) fn check_files(files: &[(String, String)], message: &str) -> Vec<Stri
         ));
     }
     for (status, path) in files {
-        if path.starts_with(paths::FIXTURES) && !status.starts_with('A') {
+        if path.to_lowercase().starts_with(paths::FIXTURES) && !status.starts_with('A') {
             problems.push(format!("fixture {path} modified/deleted – forbidden (ADR-0030)"));
         }
     }

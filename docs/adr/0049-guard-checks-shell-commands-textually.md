@@ -134,16 +134,17 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    in-place and inline-code tables (`sed -i`, `perl -pi`, `ruby -e`, `bash -c` …) are also
    recognised as the first word inside `$(…)`, backticks and `(…)` subshells, using the
    same quote-aware split into simple commands as decision 5. `echo $(sed -n 1p f)` only
-   reads and passes.
+   reads and passes. The other writer checks (decision 7, the writer words) run over these
+   simple commands too, so `(git clean -fdx xtask)` and `x=$(find xtask -delete)` count.
 7. **Deletions count as writers without a writer word:** `unlink`, `rmdir`, `shred` (also
    by path), `rm` as the last word or before `;`, `|`, `&`, `)` (`… | xargs rm`), `find`
    (also by path) with an action primary (`-delete`, `-exec`/`-execdir`, `-ok`/`-okdir`,
    `-fprint…`, `-fls`), and the git subcommands that rewrite the work tree or index:
    `clean`, `stash`, `reset`, `checkout`, `restore`, `apply`, `switch`, `rebase`, `merge`,
    `pull`, `cherry-pick`, `revert`, `am`, `read-tree`, `checkout-index`, `update-index`,
-   `sparse-checkout`, `submodule`, also after git's global options (`git -C . clean`). A
-   harness path in a global option counts like any other (`git -C xtask switch main`).
-   False alarms like `ls harness | grep rm` are accepted.
+   `sparse-checkout`, `submodule`, `worktree`, also after git's global options
+   (`git -C . clean`). A harness path in a global option counts like any other
+   (`git -C xtask switch main`). False alarms like `ls harness | grep rm` are accepted.
 
 ## Consequences
 

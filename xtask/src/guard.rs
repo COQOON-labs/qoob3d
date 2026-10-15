@@ -201,6 +201,7 @@ const GIT_WRITES: &[&str] = &[
     "update-index",
     "sparse-checkout",
     "submodule",
+    "worktree",
 ];
 /// git's global options that take the next word as their argument.
 const GIT_GLOBAL_ARGUMENTS: &[&str] =
@@ -265,7 +266,11 @@ pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Resu
         .iter()
         .map(|words| words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "))
         .collect();
-    let writes = forms.iter().any(|form| writes(&without_null_redirections(form)))
+    let writes = forms
+        .iter()
+        .cloned()
+        .chain(joined.iter().map(|text| text.to_lowercase()))
+        .any(|form| writes(&without_null_redirections(&form)))
         || [command, normalised.as_str()]
             .into_iter()
             .chain(joined.iter().map(String::as_str))

@@ -54,7 +54,11 @@ pub(crate) fn harness_files(names: &str) -> Vec<&str> {
 
 /// Source trees are `crates/`, `xtask/` and the vendored forks in
 /// `third_party/`, which are compiled into the product (ADR-0014, ADR-0047).
+/// Ignores case, as macOS file systems do (ADR-0043): `Crates/X/Tests/A.RS` is
+/// a test.
 pub(crate) fn kind(path: &str) -> Kind {
+    let path = path.to_lowercase();
+    let path = path.as_str();
     let in_source_tree = SOURCE_TREES.iter().any(|t| path.starts_with(t));
     let file = path.rsplit('/').next().unwrap_or(path);
     let test_dir = path.split('/').any(|c| c == "tests" || c == "proptest-regressions");
