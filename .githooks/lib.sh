@@ -9,6 +9,11 @@ cd "$(git rev-parse --show-toplevel)"
 # commit, merge or push. On macOS the attribute is removed from the built binary;
 # `cargo xtask` then finds it fresh and runs it (ADR-0051).
 cargo build --quiet --package xtask
+xtask_binary="${CARGO_TARGET_DIR:-target}/debug/xtask"
 if [ "$(uname)" = Darwin ]; then
-  xattr -d com.apple.quarantine "${CARGO_TARGET_DIR:-target}/debug/xtask" 2>/dev/null || true
+  if [ -f "$xtask_binary" ]; then
+    xattr -d com.apple.quarantine "$xtask_binary" 2>/dev/null || true
+  else
+    echo "hooks: $xtask_binary not found, quarantine not removed" >&2
+  fi
 fi

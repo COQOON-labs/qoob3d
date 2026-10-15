@@ -75,8 +75,7 @@ pub(crate) fn build_xtask(worktree: &Path, target_dir: &Path) -> Result<(), Stri
     if !status.success() {
         return Err(format!("build of xtask in {} failed ({status})", worktree.display()));
     }
-    #[cfg(target_os = "macos")]
-    {
+    if cfg!(target_os = "macos") {
         // A non-zero exit means the attribute is missing (no GUI client involved): nothing
         // to do. If xattr cannot be started at all, say so and let the check show whether
         // Gatekeeper blocks the binary.

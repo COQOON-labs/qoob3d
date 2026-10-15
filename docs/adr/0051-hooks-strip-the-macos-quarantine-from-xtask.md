@@ -27,7 +27,8 @@ because the terminal does not quarantine.
 - `.githooks/lib.sh` holds the shared setup of the hooks (PATH, repository root) and builds
   xtask with `cargo build --quiet --package xtask` before a hook runs it. On macOS it removes
   `com.apple.quarantine` from `${CARGO_TARGET_DIR:-target}/debug/xtask` and ignores a missing
-  attribute. `cargo xtask` then finds the binary fresh and starts it without relinking.
+  attribute; if the binary itself is missing, it says so on stderr instead of calling `xattr`.
+  `cargo xtask` then finds the binary fresh and starts it without relinking.
   `commit-msg` and `pre-push` source `lib.sh`.
 - `check-rev` builds the worktree's xtask into the shared `check-rev` target directory
   (`worktree::build_xtask`) before it spawns `cargo xtask check`, and on macOS removes the
@@ -35,15 +36,18 @@ because the terminal does not quarantine.
 
 ## Consequences
 
-- The hooks and `check-rev` clear the quarantine from xtask, so Gatekeeper no longer stops
-  xtask itself when a quarantining GUI client such as Sourcetree runs the hooks. Commits and
-  merges, whose hooks only run xtask, work from such a client.
+- The hooks and `check-rev` clear the quarantine from the xtask binary only, after it is
+  built. The dependencies of xtask (serde, serde_json, proc-macro2, thiserror) have build
+  scripts that cargo compiles and runs during `cargo build --package xtask`; under a
+  quarantining GUI client such as Sourcetree those are quarantined before the hook can strip
+  anything. Commits and merges from such a client therefore work only while xtask and its
+  dependencies are already built. After a toolchain or dependency change (or with a fresh
+  `check-rev` target directory), build xtask once from the terminal.
 - Every hook run starts with a `cargo build` of xtask; with an unchanged xtask that is a no-op
   of well under a second.
-- Only the xtask binary is cleared. Whether Gatekeeper also blocks the other binaries that
-  `cargo xtask check` builds and runs during a push (test binaries, build scripts, `qoob3d`
-  for the smoke test) when a quarantining GUI client pushes is not yet verified. A real push
-  from Sourcetree decides; until then, pushing from the terminal is the safe path.
+- Pushes are unverified: `check-rev` builds and runs test binaries, build scripts and `qoob3d`
+  for the smoke test, none of which are cleared. A real push from Sourcetree decides; until
+  then, pushing from the terminal is the safe path.
 - The hooks remove a security attribute from a binary we build ourselves from the checked-out
   sources; they never touch downloaded files.
 
