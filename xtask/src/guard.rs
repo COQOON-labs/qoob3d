@@ -14,16 +14,19 @@
 //!   `x(a| #)`), but not in the heredoc body of an exact message form
 //!   (`git commit|tag -F -`, `gh pr|issue create|edit --body-file -`, their
 //!   `"$(cat <<EOF"` messages, `cat` writing one regular file with a literal
-//!   name) with nothing after the marker but one file redirection, standing
-//!   alone as the whole command (around it only blank lines and the closing
-//!   `)"`), under an unquoted marker without `$(`, `${` or a line ending in a
-//!   backslash in the body, and inside `$(…)` without a body line starting
-//!   with the marker word. A command with a construct the guard does not model
+//!   name) with no `#` on its line and nothing after the marker but one file
+//!   redirection, standing alone as the whole command (around it only blank
+//!   lines and the closing `)"`), under an unquoted marker without `$(`, `${`
+//!   or a line ending in a backslash in the body, and inside `$(…)` without a
+//!   body line starting with the marker word. A command with a construct the guard does not model
 //!   (backticks, `$'`, redirections with `&`, arithmetic `((`) or with a
 //!   heredoc that keeps its body or has no terminator keeps all heredoc
 //!   bodies: fail closed (ADR-0049). In-place editors and inline code count
 //!   also inside `$(…)`, backticks and `(…)`; a sed script with `w`/`W` or
 //!   `e`, from a file (`-f`) or expanded by the shell writes like `sed -i`.
+//!   Where a `#` may start a comment, the guard takes the reading that checks
+//!   more: writers are searched with comments skipped and with comments as
+//!   words, and a `#` on a heredoc line keeps its body.
 //!
 //! Edit/Write paths are collapsed (`.`, `..`) before any check. Shell commands
 //! are checked as text, at the three anchors of ADR-0043 (token start, `./`,
@@ -222,7 +225,10 @@ pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Resu
         return Err(self_unlock_message(&file));
     }
     check_git_dir_in_shell(&forms, &normalised, read)?;
-    let commands = simple_commands(command);
+    // Both readings of every `#` that may start a comment: an odd quote in a
+    // comment shifts the quote state of the other one (ADR-0049).
+    let commands: Vec<Vec<Word>> =
+        [false, true].into_iter().flat_map(|comments| simple_commands(command, comments)).collect();
     // Each simple command again as text, so that a program inside `$(…)`,
     // backticks or `(…)` starts a segment of its own.
     let joined: Vec<String> = commands
@@ -269,16 +275,17 @@ fn models_prose(command: &str) -> bool {
 /// (`${x:- #}`, zsh's `(#i)` and `x(a| #)`), so their words are checked like
 /// any other (ADR-0049). Quotes, backslashes and `$(…)` (also in double
 /// quotes) are followed, so a quoted `<<` starts no heredoc. A heredoc body is
-/// removed only in the safe shape: the only heredoc of its line, read as a
+/// removed only in the safe shape: the only heredoc of its line, which has no
+/// `#` (it may start a comment that hides the marker, `-F - #<<EOF`), read as a
 /// message or written to a file ([`is_message_form`]), with nothing after the
 /// marker but one file redirection ([`only_redirects_to_file`]), as the whole
-/// command ([`stands_alone`]), and
-/// under an unquoted marker only without `$(`, `${` or a line ending in a
-/// backslash in the body ([`expands`]), inside `$(…)` only without an early
-/// terminator ([`ends_early`]; ADR-0049). If any heredoc keeps its body or has
-/// no terminator, nothing is removed and `command` comes back unchanged: the
-/// quote tracking cannot follow a body (`it's`). A backslash-newline continues
-/// the line. Only for commands that [`models_prose`].
+/// command ([`stands_alone`]), and under an unquoted marker only without
+/// `$(`, `${` or a line ending in a backslash in the body ([`expands`]), inside
+/// `$(…)` only without an early terminator ([`ends_early`]; ADR-0049). If any
+/// heredoc keeps its body or has no terminator, nothing is removed and
+/// `command` comes back unchanged: the quote tracking cannot follow a body
+/// (`it's`). A backslash-newline continues the line. Only for commands that
+/// [`models_prose`].
 fn without_prose(command: &str) -> String {
     let mut out = String::with_capacity(command.len());
     // Open quotes, parentheses `(` and substitutions `$(` (as `$`), innermost last.
@@ -316,7 +323,10 @@ fn without_prose(command: &str) -> String {
             }
             (_, '\n') if !markers.is_empty() => {
                 let open_parens = open.iter().filter(|&&o| matches!(o, '(' | '$')).count();
+                // A `#` on the heredoc line may start a comment that hides the
+                // marker (`-F - #<<EOF`): then the body lines run.
                 if markers.len() == 1
+                    && !out[line_start..].contains('#')
                     && only_redirects_to_file(&out[after_marker..])
                     && is_message_form(
                         &out[line_start..after_marker],
@@ -701,9 +711,11 @@ struct Word {
 /// `;|&()` and newlines outside quotes separate them, and so do command
 /// substitutions (`$(…)`, backticks), also inside double quotes. A `${…}` is
 /// followed like a quote, one word with its blanks and quotes. Redirections
-/// (`2> file`, `&>file`, `<<EOF`) are no words; comments are words like any
-/// other (ADR-0049).
-fn simple_commands(command: &str) -> Vec<Vec<Word>> {
+/// (`2> file`, `&>file`, `<<EOF`) are no words. With `comments`, a `#` that
+/// may start a comment ([`starts_comment`]) ends the line; without, comments
+/// are words like any other. The caller takes both readings, so that a
+/// comment never hides a writer (ADR-0049).
+fn simple_commands(command: &str, comments: bool) -> Vec<Vec<Word>> {
     let (mut commands, mut words) = (Vec::new(), Vec::new());
     // The word being read and whether it is the target of a redirection.
     let (mut word, mut target): (Option<Word>, bool) = (None, false);
@@ -711,6 +723,7 @@ fn simple_commands(command: &str) -> Vec<Vec<Word>> {
     // `$'…'`, `(` for `(…)` and `$(…)`, `` ` ``, and for `${…}` `{` (or `}`
     // inside double quotes, where `'` is literal).
     let mut open: Vec<char> = Vec::new();
+    let mut previous = None;
     let mut chars = command.chars().peekable();
     while let Some(c) = chars.next() {
         let top = open.last().copied();
@@ -760,6 +773,9 @@ fn simple_commands(command: &str) -> Vec<Vec<Word>> {
                     _ => open.push('`'),
                 }
             }
+            (_, '#') if comments && starts_comment(unquoted, word.is_some(), previous) => {
+                while chars.next_if(|c| *c != '\n').is_some() {}
+            }
             _ if opens.is_some() => {
                 open.extend(opens);
                 let word = word.get_or_insert_default();
@@ -794,6 +810,7 @@ fn simple_commands(command: &str) -> Vec<Vec<Word>> {
                 word.expanded |= c == '$' && top != Some('\'');
             }
         }
+        previous = Some(c);
     }
     words.extend(word.filter(|_| !target));
     commands.push(words);
@@ -809,6 +826,13 @@ fn end_word(words: &mut Vec<Word>, word: Option<Word>, target: &mut bool, redire
     if !std::mem::take(target) && !descriptor {
         words.push(word);
     }
+}
+
+/// A `#` after `previous` may start a comment for the shell: outside quotes
+/// (`unquoted`), not inside a word, at the start or after whitespace or one of
+/// `;|&()<>` (bash and zsh read `true;#x` and `(true)#x` as comments).
+fn starts_comment(unquoted: bool, in_word: bool, previous: Option<char>) -> bool {
+    unquoted && !in_word && previous.is_none_or(|p| p.is_whitespace() || ";|&()<>".contains(p))
 }
 
 /// What `c`, followed by `next`, opens inside `top` in [`simple_commands`]: a

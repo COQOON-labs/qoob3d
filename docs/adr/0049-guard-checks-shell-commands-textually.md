@@ -33,7 +33,13 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    where the shell starts a comment was bypassable, because the guard's scanner and the
    shell disagreed on it (`${x:- #}` is one word, zsh starts no comment in `(#i)XA`,
    `x(|#)` or the glob group `x(a| #)`, and an odd quote across lines shifts the quote
-   state). A heredoc body is data only when its logical line (backslash-newlines joined)
+   state). Wherever a `#` may start a comment, the guard takes the reading that checks
+   more: the quote-aware tokenizer looks for writers (sed `w`/`e`, a script file or
+   expanded script, in-place editors, inline code) both with such comments skipped (a `#`
+   starting a word at a line start or after whitespace or `;|&()<>`, outside quotes) and
+   with them as words, and either finding counts; and a `#` anywhere on a heredoc's logical
+   line (`git commit -F - #<<EOF` makes the "body" run) keeps the body as shell text. A
+   heredoc body is data only when its logical line (backslash-newlines joined)
    has a single heredoc and nothing after `<<MARKER` (also `<<-`, `<<'M'`, `<<"M"`) but at
    most one output redirection to a file (`> path`, `>> path`). Anything else after the marker
    (a pipe, `;`, `&&`, `&`, a subshell or brace group, `>(…)`, a second redirection,
