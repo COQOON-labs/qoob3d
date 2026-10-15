@@ -12,12 +12,13 @@
 //!   owner's review covers that,
 //! - format fixtures are never modified, also not by a shell command that is
 //!   no pure read ([`check_shell_paths`]); the fixture directory and its
-//!   ancestors up to the repository root count as fixtures ([`holds_fixtures`]),
+//!   ancestors up to the repository root, and globs whose literal prefix may
+//!   reach them, count as fixtures ([`holds_fixtures`]),
 //! - one agent context writes either tests or production code, never both,
 //!   also through a shell command that is no pure read and names test or code
 //!   paths (`git add`, `git commit` and `git push` excepted); a named
-//!   source-tree directory outside `tests` (or a glob in one) holds both and
-//!   conflicts with every role ([`named_kinds`]),
+//!   source-tree directory outside `tests`, or a source-tree path with a glob
+//!   or brace, holds both and conflicts with every role ([`named_kinds`]),
 //! - shell commands must not bypass the git hooks; a command that names a
 //!   harness path must be a pure read ([`pure_read`], an allowlist; ADR-0049).
 //!   A harness directory counts also when named without its trailing slash, as a
@@ -235,13 +236,38 @@ fn joined_words(words: &[Word]) -> String {
 }
 
 /// `command` only reads (ADR-0049, an allowlist): no redirection besides
-/// those in [`without_null_redirections`], no sed the tokenizer loses
-/// ([`hides_sed`]), and every simple command of both readings [`reads`].
+/// those in [`without_null_redirections`], no heredoc, no construct where the
+/// shell may run more than the tokenizer sees ([`DIVERGES`]), no sed the
+/// tokenizer loses ([`hides_sed`]), and every simple command of both readings
+/// [`reads`].
 fn pure_read(command: &str) -> bool {
     let commands = both_readings(command);
-    !redirects_to_file(command)
+    !DIVERGES.iter().any(|construct| command.contains(construct))
+        && !(command.contains("${") && command.contains('@'))
+        && !redirects_to_file(command)
+        && !has_heredoc(command)
         && !hides_sed(command, &commands)
         && commands.iter().all(|words| reads(words))
+}
+
+/// Constructs where the shell may run or assign more than the tokenizer sees,
+/// so a command with one is no [`pure_read`] (fail closed): arithmetic, whose
+/// assignments change variables (`$((IFS=1))`), and zsh's parameter flags
+/// (`${(e)x}` evaluates `x`). Bash's `${x@P}` (prompt expansion runs `$(…)`)
+/// is caught as `${` with an `@`.
+const DIVERGES: &[&str] = &["((", "${("];
+
+/// `command` has a heredoc (`<<`, `<<-`; not the here-string `<<<`) in either
+/// comment reading: the tokenizer cannot follow its body (`echo it's` hides the
+/// commands after it), so the command is no [`pure_read`]. The bodies of safe
+/// message forms are removed before the harness and role checks look at paths.
+fn has_heredoc(command: &str) -> bool {
+    [false, true].into_iter().any(|comments| {
+        simple_commands(command, comments)
+            .targets
+            .iter()
+            .any(|(operator, _)| operator.starts_with("<<") && !operator.starts_with("<<<"))
+    })
 }
 
 /// A simple command that only reads: nothing but assignments (their
@@ -254,7 +280,9 @@ fn pure_read(command: &str) -> bool {
 /// assignment (`GIT_EXTERNAL_DIFF=x git diff`) or given by an expansion is
 /// none.
 fn reads(words: &[Word]) -> bool {
-    let Some(index) = words.iter().position(|w| !is_assignment(&w.text)) else { return true };
+    let Some(index) = words.iter().position(|w| !is_assignment(&w.text)) else {
+        return words.iter().all(|w| harmless_assignment(&w.text));
+    };
     let (program, arguments) = (&words[index], &words[index + 1..]);
     if index > 0 || program.expanded {
         return false;
@@ -263,13 +291,26 @@ fn reads(words: &[Word]) -> bool {
         // In the reading that keeps comments, a comment is a command `#…`.
         comment if comment.starts_with('#') => true,
         "if" | "then" | "else" | "elif" | "fi" | "{" | "}" => reads(arguments),
-        "echo" | "printf" | "cd" | "shellcheck" | "true" | ":" => true,
+        // `printf -v NAME` assigns a variable (`PATH`).
+        "printf" => !arguments.iter().any(|w| w.text.starts_with("-v")),
+        "echo" | "cd" | "shellcheck" | "true" | ":" => true,
         "git" => git_reads(arguments),
         name if is_sed(name) => {
             !edits_in_place(&joined_words(words)) && !sed_command_writes(arguments)
         }
         _ => reads_only(&joined_words(words)),
     }
+}
+
+/// An assignment on its own that cannot change what a later read runs: the
+/// name has no upper-case letter (exported variables such as `PATH`, `IFS`,
+/// `GIT_*` are upper case) and is none of zsh's arrays tied to them (`path`,
+/// `cdpath`, `fpath`, `manpath`, `module_path`).
+fn harmless_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.contains(|c: char| c.is_ascii_uppercase())
+            && !matches!(name, "path" | "cdpath" | "fpath" | "manpath" | "module_path")
+    })
 }
 
 /// `NAME=value`, a shell assignment.
@@ -307,8 +348,9 @@ fn git_reads(arguments: &[Word]) -> bool {
 /// context without an agent type. A read binds nothing, and neither do
 /// `git add`, `git commit` and `git push`, which change no file content (the
 /// main context stages tests and code separately); the bodies of safe message
-/// forms are no paths. With a file redirection, whose target is no word, or a
-/// sed the tokenizer lost, every word of the other commands counts. In a
+/// forms are no paths. With a file redirection, whose target is no word, a
+/// heredoc, whose body the tokenizer cannot follow, or a sed the tokenizer
+/// lost, every word of the other commands counts, split at blanks. In a
 /// cargo command only words with a `/` are paths (`-p xtask` names a package).
 fn check_shell_paths(root: &Path, input: &Value, command: &str) -> Result<(), String> {
     if pure_read(command) {
@@ -316,51 +358,61 @@ fn check_shell_paths(root: &Path, input: &Value, command: &str) -> Result<(), St
     }
     let text = if models_prose(command) { without_prose(command) } else { command.to_owned() };
     let commands = both_readings(&text);
-    let every = redirects_to_file(&text) || hides_sed(&text, &commands);
-    let targets: Vec<String> = [false, true]
+    let every = redirects_to_file(&text) || has_heredoc(&text) || hides_sed(&text, &commands);
+    let targets: Vec<Word> = [false, true]
         .into_iter()
         .filter(|_| every)
         .flat_map(|comments| simple_commands(&text, comments).targets)
-        .map(|(_, word)| word.text)
+        .map(|(_, word)| word)
         .collect();
     // Every word, split at blanks so that a region the tokenizer lost inside
-    // a quote (a quote in a comment) still yields its paths.
-    let lists: Vec<Vec<String>> = commands
+    // a quote (a quote in a comment) still yields its paths; with whether it
+    // is a pattern of the shell.
+    let lists: Vec<Vec<(&str, bool)>> = commands
         .iter()
         .filter(|words| every || !reads(words))
-        .map(|words| words.iter().map(|word| word.text.clone()).collect::<Vec<_>>())
-        .chain([targets])
-        .map(|words| words.iter().flat_map(|w| w.split_whitespace()).map(str::to_owned).collect())
-        .collect();
-    let named: Vec<String> = lists
-        .iter()
-        .filter(|words| !stages(words.iter().map(String::as_str)))
-        .flat_map(|words| {
-            let cargo = words.first().is_some_and(|w| program_name(w) == "cargo");
-            words.iter().filter(move |word| !cargo || word.contains('/'))
+        .chain([&targets])
+        .map(|words| {
+            words.iter().flat_map(|w| w.text.split_whitespace().map(|p| (p, w.pattern))).collect()
         })
-        .flat_map(|word| word.split('='))
-        .filter(|word| !word.is_empty())
-        .filter_map(|word| relative(root, word))
+        .collect();
+    let named: Vec<(String, bool)> = lists
+        .iter()
+        .filter(|words| !stages(words.iter().map(|(word, _)| *word)))
+        .flat_map(|words| {
+            let cargo = words.first().is_some_and(|(w, _)| program_name(w) == "cargo");
+            words.iter().filter(move |(word, _)| !cargo || word.contains('/'))
+        })
+        .flat_map(|(word, pattern)| word.split('=').map(|part| (part, *pattern)))
+        .filter(|(word, _)| !word.is_empty())
+        .filter_map(|(word, pattern)| relative(root, word).map(|rel| (rel, pattern)))
         .collect();
     // A fixture message comes before any role message.
-    if let Some(fixture) = named
-        .iter()
-        .find(|rel| rel.to_lowercase().starts_with(paths::FIXTURES) || holds_fixtures(rel))
-    {
+    if let Some((fixture, _)) = named.iter().find(|(rel, pattern)| {
+        rel.to_lowercase().starts_with(paths::FIXTURES) || holds_fixtures(rel, *pattern)
+    }) {
         return Err(fixture_message(if fixture.is_empty() { "." } else { fixture }));
     }
-    named.iter().try_for_each(|rel| check_named_role(root, input, rel))
+    named.iter().try_for_each(|(rel, pattern)| check_named_role(root, input, rel, *pattern))
 }
 
 /// `rel` is the fixture directory or one of its ancestors, up to the
 /// repository root (`""`): removing, moving or restoring it touches every
-/// fixture (ADR-0030).
-fn holds_fixtures(rel: &str) -> bool {
+/// fixture (ADR-0030). A `pattern` with a glob or brace (`*?[{`) counts if
+/// its literal prefix is a prefix of the fixture directory or lies inside it
+/// (`tests/*`, `tests/fix*`, `crates/*/…`, `fixture{s,}`).
+fn holds_fixtures(rel: &str, pattern: bool) -> bool {
     let rel = rel.to_lowercase();
+    if let Some(glob) = rel.find(GLOB).filter(|_| pattern) {
+        let literal = &rel[..glob];
+        return paths::FIXTURES.starts_with(literal) || literal.starts_with(paths::FIXTURES);
+    }
     let dir = paths::FIXTURES.trim_end_matches('/');
     rel.is_empty() || rel == dir || dir.starts_with(&format!("{rel}/"))
 }
+
+/// Characters that make a path a pattern of the shell (globs and braces).
+const GLOB: [char; 4] = ['*', '?', '[', '{'];
 
 /// The `words` of a simple command are `git add`, `git commit` or `git push`
 /// (git also by path, also after global options), which change no file
@@ -843,6 +895,8 @@ fn naive_seds(command: &str) -> Vec<usize> {
 struct Word {
     text: String,
     expanded: bool,
+    /// An unquoted glob or brace character (`*?[{`) makes it a pattern.
+    pattern: bool,
     /// The byte offset in the command where the word starts.
     start: usize,
 }
@@ -865,9 +919,9 @@ fn simple_commands(command: &str, comments: bool) -> Tokens {
     // `$'…'`, `(` for `(…)` and `$(…)`, `` ` ``, and for `${…}` `{` (or `}`
     // inside double quotes, where `'` is literal).
     let mut open: Vec<char> = Vec::new();
-    // The character before `c` (`(` for `$(`), and where the word being read
-    // starts.
-    let (mut previous, mut start) = (None, 0);
+    // The character before `c` (`(` for `$(`), where the word being read
+    // starts, and the first redirection of the line (for heredoc bodies).
+    let (mut previous, mut start, mut line_targets) = (None, 0, 0);
     let peek = |chars: &std::str::Chars<'_>| chars.clone().next();
     let mut chars = command.chars();
     loop {
@@ -898,9 +952,7 @@ fn simple_commands(command: &str, comments: bool) -> Tokens {
             (Some('$'), _) => {
                 let word = &mut word.get_or_insert_default().text;
                 word.push(c);
-                if c == '\\' {
-                    word.extend(chars.next());
-                }
+                word.extend((c == '\\').then(|| chars.next()).flatten());
             }
             (_, '\\') if top != Some('\'') => match chars.next() {
                 Some('\n') | None => {}
@@ -940,6 +992,10 @@ fn simple_commands(command: &str, comments: bool) -> Tokens {
                 '&' if peek(&chars) == Some('>') => {}
                 ';' | '|' | '&' | '(' | ')' | '\n' => {
                     commands.push(std::mem::take(&mut words));
+                    if c == '\n' {
+                        line_targets =
+                            skip_bodies(&mut chars, &targets, line_targets, &mut commands);
+                    }
                     // `<(…)` and `>(…)` are commands, not targets.
                     target = None;
                     match (c, top) {
@@ -956,6 +1012,7 @@ fn simple_commands(command: &str, comments: bool) -> Tokens {
                 let word = word.get_or_insert_default();
                 word.text.push(c);
                 word.expanded |= c == '$' && top != Some('\'');
+                word.pattern |= unquoted && GLOB.contains(&c);
             }
         }
         previous = Some(if substitution && c == '$' { '(' } else { c });
@@ -1006,6 +1063,40 @@ fn redirection_operator(first: char, chars: &mut std::str::Chars<'_>) -> String 
     let rest = chars.as_str();
     skip_while(chars, |c| "<>&|-".contains(c));
     format!("{first}{}", &rest[..rest.len() - chars.as_str().len()])
+}
+
+/// Skips in `chars` the bodies of the heredocs among `targets` from `line`,
+/// the redirections of the line that just ended, and adds their lines to
+/// `commands` as words split at blanks: data or code the tokenizer does not
+/// read, but whose words may name paths (taken literally). Without a
+/// terminator nothing is skipped and the rest is read as commands. Returns
+/// where the next line's redirections start.
+fn skip_bodies(
+    chars: &mut std::str::Chars<'_>,
+    targets: &[(String, Word)],
+    line: usize,
+    commands: &mut Vec<Vec<Word>>,
+) -> usize {
+    let markers: Vec<Marker> = targets[line..]
+        .iter()
+        .filter(|(operator, _)| operator.starts_with("<<") && !operator.starts_with("<<<"))
+        .map(|(operator, word)| Marker {
+            word: word.text.clone(),
+            tabs: operator.starts_with("<<-"),
+            quoted: false,
+        })
+        .collect();
+    let rest = chars.as_str();
+    let Some(len) = heredoc_bodies(rest, &markers).filter(|_| !markers.is_empty()) else {
+        return targets.len();
+    };
+    commands.extend(rest[..len].lines().map(|line| {
+        line.split_whitespace()
+            .map(|text| Word { text: text.to_owned(), ..Word::default() })
+            .collect()
+    }));
+    *chars = rest[len..].chars();
+    targets.len()
 }
 
 /// Advances `chars` past the characters that satisfy `f`.
@@ -1501,7 +1592,9 @@ fn check_file_write(root: &Path, session: &Session, rel: &str) -> Result<(), Str
              change to the human; they unlock with QOOB3D_HARNESS_UNLOCK=1."
         ));
     }
-    if (lower_rel.starts_with(paths::FIXTURES) && root.join(rel).exists()) || holds_fixtures(rel) {
+    if (lower_rel.starts_with(paths::FIXTURES) && root.join(rel).exists())
+        || holds_fixtures(rel, false)
+    {
         return Err(fixture_message(rel));
     }
     Ok(())
@@ -1526,8 +1619,9 @@ fn agent_role(input: &Value) -> Option<Kind> {
 /// The role check for a path named in a shell command ([`named_kinds`]): a
 /// directory that holds tests and code conflicts with every role; a context
 /// without an agent type is denied before it would be bound to both.
-fn check_named_role(root: &Path, input: &Value, rel: &str) -> Result<(), String> {
-    match named_kinds(rel) {
+/// `pattern`: the shell expands globs and braces in it.
+fn check_named_role(root: &Path, input: &Value, rel: &str, pattern: bool) -> Result<(), String> {
+    match named_kinds(rel, pattern) {
         [kind] => check_role_as(root, input, rel, *kind),
         _ if agent_role(input).is_none() => Err(format!(
             "`{rel}` holds tests and production code, which no agent context changes together \
@@ -1537,23 +1631,39 @@ fn check_named_role(root: &Path, input: &Value, rel: &str) -> Result<(), String>
     }
 }
 
-/// The kinds of file a path named in a shell command can be: a file (a last
-/// component with a `.` and no glob) its [`paths::kind`]; a directory, or a
-/// glob (`*?[` in the last component) in one, below `tests` or `models` a
-/// test, any other source-tree directory both (`crates/<crate>/src` and its
-/// modules hold unit tests in `tests.rs`; `crates`, a crate root, `xtask`).
-fn named_kinds(rel: &str) -> &'static [Kind] {
+/// The kinds of file a path named in a shell command can be. A `pattern`
+/// with a glob or brace ([`GLOB`]) anywhere: a test below a literal `tests` directory
+/// or `models`, both if it may reach a source tree, else neither. Otherwise a
+/// file (a last component with a `.`) its [`paths::kind`]; a directory below
+/// `tests` or `models` a test, any other source-tree directory both
+/// (`crates/<crate>/src` and its modules hold unit tests in `tests.rs`;
+/// `crates`, a crate root, `xtask`).
+fn named_kinds(rel: &str, pattern: bool) -> &'static [Kind] {
     let lower = rel.to_lowercase();
-    let (parent, name) = lower.rsplit_once('/').unwrap_or(("", &lower));
-    let glob = name.contains(['*', '?', '[']);
-    let kind = if name.contains('.') && !glob {
+    if let Some(glob) = lower.find(GLOB).filter(|_| pattern) {
+        // The literal directories before the pattern decide.
+        let literal = &lower[..glob];
+        let dirs: Vec<&str> = literal.split('/').collect();
+        let dirs = &dirs[..dirs.len() - 1];
+        let source = ["crates/", "xtask/", "third_party/"];
+        return if dirs.first() == Some(&"models")
+            || dirs.iter().any(|d| matches!(*d, "tests" | "proptest-regressions"))
+        {
+            &[Kind::Test]
+        } else if source.iter().any(|s| literal.starts_with(s) || s.starts_with(literal)) {
+            &[Kind::Code, Kind::Test]
+        } else {
+            &[Kind::Other]
+        };
+    }
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    let kind = if name.contains('.') {
         paths::kind(rel)
     } else {
-        let dir = if glob { parent } else { lower.as_str() };
-        if dir == "models" {
+        if lower == "models" {
             return &[Kind::Test];
         }
-        match paths::kind(&format!("{dir}/x.rs")) {
+        match paths::kind(&format!("{lower}/x.rs")) {
             Kind::Code => return &[Kind::Code, Kind::Test],
             kind => kind,
         }

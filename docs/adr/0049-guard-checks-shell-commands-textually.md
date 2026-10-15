@@ -160,7 +160,14 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    tokenizer in both comment readings, so a quoted `>` or `<` (`grep "-> bool"`) is none;
    a command with a construct it does not model is read as text (fail closed). The checks
    of the hook environment and `.git` (ADR-0043) use the same allowlist. A program after
-   an assignment (`GIT_EXTERNAL_DIFF=x git diff`) or given by an expansion is no read. Anything else is denied (`ed`, `vim -es`,
+   an assignment (`GIT_EXTERNAL_DIFF=x git diff`) or given by an expansion is no read.
+   Where the shell may run or change more than the tokenizer sees, a command is no pure
+   read either (fail closed): a heredoc outside the removed body of a safe message form
+   (the tokenizer cannot follow a body, `echo it's` hides the commands after it),
+   arithmetic `((` (its assignments, `$((IFS=1))`), zsh's parameter flags `${(…)}`
+   (`${(e)x}` evaluates), `${…@…}` (bash's `@P` prompt expansion runs `$(…)`), `printf
+   -v`, and an assignment on its own to a name with an upper-case letter (`PATH`, `IFS`)
+   or to zsh's tied arrays (`path`, `fpath` …). Anything else is denied (`ed`, `vim -es`,
    `git archive -o`, `cmake -E`, `unzip`, `php -r` were missed by a list of writers). This
    replaces the writer list of decisions 5 to 7: the sed rules of decision 5 now decide
    whether a sed only reads; the programs of decisions 6 and 7 are simply no reads.
@@ -174,12 +181,18 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    cargo command only words with a `/` count as paths (`-p xtask` names a package). The
    fixture directory and every ancestor of it (`crates/qoob3d-core/tests`, `crates`, the
    repository root `.`) count as fixture paths, for shell commands and Edit/Write, since
-   removing, moving or restoring them touches every fixture. A named directory, and a glob
-   (`*?[` in the last component), goes through the role check: below `tests` or `models`
-   it is a test; every other source-tree directory holds both (`crates`, a crate root,
-   `xtask`, and `crates/<crate>/src` with its modules, which hold unit tests in
-   `tests.rs`) and conflicts with every role (a context without an agent type is denied
-   rather than bound to both).
+   removing, moving or restoring them touches every fixture. A path with a glob or brace
+   (`*?[{`) is cut at the first of them: it is a fixture path if that literal prefix is a
+   prefix of the fixture directory or lies inside it (`tests/*`, `tests/fix*`, `crates/*/…`,
+   `fixture{s,}`, compared ignoring case). A named directory goes through the role check:
+   below `tests` or `models` it is a test; every other source-tree directory holds both
+   (`crates`, a crate root, `xtask`, and `crates/<crate>/src` with its modules, which hold
+   unit tests in `tests.rs`) and conflicts with every role (a context without an agent
+   type is denied rather than bound to both). So does a source-tree path with a glob or
+   brace in any component, unless a literal `tests` directory (or `models`) comes before
+   it. Only unquoted `*?[{` make a pattern. With a file redirection, a heredoc or a lost
+   sed, every word of the command counts as a possible path, split at blanks; the
+   tokenizer skips heredoc bodies (to their terminator) and takes their words literally.
 
 ## Consequences
 
