@@ -4,7 +4,9 @@
 //!   `QOOB3D_HARNESS_UNLOCK=1` ([`Session::unlocked`]); the unlock lifts nothing else,
 //! - files that can set the environment of the hooks, and `.git/`, are never
 //!   written, so that no agent can unlock itself; a shell command naming `.git`
-//!   is denied unless it only reads or names `.git` only to exclude it. Limit
+//!   is denied unless it only reads (the [`pure_read`] allowlist, as for
+//!   harness paths and a hook-environment file) or names `.git` only to
+//!   exclude it. Limit
 //!   (ADR-0043): an unlocked session may change the guard itself (`guard.rs`,
 //!   `.claude/hooks/guard.sh`, the project `.claude/settings.json`); the
 //!   owner's review covers that,
@@ -14,8 +16,8 @@
 //! - one agent context writes either tests or production code, never both,
 //!   also through a shell command that is no pure read and names test or code
 //!   paths (`git add`, `git commit` and `git push` excepted); a named
-//!   directory that holds both (a crate root) conflicts with every role
-//!   ([`named_kinds`]),
+//!   source-tree directory outside `tests` (or a glob in one) holds both and
+//!   conflicts with every role ([`named_kinds`]),
 //! - shell commands must not bypass the git hooks; a command that names a
 //!   harness path must be a pure read ([`pure_read`], an allowlist; ADR-0049).
 //!   A harness directory counts also when named without its trailing slash, as a
@@ -193,7 +195,7 @@ pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Resu
     let normalised = unquoted(command);
     let forms = [command.to_lowercase(), normalised.to_lowercase()];
     check_bypasses(&forms[1])?;
-    let read = is_pure_read(&normalised);
+    let read = pure_read(command);
     if let Some(file) = hook_environment_in_shell(session, &forms)
         && !read
     {
@@ -221,7 +223,10 @@ pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Resu
 /// start a comment: an odd quote in a comment shifts the quote state of the
 /// other one (ADR-0049).
 fn both_readings(command: &str) -> Vec<Vec<Word>> {
-    [false, true].into_iter().flat_map(|comments| simple_commands(command, comments)).collect()
+    [false, true]
+        .into_iter()
+        .flat_map(|comments| simple_commands(command, comments).commands)
+        .collect()
 }
 
 /// The texts of `words`, joined by blanks.
@@ -234,7 +239,7 @@ fn joined_words(words: &[Word]) -> String {
 /// ([`hides_sed`]), and every simple command of both readings [`reads`].
 fn pure_read(command: &str) -> bool {
     let commands = both_readings(command);
-    !without_null_redirections(command).contains('>')
+    !redirects_to_file(command)
         && !hides_sed(command, &commands)
         && commands.iter().all(|words| reads(words))
 }
@@ -311,25 +316,22 @@ fn check_shell_paths(root: &Path, input: &Value, command: &str) -> Result<(), St
     }
     let text = if models_prose(command) { without_prose(command) } else { command.to_owned() };
     let commands = both_readings(&text);
-    let lists: Vec<Vec<String>> =
-        if without_null_redirections(&text).contains('>') || hides_sed(&text, &commands) {
-            unquoted(&text)
-                .split(|c: char| ";|&\n()`".contains(c))
-                .map(|segment| {
-                    segment
-                        .split(|c: char| c.is_whitespace() || "<>".contains(c))
-                        .filter(|word| !word.is_empty())
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .collect()
-        } else {
-            commands
-                .iter()
-                .filter(|words| !reads(words))
-                .map(|words| words.iter().map(|word| word.text.clone()).collect())
-                .collect()
-        };
+    let every = redirects_to_file(&text) || hides_sed(&text, &commands);
+    let targets: Vec<String> = [false, true]
+        .into_iter()
+        .filter(|_| every)
+        .flat_map(|comments| simple_commands(&text, comments).targets)
+        .map(|(_, word)| word.text)
+        .collect();
+    // Every word, split at blanks so that a region the tokenizer lost inside
+    // a quote (a quote in a comment) still yields its paths.
+    let lists: Vec<Vec<String>> = commands
+        .iter()
+        .filter(|words| every || !reads(words))
+        .map(|words| words.iter().map(|word| word.text.clone()).collect::<Vec<_>>())
+        .chain([targets])
+        .map(|words| words.iter().flat_map(|w| w.split_whitespace()).map(str::to_owned).collect())
+        .collect();
     let named: Vec<String> = lists
         .iter()
         .filter(|words| !stages(words.iter().map(String::as_str)))
@@ -855,10 +857,10 @@ struct Word {
 /// are words like any other. The callers take both readings, so that a
 /// comment never hides a command (ADR-0049). Each word records where it starts
 /// in `command`.
-fn simple_commands(command: &str, comments: bool) -> Vec<Vec<Word>> {
-    let (mut commands, mut words) = (Vec::new(), Vec::new());
-    // The word being read and whether it is the target of a redirection.
-    let (mut word, mut target): (Option<Word>, bool) = (None, false);
+fn simple_commands(command: &str, comments: bool) -> Tokens {
+    let (mut commands, mut words, mut targets) = (Vec::new(), Vec::new(), Vec::new());
+    // The word being read, and the operator whose target it is.
+    let (mut word, mut target): (Option<Word>, Option<String>) = (None, None);
     // Open quotes and substitutions, innermost last: `'`, `"`, `$` for
     // `$'…'`, `(` for `(…)` and `$(…)`, `` ` ``, and for `${…}` `{` (or `}`
     // inside double quotes, where `'` is literal).
@@ -886,7 +888,7 @@ fn simple_commands(command: &str, comments: bool) -> Vec<Vec<Word>> {
         }
         if substitution || separator {
             let word = word.take().map(|w| Word { start, ..w });
-            end_word(&mut words, word, &mut target, matches!(c, '<' | '>'));
+            end_word(&mut words, &mut targets, word, &mut target, matches!(c, '<' | '>'));
         }
         match (top, c) {
             (Some('\''), '\'') | (Some('"'), '"') | (Some('$'), '\'') | (Some('{' | '}'), '}') => {
@@ -910,7 +912,7 @@ fn simple_commands(command: &str, comments: bool) -> Vec<Vec<Word>> {
             },
             _ if substitution => {
                 commands.push(std::mem::take(&mut words));
-                target = false;
+                target = None;
                 match (c, top) {
                     ('$', _) => {
                         chars.next();
@@ -934,15 +936,12 @@ fn simple_commands(command: &str, comments: bool) -> Vec<Vec<Word>> {
                 }
             }
             _ if separator => match c {
-                '<' | '>' => {
-                    skip_while(&mut chars, |c| "<>&|-".contains(c));
-                    target = true;
-                }
+                '<' | '>' => target = Some(redirection_operator(c, &mut chars)),
                 '&' if peek(&chars) == Some('>') => {}
                 ';' | '|' | '&' | '(' | ')' | '\n' => {
                     commands.push(std::mem::take(&mut words));
                     // `<(…)` and `>(…)` are commands, not targets.
-                    target = false;
+                    target = None;
                     match (c, top) {
                         ('(', _) => open.push('('),
                         (')', Some('(')) => {
@@ -961,9 +960,52 @@ fn simple_commands(command: &str, comments: bool) -> Vec<Vec<Word>> {
         }
         previous = Some(if substitution && c == '$' { '(' } else { c });
     }
-    words.extend(word.filter(|_| !target).map(|w| Word { start, ..w }));
+    let word = word.map(|w| Word { start, ..w });
+    end_word(&mut words, &mut targets, word, &mut target, false);
     commands.push(words);
-    commands
+    Tokens { commands, targets }
+}
+
+/// What [`simple_commands`] reads from a command: its simple commands as
+/// words, and its redirections as operator (`>`, `>>`, `2>`'s `>`, `>&`, `<<`)
+/// and target word.
+struct Tokens {
+    commands: Vec<Vec<Word>>,
+    targets: Vec<(String, Word)>,
+}
+
+/// A redirection writes a file: an operator with `>` (also `<>`, `>|`) to a
+/// target other than `/dev/null`, or a duplication (`>&2`, `2>&1`) of anything
+/// but a descriptor number or `-`.
+fn writes_file(operator: &str, target: &Word) -> bool {
+    let descriptor = target.text == "-" || target.text.bytes().all(|b| b.is_ascii_digit());
+    operator.contains('>')
+        && (target.expanded || target.text != "/dev/null")
+        && !(operator.contains('&') && descriptor && !target.text.is_empty())
+}
+
+/// `command` redirects output to a file in either comment reading (a quoted
+/// `>` is none); a command with a construct the tokenizer does not model
+/// ([`models_prose`]) is read as text: every `>` but the harmless ones of
+/// [`without_null_redirections`] counts (fail closed, ADR-0049).
+fn redirects_to_file(command: &str) -> bool {
+    if !models_prose(command) {
+        return without_null_redirections(command).contains('>');
+    }
+    [false, true].into_iter().any(|comments| {
+        simple_commands(command, comments)
+            .targets
+            .iter()
+            .any(|(operator, target)| writes_file(operator, target))
+    })
+}
+
+/// The redirection operator that starts with `first` (`>`, `>>`, `>|`, `>&`,
+/// `<<-` …), advancing `chars` past the rest of it.
+fn redirection_operator(first: char, chars: &mut std::str::Chars<'_>) -> String {
+    let rest = chars.as_str();
+    skip_while(chars, |c| "<>&|-".contains(c));
+    format!("{first}{}", &rest[..rest.len() - chars.as_str().len()])
 }
 
 /// Advances `chars` past the characters that satisfy `f`.
@@ -973,14 +1015,22 @@ fn skip_while(chars: &mut std::str::Chars<'_>, f: impl Fn(char) -> bool) {
     }
 }
 
-/// Ends the `word` being read at a separator or substitution: it joins `words`
-/// unless it is the `target` of a redirection or, before a `redirection`
-/// operator, its descriptor number (`2>`).
-fn end_word(words: &mut Vec<Word>, word: Option<Word>, target: &mut bool, redirection: bool) {
+/// Ends the `word` being read at a separator or substitution: it joins
+/// `targets` with its operator if it is the `target` of a redirection, is
+/// dropped if it is the descriptor number before a `redirection` operator
+/// (`2>`), and joins `words` otherwise.
+fn end_word(
+    words: &mut Vec<Word>,
+    targets: &mut Vec<(String, Word)>,
+    word: Option<Word>,
+    target: &mut Option<String>,
+    redirection: bool,
+) {
     let Some(word) = word else { return };
-    let descriptor = redirection && word.text.bytes().all(|b| b.is_ascii_digit());
-    if !std::mem::take(target) && !descriptor {
-        words.push(word);
+    match target.take() {
+        Some(operator) => targets.push((operator, word)),
+        None if redirection && word.text.bytes().all(|b| b.is_ascii_digit()) => {}
+        None => words.push(word),
     }
 }
 
@@ -1284,13 +1334,6 @@ fn short_flags(word: &str) -> Option<&str> {
     word.strip_prefix('-').filter(|flags| !flags.starts_with('-'))
 }
 
-/// No redirection besides those in [`without_null_redirections`], no
-/// substitution, and every segment [`reads_only`].
-fn is_pure_read(command: &str) -> bool {
-    let command = without_null_redirections(command);
-    !command.contains(['>', '`', '(']) && segments(&command).all(reads_only)
-}
-
 /// A simple command that starts with a read-only program (a leading
 /// `VAR=value` is not one): `sort` without an output file or compress program
 /// (GNU accepts it abbreviated to `--co`), `uniq` without an output operand,
@@ -1495,23 +1538,28 @@ fn check_named_role(root: &Path, input: &Value, rel: &str) -> Result<(), String>
 }
 
 /// The kinds of file a path named in a shell command can be: a file (a last
-/// component with a `.`) its [`paths::kind`]; a source-tree directory below
-/// `tests` a test, a source tree or crate root (`crates`, `crates/<crate>`,
-/// `xtask`, `third_party/<fork>`) both, any other code (`crates/<crate>/src`).
+/// component with a `.` and no glob) its [`paths::kind`]; a directory, or a
+/// glob (`*?[` in the last component) in one, below `tests` or `models` a
+/// test, any other source-tree directory both (`crates/<crate>/src` and its
+/// modules hold unit tests in `tests.rs`; `crates`, a crate root, `xtask`).
 fn named_kinds(rel: &str) -> &'static [Kind] {
     let lower = rel.to_lowercase();
-    let parts: Vec<&str> = lower.split('/').collect();
-    if parts.last().is_some_and(|name| name.contains('.')) {
-        return match paths::kind(rel) {
-            Kind::Test => &[Kind::Test],
-            Kind::Code => &[Kind::Code],
-            Kind::Other => &[Kind::Other],
-        };
-    }
-    let root = parts.len() == 1 || (parts.len() == 2 && parts[0] != "xtask");
-    match paths::kind(&format!("{lower}/x.rs")) {
+    let (parent, name) = lower.rsplit_once('/').unwrap_or(("", &lower));
+    let glob = name.contains(['*', '?', '[']);
+    let kind = if name.contains('.') && !glob {
+        paths::kind(rel)
+    } else {
+        let dir = if glob { parent } else { lower.as_str() };
+        if dir == "models" {
+            return &[Kind::Test];
+        }
+        match paths::kind(&format!("{dir}/x.rs")) {
+            Kind::Code => return &[Kind::Code, Kind::Test],
+            kind => kind,
+        }
+    };
+    match kind {
         Kind::Test => &[Kind::Test],
-        Kind::Code if root => &[Kind::Code, Kind::Test],
         Kind::Code => &[Kind::Code],
         Kind::Other => &[Kind::Other],
     }

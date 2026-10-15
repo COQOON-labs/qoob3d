@@ -156,8 +156,11 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    `-o` is `--only-matching`, a read), `file` without `-C`/`--compile`, `echo`,
    `printf`, `cd`, `shellcheck`, `true`, `:`, the compound keywords
    `if`/`then`/`else`/`elif`/`fi`/`{`/`}`, and assignments on their own; no redirection
-   but `/dev/null` and `2>&1`. A program after an assignment (`GIT_EXTERNAL_DIFF=x git
-   diff`) or given by an expansion is no read. Anything else is denied (`ed`, `vim -es`,
+   but `/dev/null` and `2>&1`. Whether there is a redirection decides the quote-aware
+   tokenizer in both comment readings, so a quoted `>` or `<` (`grep "-> bool"`) is none;
+   a command with a construct it does not model is read as text (fail closed). The checks
+   of the hook environment and `.git` (ADR-0043) use the same allowlist. A program after
+   an assignment (`GIT_EXTERNAL_DIFF=x git diff`) or given by an expansion is no read. Anything else is denied (`ed`, `vim -es`,
    `git archive -o`, `cmake -E`, `unzip`, `php -r` were missed by a list of writers). This
    replaces the writer list of decisions 5 to 7: the sed rules of decision 5 now decide
    whether a sed only reads; the programs of decisions 6 and 7 are simply no reads.
@@ -171,11 +174,12 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    cargo command only words with a `/` count as paths (`-p xtask` names a package). The
    fixture directory and every ancestor of it (`crates/qoob3d-core/tests`, `crates`, the
    repository root `.`) count as fixture paths, for shell commands and Edit/Write, since
-   removing, moving or restoring them touches every fixture. A named directory goes through
-   the role check: below `tests` it is a test, a source tree or crate root (`crates`,
-   `crates/<crate>`, `xtask`) holds both and conflicts with every role (a context without
-   an agent type is denied rather than bound to both), any other source directory
-   (`crates/<crate>/src`) is code.
+   removing, moving or restoring them touches every fixture. A named directory, and a glob
+   (`*?[` in the last component), goes through the role check: below `tests` or `models`
+   it is a test; every other source-tree directory holds both (`crates`, a crate root,
+   `xtask`, and `crates/<crate>/src` with its modules, which hold unit tests in
+   `tests.rs`) and conflicts with every role (a context without an agent type is denied
+   rather than bound to both).
 
 ## Consequences
 
