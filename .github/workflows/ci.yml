@@ -94,6 +94,9 @@ jobs:
     name: check (macOS)
     runs-on: macos-15
     timeout-minutes: 90
+    env:
+      # Less debug info: faster test builds and links. CI only (ADR-0050).
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -101,11 +104,35 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: macos
+      - name: OCCT cache key (ADR-0050)
+        id: occt-key
+        run: |
+          version=$(awk '/^name = "occt-sys"$/ { getline; gsub(/"/, "", $3); print $3 }' Cargo.lock)
+          echo "key=occt-$RUNNER_OS-$RUNNER_ARCH-$ImageOS-$version-${{ hashFiles('third_party/opencascade-sys/build.rs') }}" >> "$GITHUB_OUTPUT"
+      - name: Restore the OCCT install (ADR-0050)
+        id: occt-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/OCCT
+          key: ${{ steps.occt-key.outputs.key }}
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-deny
+      - name: Build OCCT, skipped when restored (ADR-0050)
+        id: occt-build
+        run: cargo build -p opencascade-sys
       - name: cargo xtask check (definition of "done")
         run: cargo xtask check
+      # Saved even when the check is red, as soon as OCCT itself was built.
+      - name: Drop the OCCT cmake build dir (ADR-0050)
+        if: always() && steps.occt-build.outcome == 'success' && steps.occt-cache.outputs.cache-hit != 'true'
+        run: rm -rf target/OCCT/build
+      - name: Save the OCCT install (ADR-0050)
+        if: always() && steps.occt-build.outcome == 'success' && steps.occt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/OCCT
+          key: ${{ steps.occt-key.outputs.key }}
 
   mutants:
     name: mutants (changed code)
@@ -147,6 +174,9 @@ jobs:
     runs-on: ubuntu-24.04
     continue-on-error: true
     timeout-minutes: 90
+    env:
+      # Less debug info: faster test builds and links. CI only (ADR-0050).
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -159,8 +189,32 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: linux
+      - name: OCCT cache key (ADR-0050)
+        id: occt-key
+        run: |
+          version=$(awk '/^name = "occt-sys"$/ { getline; gsub(/"/, "", $3); print $3 }' Cargo.lock)
+          echo "key=occt-$RUNNER_OS-$RUNNER_ARCH-$ImageOS-$version-${{ hashFiles('third_party/opencascade-sys/build.rs') }}" >> "$GITHUB_OUTPUT"
+      - name: Restore the OCCT install (ADR-0050)
+        id: occt-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/OCCT
+          key: ${{ steps.occt-key.outputs.key }}
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-deny
+      - name: Build OCCT, skipped when restored (ADR-0050)
+        id: occt-build
+        run: cargo build -p opencascade-sys
       - name: cargo xtask check
         run: xvfb-run -a cargo xtask check
+      # Saved even when the check is red, as soon as OCCT itself was built.
+      - name: Drop the OCCT cmake build dir (ADR-0050)
+        if: always() && steps.occt-build.outcome == 'success' && steps.occt-cache.outputs.cache-hit != 'true'
+        run: rm -rf target/OCCT/build
+      - name: Save the OCCT install (ADR-0050)
+        if: always() && steps.occt-build.outcome == 'success' && steps.occt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/OCCT
+          key: ${{ steps.occt-key.outputs.key }}

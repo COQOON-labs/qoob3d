@@ -23,4 +23,5 @@ cxx = "1"
 [build-dependencies]
 cmake = "0.1"
 cxx-build = "1"
-occt-sys = { version = "7.8.1", optional = true }
+# QOOB3D: exact pin, build.rs checks the install against this version (ADR-0050).
+occt-sys = { version = "=7.8.1", optional = true }

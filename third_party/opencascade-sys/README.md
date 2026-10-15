@@ -17,7 +17,7 @@ the kernel looked for the OCCT headers before OCCT was built. With
 
 1. `Cargo.toml` rewritten (crates.io-normalised manifest replaced,
    `publish = false`) and `links = "occt"` added. Feature `builtin` and the
-   dependencies are unchanged.
+   dependencies are unchanged, except the exact `occt-sys` pin of item 4.
 2. `build.rs` prints `cargo:include=<OCCT include dir>` (the `include_dir` from
    `OcctConfig::detect()`, works for builtin and system OCCT). Marked with
    `// QOOB3D:`.
@@ -25,3 +25,10 @@ the kernel looked for the OCCT headers before OCCT was built. With
    headers trigger `sprintf` deprecation warnings, and Cargo shows build-script
    warnings of path dependencies on every build, which buries real warnings.
    Marked with `// QOOB3D:`.
+4. With `builtin`, `build.rs` skips `occt_sys::build_occt()` when
+   `occt_sys::occt_path()` already holds a complete install of the pinned OCCT
+   (`BUILTIN_OCCT_VERSION` in `include/Standard_Version.hxx`, every library of
+   `OCCT_LIBS` in `lib/`). For this, `Cargo.toml` pins `occt-sys = "=7.8.1"`;
+   bump both together. CI restores that install from its cache, so OCCT is not
+   rebuilt (`docs/adr/0050-ci-caches-the-occt-install-by-version.md`). Marked
+   with `// QOOB3D:`.

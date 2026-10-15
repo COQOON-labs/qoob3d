@@ -1,0 +1,17 @@
+# build.rs wants OCCT 7.8.2 while occt-sys stays pinned and locked at 7.8.1,
+# so the install never matches and OCCT is rebuilt on every build (ADR-0050)
+command: cargo test -p xtask --quiet occt_version_pins_agree
+expect: OCCT version pins disagree
+--- patch
+diff --git a/third_party/opencascade-sys/build.rs b/third_party/opencascade-sys/build.rs
+--- a/third_party/opencascade-sys/build.rs
++++ b/third_party/opencascade-sys/build.rs
+@@ -6,7 +6,7 @@
+ /// QOOB3D: OCCT version that the pinned occt-sys (`=7.8.1` in Cargo.toml) builds; keep both
+ /// in step (ADR-0050).
+ #[cfg(feature = "builtin")]
+-const BUILTIN_OCCT_VERSION: &str = "7.8.1";
++const BUILTIN_OCCT_VERSION: &str = "7.8.2";
+
+ /// The list of used OpenCASCADE libraries which needs to be linked with.
+ const OCCT_LIBS: &[&str] = &[
