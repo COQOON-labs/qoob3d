@@ -151,7 +151,9 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    command of both readings only reads: the read-only programs (`cat`, `grep`, `ls`, `rg`,
    `find` without actions …), `sed` without in-place editing and with a readable script
    that writes nothing, `git log|diff|show|status|blame|ls-files|grep|rev-parse|cat-file`
-   without a global option and without `--output`/`-o`/`--ext-diff`/`--textconv`, `echo`,
+   without a global option and without `--output`/`-o`/`--ext-diff`/`--textconv`, cat-file's
+   `--filters` and grep's `-O`/`--open-files-in-pager` (also bundled and abbreviated; grep's
+   `-o` is `--only-matching`, a read), `file` without `-C`/`--compile`, `echo`,
    `printf`, `cd`, `shellcheck`, `true`, `:`, the compound keywords
    `if`/`then`/`else`/`elif`/`fi`/`{`/`}`, and assignments on their own; no redirection
    but `/dev/null` and `2>&1`. A program after an assignment (`GIT_EXTERNAL_DIFF=x git
@@ -165,7 +167,15 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    path is denied (ADR-0030, also unlocked, before the role check), and a test or code path
    goes through the role check (ADR-0039), which binds the role of a context without an
    agent type. A read binds nothing, and neither do `git add`, `git commit` and `git push`,
-   which change no file content, so the main context stages tests and code separately.
+   which change no file content, so the main context stages tests and code separately. In a
+   cargo command only words with a `/` count as paths (`-p xtask` names a package). The
+   fixture directory and every ancestor of it (`crates/qoob3d-core/tests`, `crates`, the
+   repository root `.`) count as fixture paths, for shell commands and Edit/Write, since
+   removing, moving or restoring them touches every fixture. A named directory goes through
+   the role check: below `tests` it is a test, a source tree or crate root (`crates`,
+   `crates/<crate>`, `xtask`) holds both and conflicts with every role (a context without
+   an agent type is denied rather than bound to both), any other source directory
+   (`crates/<crate>/src`) is code.
 
 ## Consequences
 
@@ -219,8 +229,9 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
 
 - Code: `xtask/src/guard.rs` (`models_prose`, `without_prose`, `is_message_form`,
   `stands_alone`, `expands`, `ends_early`, `writes_regular_file`, `only_redirects_to_file`,
-  `simple_commands`, `sed_writes`, `sed_scripts`, `runs_with_flag`, `harness_in_shell`,
-  `pure_read`, `reads`, `git_reads`, `check_shell_paths`, `stages`)
+  `simple_commands`, `sed_command_writes`, `sed_script_writes`, `sed_scripts`,
+  `edits_in_place`, `harness_in_shell`, `pure_read`, `reads`, `git_reads`,
+  `check_shell_paths`, `stages`, `holds_fixtures`, `named_kinds`, `check_named_role`)
 - Sabotage cases: `harness/sabotage/guard-harness-shell-after-heredoc.case`,
   `guard-harness-shell-interpreter-heredoc.case`, `guard-prose-heredoc-body-checked.case`,
   `guard-harness-shell-fail-closed-prose.case`, `guard-harness-shell-backtick-comment.case`,
@@ -231,5 +242,7 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
   `guard-harness-shell-sed-{write,execute,expanded-script,script-file}.case`,
   `guard-harness-shell-in-place-in-substitution.case`,
   `guard-harness-shell-unlisted-writer.case`, `guard-implementer-shell-writes-test.case`,
-  `guard-test-author-shell-writes-code.case`, `guard-shell-writes-fixture.case`
+  `guard-test-author-shell-writes-code.case`, `guard-shell-writes-fixture.case`,
+  `guard-harness-shell-git-grep-pager.case`, `guard-shell-removes-fixture-dir.case`,
+  `guard-test-author-shell-replaces-code-dir.case`
 - Related: ADR-0030, ADR-0037, ADR-0039, ADR-0043

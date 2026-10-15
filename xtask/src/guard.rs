@@ -9,10 +9,13 @@
 //!   `.claude/hooks/guard.sh`, the project `.claude/settings.json`); the
 //!   owner's review covers that,
 //! - format fixtures are never modified, also not by a shell command that is
-//!   no pure read ([`check_shell_paths`]),
+//!   no pure read ([`check_shell_paths`]); the fixture directory and its
+//!   ancestors up to the repository root count as fixtures ([`holds_fixtures`]),
 //! - one agent context writes either tests or production code, never both,
 //!   also through a shell command that is no pure read and names test or code
-//!   paths (`git add`, `git commit` and `git push` excepted),
+//!   paths (`git add`, `git commit` and `git push` excepted); a named
+//!   directory that holds both (a crate root) conflicts with every role
+//!   ([`named_kinds`]),
 //! - shell commands must not bypass the git hooks; a command that names a
 //!   harness path must be a pure read ([`pure_read`], an allowlist; ADR-0049).
 //!   A harness directory counts also when named without its trailing slash, as a
@@ -60,11 +63,8 @@ const BYPASSES: &[&str] =
 /// The shortest abbreviation of `--no-verify` git accepts (`--no-ver` is
 /// ambiguous with `--no-verbose`).
 const NO_VERIFY_MIN: &str = "--no-veri";
-/// sed's in-place editing ([`runs_with_flag`], [`reads`]): names, in-place
-/// short flags, short flags taking the rest of the group as argument, long
-/// options: `-i[ext]`, BSD `-I ext`, GNU `--in-place`.
-const IN_PLACE: &[(&[&str], &str, &str, &[&str])] =
-    &[(&["sed", "gsed"], "iI", "ef", &["--in-place"])];
+/// The names of sed ([`is_sed`]).
+const SED: &[&str] = &["sed", "gsed"];
 /// Shells whose `-c` runs its argument as a command line.
 const SHELLS: &[&str] = &["sh", "bash", "zsh"];
 /// Path fragments of the harness as they appear in shell commands; a directory
@@ -261,7 +261,7 @@ fn reads(words: &[Word]) -> bool {
         "echo" | "printf" | "cd" | "shellcheck" | "true" | ":" => true,
         "git" => git_reads(arguments),
         name if is_sed(name) => {
-            !runs_with_flag(&joined_words(words), IN_PLACE) && !sed_command_writes(arguments)
+            !edits_in_place(&joined_words(words)) && !sed_command_writes(arguments)
         }
         _ => reads_only(&joined_words(words)),
     }
@@ -277,12 +277,21 @@ fn is_assignment(word: &str) -> bool {
 
 /// The `arguments` of git run a read subcommand ([`GIT_READS`]) without a
 /// global option before it and without an option that writes a file or runs
-/// a program (`--output`, `-o`, `--ext-diff`, `--textconv`, also abbreviated).
+/// a program: `--output` (and `-o`, except for grep, where it is
+/// `--only-matching`), `--ext-diff`, `--textconv`, cat-file's `--filters`,
+/// grep's `-O`/`--open-files-in-pager` (also bundled, `-nO…`, and
+/// abbreviated, `--op`).
 fn git_reads(arguments: &[Word]) -> bool {
     let Some((subcommand, rest)) = arguments.split_first() else { return false };
+    let grep = subcommand.text == "grep";
     GIT_READS.contains(&subcommand.text.as_str())
         && !rest.iter().any(|w| {
-            w.text == "-o" || ["--output", "--ext", "--textc"].iter().any(|o| w.text.starts_with(o))
+            let word = w.text.as_str();
+            (word == "-o" && !grep)
+                || ["--output", "--ext", "--textc"].iter().any(|o| word.starts_with(o))
+                || is_option(word, |_| false, &["--filters"])
+                || (grep
+                    && is_option(word, |group| group.contains('O'), &["--open-files-in-pager"]))
         })
 }
 
@@ -294,40 +303,61 @@ fn git_reads(arguments: &[Word]) -> bool {
 /// `git add`, `git commit` and `git push`, which change no file content (the
 /// main context stages tests and code separately); the bodies of safe message
 /// forms are no paths. With a file redirection, whose target is no word, or a
-/// sed the tokenizer lost, every word of the other commands counts.
+/// sed the tokenizer lost, every word of the other commands counts. In a
+/// cargo command only words with a `/` are paths (`-p xtask` names a package).
 fn check_shell_paths(root: &Path, input: &Value, command: &str) -> Result<(), String> {
     if pure_read(command) {
         return Ok(());
     }
     let text = if models_prose(command) { without_prose(command) } else { command.to_owned() };
     let commands = both_readings(&text);
-    let words: Vec<String> =
+    let lists: Vec<Vec<String>> =
         if without_null_redirections(&text).contains('>') || hides_sed(&text, &commands) {
             unquoted(&text)
                 .split(|c: char| ";|&\n()`".contains(c))
-                .filter(|segment| !stages(segment.split_whitespace()))
-                .flat_map(|segment| segment.split(|c: char| c.is_whitespace() || "<>".contains(c)))
-                .map(str::to_owned)
+                .map(|segment| {
+                    segment
+                        .split(|c: char| c.is_whitespace() || "<>".contains(c))
+                        .filter(|word| !word.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
                 .collect()
         } else {
             commands
                 .iter()
-                .filter(|words| !reads(words) && !stages(words.iter().map(|w| w.text.as_str())))
-                .flatten()
-                .map(|word| word.text.clone())
+                .filter(|words| !reads(words))
+                .map(|words| words.iter().map(|word| word.text.clone()).collect())
                 .collect()
         };
-    let named: Vec<String> = words
+    let named: Vec<String> = lists
         .iter()
+        .filter(|words| !stages(words.iter().map(String::as_str)))
+        .flat_map(|words| {
+            let cargo = words.first().is_some_and(|w| program_name(w) == "cargo");
+            words.iter().filter(move |word| !cargo || word.contains('/'))
+        })
         .flat_map(|word| word.split('='))
         .filter(|word| !word.is_empty())
         .filter_map(|word| relative(root, word))
         .collect();
-    if let Some(fixture) = named.iter().find(|rel| rel.to_lowercase().starts_with(paths::FIXTURES))
+    // A fixture message comes before any role message.
+    if let Some(fixture) = named
+        .iter()
+        .find(|rel| rel.to_lowercase().starts_with(paths::FIXTURES) || holds_fixtures(rel))
     {
-        return Err(fixture_message(fixture));
+        return Err(fixture_message(if fixture.is_empty() { "." } else { fixture }));
     }
-    named.iter().try_for_each(|rel| check_role(root, input, rel))
+    named.iter().try_for_each(|rel| check_named_role(root, input, rel))
+}
+
+/// `rel` is the fixture directory or one of its ancestors, up to the
+/// repository root (`""`): removing, moving or restoring it touches every
+/// fixture (ADR-0030).
+fn holds_fixtures(rel: &str) -> bool {
+    let rel = rel.to_lowercase();
+    let dir = paths::FIXTURES.trim_end_matches('/');
+    rel.is_empty() || rel == dir || dir.starts_with(&format!("{rel}/"))
 }
 
 /// The `words` of a simple command are `git add`, `git commit` or `git push`
@@ -732,31 +762,21 @@ fn git_subcommand<'a>(mut words: impl Iterator<Item = &'a str>) -> Option<&'a st
     None
 }
 
-/// A program of `table` ([`IN_PLACE`]), also by path,
-/// followed by a short-flag group with one of its flag letters before any
-/// letter whose argument is the rest of the group (`-pi`, `-Ei.bak`, but not
-/// `-es/i/j/`), or by its long option, also abbreviated (`--in`). `command`
-/// keeps its case: lower-cased, sed's `-E -i` would read as `-e` with the
-/// script `-i`. The caller also passes each of the [`simple_commands`] as
-/// text, so that a program inside `$(…)`, backticks or `(…)` counts.
-fn runs_with_flag(command: &str, table: &[(&[&str], &str, &str, &[&str])]) -> bool {
+/// A sed ([`is_sed`]) followed by a short-flag group with an in-place flag
+/// (`i`, BSD `I`) before any letter whose argument is the rest of the group
+/// (`-ni`, `-Ei.bak`, but not `-es/i/j/`), or by `--in-place`, also
+/// abbreviated (`--in`). `command` keeps its case: lower-cased, `-E -i`
+/// would read as `-e` with the script `-i`.
+fn edits_in_place(command: &str) -> bool {
     segments(command).any(|segment| {
-        table.iter().any(|(programs, flags, argument, long)| {
-            let mut words = segment.split_whitespace();
-            words.any(|w| programs.iter().any(|p| program_name(w).eq_ignore_ascii_case(p)))
-                && words.any(|word| {
-                    is_option(
-                        word,
-                        |group| {
-                            group
-                                .chars()
-                                .take_while(|c| !argument.contains(*c))
-                                .any(|c| flags.contains(c))
-                        },
-                        long,
-                    )
-                })
-        })
+        let mut words = segment.split_whitespace();
+        words.any(is_sed)
+            && words.any(|word| {
+                let in_place = |group: &str| {
+                    group.chars().take_while(|c| !"ef".contains(*c)).any(|c| "iI".contains(c))
+                };
+                is_option(word, in_place, &["--in-place"])
+            })
     })
 }
 
@@ -772,7 +792,7 @@ fn sed_command_writes(arguments: &[Word]) -> bool {
 
 /// `word` names sed or gsed, also by path.
 fn is_sed(word: &str) -> bool {
-    ["sed", "gsed"].iter().any(|p| program_name(word).eq_ignore_ascii_case(p))
+    SED.iter().any(|p| program_name(word).eq_ignore_ascii_case(p))
 }
 
 /// A `sed` that a naive split of `command` puts in command position is no
@@ -1286,6 +1306,8 @@ fn reads_only(segment: &str) -> bool {
         }),
         Some("uniq") => words.filter(|w| !w.starts_with('-')).count() <= 1,
         Some("find") => !runs_find_action(words),
+        // `-C`/`--compile` writes a compiled magic file.
+        Some("file") => !words.any(|w| is_option(w, |group| group.contains('C'), &["--compile"])),
         Some("git") => words.next() == Some("rev-parse"),
         Some(program) => READ_ONLY.contains(&program),
         None => false,
@@ -1436,7 +1458,7 @@ fn check_file_write(root: &Path, session: &Session, rel: &str) -> Result<(), Str
              change to the human; they unlock with QOOB3D_HARNESS_UNLOCK=1."
         ));
     }
-    if lower_rel.starts_with(paths::FIXTURES) && root.join(rel).exists() {
+    if (lower_rel.starts_with(paths::FIXTURES) && root.join(rel).exists()) || holds_fixtures(rel) {
         return Err(fixture_message(rel));
     }
     Ok(())
@@ -1449,20 +1471,64 @@ fn fixture_message(rel: &str) -> String {
     )
 }
 
-/// One context writes tests or code, never both (ADR-0039). Role agents are
-/// fixed by their type; any other context is bound by its first write.
-fn check_role(root: &Path, input: &Value, rel: &str) -> Result<(), String> {
-    let wanted = match paths::kind(rel) {
-        Kind::Other => return Ok(()),
-        kind => kind,
-    };
-    let agent_type = input["agent_type"].as_str().unwrap_or_default();
-    let role = match agent_type {
+/// The kind of file a role agent writes; None for any other context.
+fn agent_role(input: &Value) -> Option<Kind> {
+    match input["agent_type"].as_str().unwrap_or_default() {
         TEST_AUTHOR => Some(Kind::Test),
         IMPLEMENTER => Some(Kind::Code),
         _ => None,
-    };
-    let role = match role {
+    }
+}
+
+/// The role check for a path named in a shell command ([`named_kinds`]): a
+/// directory that holds tests and code conflicts with every role; a context
+/// without an agent type is denied before it would be bound to both.
+fn check_named_role(root: &Path, input: &Value, rel: &str) -> Result<(), String> {
+    match named_kinds(rel) {
+        [kind] => check_role_as(root, input, rel, *kind),
+        _ if agent_role(input).is_none() => Err(format!(
+            "`{rel}` holds tests and production code, which no agent context changes together \
+             (ADR-0039). Name the files, or delegate to `{TEST_AUTHOR}` and `{IMPLEMENTER}`."
+        )),
+        kinds => kinds.iter().try_for_each(|kind| check_role_as(root, input, rel, *kind)),
+    }
+}
+
+/// The kinds of file a path named in a shell command can be: a file (a last
+/// component with a `.`) its [`paths::kind`]; a source-tree directory below
+/// `tests` a test, a source tree or crate root (`crates`, `crates/<crate>`,
+/// `xtask`, `third_party/<fork>`) both, any other code (`crates/<crate>/src`).
+fn named_kinds(rel: &str) -> &'static [Kind] {
+    let lower = rel.to_lowercase();
+    let parts: Vec<&str> = lower.split('/').collect();
+    if parts.last().is_some_and(|name| name.contains('.')) {
+        return match paths::kind(rel) {
+            Kind::Test => &[Kind::Test],
+            Kind::Code => &[Kind::Code],
+            Kind::Other => &[Kind::Other],
+        };
+    }
+    let root = parts.len() == 1 || (parts.len() == 2 && parts[0] != "xtask");
+    match paths::kind(&format!("{lower}/x.rs")) {
+        Kind::Test => &[Kind::Test],
+        Kind::Code if root => &[Kind::Code, Kind::Test],
+        Kind::Code => &[Kind::Code],
+        Kind::Other => &[Kind::Other],
+    }
+}
+
+/// One context writes tests or code, never both (ADR-0039). Role agents are
+/// fixed by their type; any other context is bound by its first write.
+fn check_role(root: &Path, input: &Value, rel: &str) -> Result<(), String> {
+    check_role_as(root, input, rel, paths::kind(rel))
+}
+
+/// [`check_role`] for `rel` as a file of the kind `wanted`.
+fn check_role_as(root: &Path, input: &Value, rel: &str, wanted: Kind) -> Result<(), String> {
+    if wanted == Kind::Other {
+        return Ok(());
+    }
+    let role = match agent_role(input) {
         Some(role) => role,
         None => bind_role(root, input, wanted)?,
     };
