@@ -995,7 +995,8 @@ fn f1_read_exception_is_strict() {
             // A program not on the list.
             "vim ~/.zshrc",
             "open ~/.zshrc",
-            "echo ~/.zshrc",
+            // (`echo ~/.zshrc` moved to hook_environment_reads_use_the_shared_allowlist:
+            // S3, one shared allowlist; only reads.)
             // Backslash-split name (removed before matching).
             "echo x >> ~/.zsh\\rc",
             "echo x >> ~/.zs\"\"henv",
@@ -1966,8 +1967,9 @@ const S1_GIT_DIR_DENIED_DERIVED: &[&str] = &[
     // `cargo` is no read-only program and `-v ` is no exclusion prefix (the
     // spec's former PASS example, withdrawn as a spec mistake).
     "cargo test -p xtask 2>&1 | grep -v .git",
-    // A command substitution is no pure read (review3 R2 listed this as PASS).
-    "ls \"$(git rev-parse --git-common-dir)\"",
+    // (`ls "$(git rev-parse --git-common-dir)"` moved to
+    // hook_environment_reads_use_the_shared_allowlist: S3, one shared
+    // allowlist; only reads.)
     // Not every `.git` is an exclusion.
     "tar czf /tmp/x.tgz --exclude=.git .git",
     "rsync -a --exclude=.git /tmp/fake/ .git/hooks/",
@@ -5831,11 +5833,11 @@ fn fixture_directory_and_ancestors_are_fixtures() {
 // ---------------------------------------------------------------------------
 // Directories and roles (critic finding R3 on c54699d, major; user decision
 // 2026-10-15): a named source-tree directory counts for the role check. A
-// directory that only holds code (`crates/qoob3d-sketch/src`, also with a
-// trailing `/`) is code unless `paths::kind` makes it a test directory
-// (`…/tests`); a directory that holds both (a crate root such as
-// `crates/qoob3d-sketch`) conflicts with every role, also for a context
-// without an agent type, which would be bound to both.
+// test directory (`…/tests`) is test; a directory that holds both (a crate
+// root such as `crates/qoob3d-sketch`) conflicts with every role, also for a
+// context without an agent type, which would be bound to both. Since S1
+// (critic finding on 3c91d7f) `crates/<crate>/src` holds both too: unit
+// tests live in `src/**/tests.rs` (it was code-only under R3).
 // ---------------------------------------------------------------------------
 
 // ADR-0039 (critic finding R3 on c54699d): directories go through the role
@@ -5871,6 +5873,8 @@ fn directories_go_through_the_role_check() {
         // Derived: a test directory with a trailing `/`, a crate root via git.
         "rm -rf crates/qoob3d-app/tests/",
         "git checkout HEAD~5 -- crates/qoob3d-app",
+        // S1 (critic finding on 3c91d7f): `src` holds unit tests.
+        "rm -rf crates/qoob3d-sketch/src",
     ] {
         assert_denied(
             pre_tool_use(&root, &s, &implementer(command)),
@@ -5888,13 +5892,184 @@ fn directories_go_through_the_role_check() {
     ] {
         assert_eq!(pre_tool_use(&root, &s, &input), Ok(()), "{what}");
     }
-    // A context without an agent type: a crate root binds both roles and is
-    // denied; a code directory binds code, so a later test Edit is denied.
+    // A context without an agent type: a crate root and (since S1) a `src`
+    // directory would bind both roles and are denied. (Under R3 the `src`
+    // directory bound code and passed.)
     let crate_root = bash_as("rm -rf crates/qoob3d-sketch", Some("m6"), None);
     assert!(pre_tool_use(&root, &s, &crate_root).is_err(), "main context crate root");
     let src = bash_as("rm -rf crates/qoob3d-sketch/src", Some("m7"), None);
-    assert_eq!(pre_tool_use(&root, &s, &src), Ok(()), "main context code directory");
-    let edit = write("Edit", &abs(&root, TEST), "s", Some("m7"), None);
-    assert_denied(pre_tool_use(&root, &s, &edit), &[MSG_ROLE_CODE], "test edit after src");
+    assert!(pre_tool_use(&root, &s, &src).is_err(), "main context src directory");
     fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Directory kinds (critic finding S1 on 3c91d7f, major; user decision
+// 2026-10-15): every source-tree directory not inside a `tests` directory
+// holds tests and code — `crates/<c>/src`, `crates/<c>/src/<mod>` (unit
+// tests live in `<mod>/tests.rs`), `xtask/src` — and so does a last
+// component with a glob character (`*?[`). `models` and `models/<glob>` are
+// test (oracles).
+// ---------------------------------------------------------------------------
+
+// ADR-0039 (critic finding S1 on 3c91d7f): directories and globs below the
+// source trees conflict with both roles; `models` is test.
+#[test]
+fn directory_and_glob_kinds_for_roles() {
+    let root = repo("directory_kinds");
+    let s = locked();
+    let author = |c: &str| bash_as(c, Some("t1"), Some("test-author"));
+    let implementer = |c: &str| bash_as(c, Some("i1"), Some("implementer"));
+    for command in [
+        // The finding's examples.
+        "git checkout HEAD~5 -- crates/qoob3d-sketch/src",
+        "rm -rf crates/qoob3d-core/src/mesh",
+        "git checkout main -- models",
+        "sed -i s/12000/12345/ models/*",
+        "sed -i s/a/b/ crates/qoob3d-core/src/mesh/*",
+        // Derived: another glob character, a module directory with `/`.
+        "sed -i s/a/b/ crates/qoob3d-core/src/mesh/?.rs",
+        "git checkout HEAD~5 -- crates/qoob3d-core/src/mesh/",
+    ] {
+        assert_denied(
+            pre_tool_use(&root, &s, &implementer(command)),
+            &[MSG_ROLE_CODE, "`test-author`"],
+            &format!("implementer: {command}"),
+        );
+    }
+    for command in [
+        // The finding's example.
+        "rm -rf crates/qoob3d-core/src/mesh",
+        // Derived: a glob in a module directory.
+        "sed -i s/a/b/ crates/qoob3d-core/src/mesh/*",
+    ] {
+        assert_denied(
+            pre_tool_use(&root, &s, &author(command)),
+            &[MSG_ROLE_TESTS, "`implementer`"],
+            &format!("test-author: {command}"),
+        );
+    }
+    for (input, what) in [
+        // The finding's examples.
+        (author("cp /tmp/x models/gear.expect.json"), "test-author oracle file"),
+        (implementer("cp /tmp/x crates/qoob3d-sketch/src/new.rs"), "implementer code file"),
+        (implementer("ls models"), "implementer ls models"),
+        (author("grep -rn x crates/qoob3d-core/src"), "test-author grep src"),
+        // Derived: the test author rewrites the oracles, models is test.
+        (author("sed -i s/12000/12345/ models/*"), "test-author models glob"),
+    ] {
+        assert_eq!(pre_tool_use(&root, &s, &input), Ok(()), "{what}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Quoted `>` and `<` (critic finding S2 on 3c91d7f, major; user decision
+// 2026-10-15): a `>` or `<` inside quotes is no redirection. Whether a command
+// has a file redirection is decided by the quote-aware tokenizer (both
+// comment readings must agree there is none; unmodelled constructs fail
+// closed). A real redirection to a file still makes the command no pure read,
+// also next to a harness read and also to a file outside the repository.
+// ---------------------------------------------------------------------------
+
+/// Reads with a quoted `>` or `<`. Must pass for every role and bind nothing.
+const READS_WITH_QUOTED_ANGLES: &[&str] = &[
+    // The finding's examples (S2 on 3c91d7f, user decision 2026-10-15).
+    "rg -n \"fn x() -> Result\" crates/qoob3d-core/src",
+    "grep -n \"Vec<Word>\" crates/qoob3d-core/src/lib.rs",
+    "grep -n \"crates/<crate>/src\" docs/architecture.md",
+    "grep -n 'a>b' docs/architecture.md",
+    // Derived: single quotes around `<` and `>` in a test file.
+    "grep -n '<<EOF' crates/qoob3d-core/tests/expr.rs",
+];
+
+// ADR-0039 (critic finding S2 on 3c91d7f): reads with a quoted `>`/`<` pass
+// for every role and leave a context without an agent type unbound.
+#[test]
+fn quoted_angles_are_no_redirections_for_roles() {
+    let root = repo("quoted_angles_roles");
+    let s = locked();
+    for (i, command) in READS_WITH_QUOTED_ANGLES.iter().enumerate() {
+        for (id, kind) in [(Some("i1"), Some("implementer")), (Some("t1"), Some("test-author"))] {
+            assert_eq!(
+                pre_tool_use(&root, &s, &bash_as(command, id, kind)),
+                Ok(()),
+                "{kind:?}: {command}"
+            );
+        }
+        // A context without an agent type stays unbound: after the read it
+        // may still edit a test, another one may still edit code.
+        let (a, b) = (format!("ma{i}"), format!("mb{i}"));
+        for id in [&a, &b] {
+            let read = bash_as(command, Some(id), None);
+            assert_eq!(pre_tool_use(&root, &s, &read), Ok(()), "{id}: {command}");
+        }
+        let test = write("Edit", &abs(&root, TEST), "s", Some(&a), None);
+        assert_eq!(pre_tool_use(&root, &s, &test), Ok(()), "{a}: test after {command}");
+        let code = write("Edit", &abs(&root, CODE), "s", Some(&b), None);
+        assert_eq!(pre_tool_use(&root, &s, &code), Ok(()), "{b}: code after {command}");
+    }
+    // Real redirections stay writes: the test author writing code.
+    let write_code =
+        bash_as("echo x > crates/qoob3d-core/src/x.rs", Some("t1"), Some("test-author"));
+    assert_denied(pre_tool_use(&root, &s, &write_code), &[MSG_ROLE_TESTS], "redirection to code");
+    fs::remove_dir_all(&root).unwrap();
+}
+
+/// Harness reads with a real redirection to a file (also outside the
+/// repository), with the fragment the denial must name. Must be denied in a
+/// locked session.
+const HARNESS_READS_WITH_A_REDIRECTION: &[(&str, &str)] = &[
+    // The finding's decisions (S2, user decision 2026-10-15).
+    ("cat xtask/src/guard.rs > /tmp/x", "xtask/"),
+    ("grep x xtask/src/guard.rs >| /tmp/x", "xtask/"),
+    ("grep x harness/rules.md 1>/tmp/x", "harness/"),
+    // Derived: a quoted `>` next to a real one.
+    ("grep -n \"a>b\" harness/rules.md > /tmp/x", "harness/"),
+];
+
+// ADR-0037/ADR-0043 (critic finding S2 on 3c91d7f): a quoted `-> bool` keeps a
+// harness read pure; a real redirection to a file does not. Locked, spec root
+// and a temp repo; the denials are allowed unlocked.
+#[test]
+fn quoted_angles_keep_harness_reads_pure() {
+    let root = repo("quoted_angles_harness");
+    let unlocked = session(true, &unused_home());
+    for command in
+        ["grep -n -e \"-> bool\" xtask/src/guard.rs", "grep -n 'Vec<Word>' harness/rules.md"]
+    {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    for (command, fragment) in HARNESS_READS_WITH_A_REDIRECTION {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// One allowlist (critic finding S3 on 3c91d7f, minor; user decision
+// 2026-10-15): the hook-environment and `.git` checks use the same pure-read
+// logic as the harness check. A read followed by `echo` is a pure read.
+// ---------------------------------------------------------------------------
+
+// ADR-0043 (critic finding S3 on 3c91d7f): a read of a startup file followed
+// by `echo` passes, locked and unlocked; the other deny tests of the hook
+// environment and `.git` stay as they are.
+#[test]
+fn hook_environment_reads_use_the_shared_allowlist() {
+    for unlocked in [false, true] {
+        for command in [
+            "grep x ~/.zshrc; echo done",
+            "cat ~/.zshrc | head -3; echo ok",
+            // Moved (S3, one shared allowlist; only reads): from
+            // f1_read_exception_is_strict and S1_GIT_DIR_DENIED_DERIVED.
+            "echo ~/.zshrc",
+            "ls \"$(git rev-parse --git-common-dir)\"",
+        ] {
+            assert_eq!(spec_shell(unlocked, command), Ok(()), "{command:?} (unlocked: {unlocked})");
+        }
+    }
 }

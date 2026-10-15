@@ -1,0 +1,6 @@
+# The implementer rewrites the reference-model oracles with a glob through
+# the shell: `models/*` is test (ADR-0033, ADR-0039; critic finding S1 on
+# 3c91d7f)
+command: cargo xtask guard
+expect: This agent context already writes production code
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "sed -i s/12000/12345/ models/*"}, "hook_event_name": "PreToolUse", "agent_type": "implementer", "agent_id": "a1"}
