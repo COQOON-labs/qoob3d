@@ -135,10 +135,15 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    recognised as the first word inside `$(…)`, backticks and `(…)` subshells, using the
    same quote-aware split into simple commands as decision 5. `echo $(sed -n 1p f)` only
    reads and passes.
-7. **Deletions count as writers without a writer word:** `unlink` (also by path), `find`
+7. **Deletions count as writers without a writer word:** `unlink`, `rmdir`, `shred` (also
+   by path), `rm` as the last word or before `;`, `|`, `&`, `)` (`… | xargs rm`), `find`
    (also by path) with an action primary (`-delete`, `-exec`/`-execdir`, `-ok`/`-okdir`,
-   `-fprint…`, `-fls`), and `git clean`, `git stash`, `git reset` (with `checkout`,
-   `restore` and `apply`), also after git's global options (`git -C . clean`).
+   `-fprint…`, `-fls`), and the git subcommands that rewrite the work tree or index:
+   `clean`, `stash`, `reset`, `checkout`, `restore`, `apply`, `switch`, `rebase`, `merge`,
+   `pull`, `cherry-pick`, `revert`, `am`, `read-tree`, `checkout-index`, `update-index`,
+   `sparse-checkout`, `submodule`, also after git's global options (`git -C . clean`). A
+   harness path in a global option counts like any other (`git -C xtask switch main`).
+   False alarms like `ls harness | grep rm` are accepted.
 
 ## Consequences
 

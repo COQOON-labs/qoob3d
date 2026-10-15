@@ -180,9 +180,28 @@ const READ_ONLY: &[&str] = &[
 ];
 /// Prefixes of the `find` primaries that write or run something.
 const FIND_ACTIONS: &[&str] = &["-exec", "-ok", "-delete", "-fprint", "-fls"];
-/// git subcommands that remove or rewrite files in the work tree ([`writes`]);
-/// `checkout`, `restore` and `apply` also as text in [`WRITES`].
-const GIT_WRITES: &[&str] = &["clean", "stash", "reset", "checkout", "restore", "apply"];
+/// git subcommands that remove or rewrite files in the work tree or index
+/// ([`writes`]); `checkout`, `restore` and `apply` also as text in [`WRITES`].
+const GIT_WRITES: &[&str] = &[
+    "clean",
+    "stash",
+    "reset",
+    "checkout",
+    "restore",
+    "apply",
+    "switch",
+    "rebase",
+    "merge",
+    "pull",
+    "cherry-pick",
+    "revert",
+    "am",
+    "read-tree",
+    "checkout-index",
+    "update-index",
+    "sparse-checkout",
+    "submodule",
+];
 /// git's global options that take the next word as their argument.
 const GIT_GLOBAL_ARGUMENTS: &[&str] =
     &["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env", "--exec-path"];
@@ -646,14 +665,26 @@ fn file_name_positions<'a>(command: &'a str, name: &'a str) -> impl Iterator<Ite
 }
 
 /// A lower-cased command that (may) write files; in-place editors and
-/// inline-code interpreters in [`runs_with_flag`] need the case. Also `find`
-/// (also by path) with an action ([`FIND_ACTIONS`]) and the git subcommands of
-/// [`GIT_WRITES`], also after global options (`git -C . clean`).
+/// inline-code interpreters in [`runs_with_flag`] need the case. Also the
+/// words `dd`, `install`, `unlink`, `rmdir`, `shred` (also by path), `rm` at
+/// the end or before `;|&)` (`| xargs rm`), `find` (also by path) with an
+/// action ([`FIND_ACTIONS`]) and the git subcommands of [`GIT_WRITES`], also
+/// after global options (`git -C . clean`).
 fn writes(command: &str) -> bool {
     WRITES.iter().any(|w| command.contains(w))
         || command
             .split(|c: char| !(c.is_ascii_alphanumeric() || "_-".contains(c)))
-            .any(|w| matches!(w, "dd" | "install" | "unlink"))
+            .any(|w| matches!(w, "dd" | "install" | "unlink" | "rmdir" | "shred"))
+        || command.match_indices("rm").any(|(i, _)| {
+            command[..i]
+                .chars()
+                .next_back()
+                .is_none_or(|c| c.is_whitespace() || "/;|&(".contains(c))
+                && command[i + 2..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| c.is_whitespace() || ";|&)".contains(c))
+        })
         || segments(command).any(|segment| {
             let mut words = segment.split_whitespace();
             words.any(|w| program_name(w) == "find") && runs_find_action(words)
