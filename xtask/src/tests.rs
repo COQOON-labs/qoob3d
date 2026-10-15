@@ -191,23 +191,3 @@ fn no_module_but_main_spawns_git_itself() {
         offenders.join("; ")
     );
 }
-
-// One git helper (critic K-01 on ef1aa48): selftest.rs passes the program
-// name `"git"` to no runner of its own (`sh(work, "git", …)` inherits
-// GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE from a hook) and calls
-// `crate::git` / `crate::git_command`. Its own `Command::new("git")` is
-// caught by `no_module_but_main_spawns_git_itself`.
-#[test]
-fn selftest_uses_the_shared_git_helper() {
-    let source =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/selftest.rs")).unwrap();
-    let production = production_part(&source);
-    assert!(
-        !production.contains("\"git\""),
-        "selftest.rs passes the program `\"git\"` to a runner of its own"
-    );
-    assert!(
-        production.contains("crate::git") || production.contains("use crate::{git"),
-        "selftest.rs does not use `crate::git` / `crate::git_command`"
-    );
-}

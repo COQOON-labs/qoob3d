@@ -3514,12 +3514,13 @@ fn heredocs_with_at_most_one_output_redirection_stay_data() {
 // The heredoc's program as an allowlist (critic finding on 9543ec3, within
 // the user's fail-closed direction): a heredoc body is data only when, in
 // addition to the safe shape after the marker, the simple command carrying
-// it is a known data reader — `cat`, `tee`, `git`, `gh`, also by path — and
-// only its words precede the marker on the logical line, from the line
-// start, right after an unclosed `$(`, or from the backslash-joined start of
-// the command. No `;&|(){}` and no compound keyword (`if`, `then`, `do`,
-// `done`, `fi`, `while` …) before the marker within that command. Anything
-// else keeps the body as shell text, checked word by word.
+// it is a known data reader — `cat`, `git`, `gh`, also by path (`tee` was one
+// until the user's decision of 2026-10-15, see TEE_HEREDOCS) — and only its
+// words precede the marker on the logical line, from the line start, right
+// after an unclosed `$(`, or from the backslash-joined start of the command.
+// No `;&|(){}` and no compound keyword (`if`, `then`, `do`, `done`, `fi`,
+// `while` …) before the marker within that command. Anything else keeps the
+// body as shell text, checked word by word.
 // ---------------------------------------------------------------------------
 
 /// Heredocs whose command is no known data reader, with the directory the
@@ -3545,23 +3546,22 @@ const HEREDOC_COMMANDS_THAT_ARE_NO_DATA_READERS: &[(&str, &str)] = &[
     ("env bash <<EOF\nrm -rf xtask\nEOF", "xtask"),
 ];
 
-/// Data heredocs of known readers (`cat`, `tee`, `git`, `gh`, also by path,
-/// with options before the marker). Must pass in a locked session. (The
+/// Data heredocs of known readers (`cat`, `git`, `gh`, also by path, with
+/// options before the marker). Must pass in a locked session. (The
 /// `git commit -F - <<'EOF'`, `cat > /tmp/note <<EOF` and gh PR body forms are
 /// in HARNESS_WORDS_IN_PROSE, the continued commit form in
 /// MULTI_LINE_DATA_HEREDOCS, the `cat <<EOF > …`/`>>` forms in
 /// HEREDOC_DATA_SHAPES.)
 const HEREDOC_DATA_READERS: &[&str] = &[
-    // The task's examples.
-    "tee /tmp/note <<EOF\nharness\nEOF",
+    // The task's examples. (`tee /tmp/note <<EOF` moved to TEE_HEREDOCS:
+    // since the user's decision of 2026-10-15 `tee` is no message form.)
     "/bin/cat > /tmp/n <<EOF\nxtask notes\nEOF",
-    // Derived: git by path, gh with options, tee appending. (`git -C
-    // /tmp/repo commit -F -` moved to HEREDOC_NON_MESSAGE_FORMS: since the
-    // exact message forms, a global option before the subcommand keeps the
-    // body; critic finding on cd258d4.)
+    // Derived: git by path, gh with options. (`git -C /tmp/repo commit -F -`
+    // moved to HEREDOC_NON_MESSAGE_FORMS: since the exact message forms, a
+    // global option before the subcommand keeps the body; critic finding on
+    // cd258d4. `tee -a /tmp/note <<'EOF'` moved to TEE_HEREDOCS.)
     "/usr/bin/git commit -F - <<'EOF'\nfix the harness guard\nEOF",
     "gh issue create --title Guard --body-file - <<'EOF'\nharness notes\nEOF",
-    "tee -a /tmp/note <<'EOF'\nxtask\nEOF",
 ];
 
 // ADR-0037/ADR-0043 (critic finding on 9543ec3): a heredoc whose command is
@@ -3663,8 +3663,10 @@ fn closing_words_in_prose_keep_data_heredocs_data() {
 //   by path, but no global option before the subcommand (`-C`, `-c`);
 // - `gh pr create|edit`, `gh issue create|edit` with `--body-file -` or
 //   `--body "$(cat <<'EOF' …)"`;
-// - `cat`/`tee` writing to a file: `cat > path <<EOF`, `cat <<EOF > path`,
-//   `cat >> path`, `tee path <<EOF`, `tee -a path <<EOF`.
+// - `cat` writing to a file: `cat > path <<EOF`, `cat <<EOF > path`,
+//   `cat >> path` (`tee path <<EOF` and `tee -a path <<EOF` were forms until
+//   the user's decision of 2026-10-15, see TEE_HEREDOCS; the cat form is
+//   narrowed in CAT_FORMS_THAT_WRITE_NO_REGULAR_FILE).
 // Everything else keeps the body as shell text, checked word by word.
 // ---------------------------------------------------------------------------
 
@@ -3741,6 +3743,307 @@ fn heredoc_body_is_data_only_in_the_message_forms() {
 fn heredoc_message_forms_stay_data() {
     let root = repo("heredoc_message_forms");
     for command in HEREDOC_MESSAGE_FORMS {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// A message form stands alone (critic finding on 95cc163, decided by the user
+// 2026-10-15): a command before the heredoc can route the heredoc's output
+// into a shell (`exec > >(bash)`, a fifo read by bash, a symlink to
+// /dev/stdout), a command after it can run the file it wrote. On top of every
+// earlier condition, a heredoc body is data only when the whole Bash command
+// is the message-form command alone: outside comments and blank lines,
+// nothing before the heredoc line and nothing after the terminator line. For
+// the `"$(cat <<'EOF'` forms the closing line `)"` may follow, optionally
+// with further plain arguments on that same line (no `;`, `&`, `|`, `<`, `>`,
+// `(`, `)`, backtick, `$`). Otherwise the body is checked as shell text.
+// ---------------------------------------------------------------------------
+
+/// Message forms with another command before or after them, with the
+/// directory the denial must name. bash and zsh run the body of the `tee`
+/// after `exec > >(bash)`, of the fifo and of `bash /tmp/s` (checked with a
+/// harmless equivalent); the others are denied conservatively, the
+/// `git add -A` one as the deliberate cost of the rule. Must be denied in a
+/// locked session.
+const HEREDOCS_NOT_ALONE: &[(&str, &str)] = &[
+    // The task's examples (critic finding on 95cc163, user decision
+    // 2026-10-15).
+    ("exec > >(bash)\ntee /tmp/x <<EOF\nrm -rf harness\nEOF", "harness"),
+    ("exec > >(bash)\ncat > /tmp/x <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("mkfifo /tmp/p\nbash < /tmp/p &\ncat > /tmp/p <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("ln -s /dev/stdout /tmp/x\ncat > /tmp/x <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("cat > /tmp/s <<EOF\nrm -rf xtask\nEOF\nbash /tmp/s", "xtask"),
+    ("git add -A\ngit commit -F - <<'EOF'\nfix the harness\nEOF", "harness"),
+    ("gh pr create --title X --body \"$(cat <<'EOF'\nharness\nEOF\n)\"; bash", "harness"),
+    ("gh pr create --title X --body \"$(cat <<'EOF'\nharness\nEOF\n)\" > /tmp/out", "harness"),
+    // Derived: a second message form after the first one, a command on the
+    // line after the closing `)"`, a pipe, `&&` and a `$(…)` on the closing
+    // line, a command before a `$(cat` form.
+    ("cat > /tmp/a <<EOF\nnotes\nEOF\ncat > /tmp/b <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("gh pr create --title X --body \"$(cat <<'EOF'\nharness\nEOF\n)\"\nbash", "harness"),
+    ("gh pr create --title X --body \"$(cat <<'EOF'\nharness\nEOF\n)\" | bash", "harness"),
+    ("gh pr create --title X --body \"$(cat <<'EOF'\nharness\nEOF\n)\" && bash", "harness"),
+    ("gh pr create --title X --body \"$(cat <<'EOF'\nharness\nEOF\n)\" --base $(bash)", "harness"),
+    ("cd /tmp\ngit commit -m \"$(cat <<'EOF'\nfix the xtask guard\nEOF\n)\"", "xtask"),
+];
+
+/// Message forms standing alone: around them only comments, blank lines and
+/// a trailing newline, and plain arguments after the closing `)"`. Must pass
+/// in a locked session. (Every earlier must-pass message form stays in its
+/// table: HARNESS_WORDS_IN_PROSE, MULTI_LINE_DATA_HEREDOCS,
+/// HEREDOC_DATA_SHAPES, HEREDOC_DATA_READERS, PROSE_WITH_CLOSING_WORDS,
+/// HEREDOC_MESSAGE_FORMS.)
+const MESSAGE_FORMS_STANDING_ALONE: &[&str] = &[
+    // The task's examples (user decision 2026-10-15).
+    "gh pr create --title X --body \"$(cat <<'EOF'\nharness notes\nEOF\n)\" --base main",
+    "# commit the guard fix\ngit commit -F - <<'EOF'\nfix the harness\nEOF",
+    "git commit -F - <<'EOF'\nfix the harness\nEOF\n",
+    "git commit -F - <<'EOF'\nfix the harness\nEOF\n\n",
+    // Derived: a comment after the terminator, blank lines before the
+    // command, a quoted argument after `)"`, a trailing newline after `)"`.
+    "git commit -F - <<'EOF'\nfix the harness\nEOF\n# done",
+    "\n\ncat > /tmp/note <<EOF\nxtask notes\nEOF",
+    "gh pr create --body \"$(cat <<'EOF'\nharness\nEOF\n)\" --title \"Guard fix\" --draft",
+    "git commit -m \"$(cat <<'EOF'\nfix the harness\nEOF\n)\"\n",
+];
+
+// ADR-0037/ADR-0043/ADR-0049 (critic finding on 95cc163): a message form with
+// another command before or after it keeps its body as shell text. Locked
+// denied naming the directory, unlocked allowed; spec root and a temp repo.
+#[test]
+fn heredoc_body_is_data_only_when_the_message_form_stands_alone() {
+    let root = repo("heredocs_not_alone");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in HEREDOCS_NOT_ALONE {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15): a message form alone, with comments,
+// blank lines and plain arguments after `)"`, stays data. Locked, spec root
+// and a temp repo.
+#[test]
+fn message_forms_standing_alone_stay_data() {
+    let root = repo("message_forms_standing_alone");
+    for command in MESSAGE_FORMS_STANDING_ALONE {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+/// `tee` is no message form (user decision 2026-10-15): `tee path <<EOF` and
+/// `tee -a path <<EOF` keep their body as shell text (tee also copies it to
+/// stdout). With the directory the denial must name. Must be denied in a
+/// locked session.
+const TEE_HEREDOCS: &[(&str, &str)] = &[
+    // Moved from HEREDOC_DATA_READERS (were must-pass).
+    ("tee /tmp/note <<EOF\nharness\nEOF", "harness"),
+    ("tee -a /tmp/note <<'EOF'\nxtask\nEOF", "xtask"),
+    // The task's example.
+    ("tee /tmp/x <<EOF\nrm -rf harness\nEOF", "harness"),
+    // Derived: tee by path, two files.
+    ("/usr/bin/tee /tmp/x <<EOF\nxtask\nEOF", "xtask"),
+    ("tee /tmp/a /tmp/b <<EOF\n.claude\nEOF", ".claude"),
+];
+
+// ADR-0037/ADR-0043/ADR-0049 (user decision 2026-10-15): a tee heredoc keeps
+// its body as shell text. Locked denied naming the directory, unlocked
+// allowed; spec root and a temp repo.
+#[test]
+fn tee_heredoc_bodies_are_shell_text() {
+    let root = repo("tee_heredocs");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in TEE_HEREDOCS {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// The cat form writes one regular file (critic finding on 95cc163, decided by
+// the user 2026-10-15): `cat` plus exactly one redirection `>` or `>>`
+// without a file-descriptor number (not `1>`, `2>`, `>|`), before or after
+// the marker, and no other words. The target has no `dev/` or `proc/` path
+// component (`/dev/stdout`, `/dev/fd/3`, `//dev/tty`, `/./dev/stdout`,
+// `/proc/self/fd/1`). Otherwise the body is checked as shell text.
+// ---------------------------------------------------------------------------
+
+/// cat heredocs that write to stdout, to a device or with more words, with
+/// the directory the denial must name. Must be denied in a locked session.
+const CAT_FORMS_THAT_WRITE_NO_REGULAR_FILE: &[(&str, &str)] = &[
+    // The task's examples (user decision 2026-10-15).
+    ("cat 2> /tmp/e <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("cat 1> /tmp/x <<EOF\nxtask\nEOF", "xtask"),
+    ("cat > /tmp/x 2> /tmp/e <<EOF\nxtask\nEOF", "xtask"),
+    ("cat -v > /tmp/x <<EOF\nxtask\nEOF", "xtask"),
+    ("cat /tmp/a > /tmp/x <<EOF\nxtask\nEOF", "xtask"),
+    ("cat > /dev/stdout <<EOF\nrm -rf xtask\nEOF", "xtask"),
+    ("cat > /dev/fd/3 <<EOF\nxtask\nEOF", "xtask"),
+    ("cat >> //dev/tty <<EOF\nxtask\nEOF", "xtask"),
+    ("cat <<EOF > /./dev/stdout\nxtask\nEOF", "xtask"),
+    ("cat > /proc/self/fd/1 <<EOF\nxtask\nEOF", "xtask"),
+    // Derived: `>|` and `2>` (both already denied before this change), a
+    // relative path through `dev/`, `/DEV` (macOS resolves it to /dev; the
+    // guard compares paths ignoring case, module doc of guard.rs).
+    ("cat >| /tmp/x <<EOF\nxtask\nEOF", "xtask"),
+    ("cat <<EOF 2> /tmp/e\nxtask\nEOF", "xtask"),
+    ("cat > ../../dev/stdout <<EOF\nharness\nEOF", "harness"),
+    ("cat > /DEV/stdout <<EOF\nxtask\nEOF", "xtask"),
+];
+
+/// cat heredocs writing one regular file whose name only resembles a device
+/// path. Must pass in a locked session. (The other cat forms — `cat > p`,
+/// `cat >> p`, `cat <<EOF > p`, `>p`, a comment after the redirection — stay
+/// in HARNESS_WORDS_IN_PROSE, HEREDOC_DATA_SHAPES, HEREDOC_DATA_READERS and
+/// HEREDOC_MESSAGE_FORMS.)
+const CAT_FILE_WRITES: &[&str] = &[
+    // The task's examples (user decision 2026-10-15).
+    "cat > /tmp/devnotes <<EOF\nharness\nEOF",
+    "cat > /tmp/dev-notes/x <<EOF\nharness\nEOF",
+    "cat > /tmp/notes/devices.md <<EOF\nxtask\nEOF",
+    // Derived: a component ending in `dev`, `proc` in a file name, `>p`
+    // before the marker.
+    "cat > /tmp/mydev/x <<EOF\nharness\nEOF",
+    "cat > /tmp/proc.md <<EOF\nxtask\nEOF",
+    "cat >/tmp/note <<EOF\nharness\nEOF",
+];
+
+// ADR-0037/ADR-0043/ADR-0049 (critic finding on 95cc163): a cat heredoc that
+// does not write exactly one regular file keeps its body as shell text.
+// Locked denied naming the directory, unlocked allowed; spec root and a temp
+// repo.
+#[test]
+fn cat_heredoc_is_data_only_when_written_to_one_regular_file() {
+    let root = repo("cat_no_regular_file");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in CAT_FORMS_THAT_WRITE_NO_REGULAR_FILE {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15): a cat heredoc written to one regular
+// file stays data, also when its name resembles a device path. Locked, spec
+// root and a temp repo.
+#[test]
+fn cat_heredocs_to_regular_files_stay_data() {
+    let root = repo("cat_file_writes");
+    for command in CAT_FILE_WRITES {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// sed scripts that write files or run commands are writers (critic finding on
+// da69604, decided by the user 2026-10-15). `sed`/`gsed`, also by path, write
+// when a script — the first non-option argument, or each `-e`/`--expression`
+// argument (also `--expression=…`) — contains the command `w file`/`W file`
+// (with or without an address `N`, `$`, `/re/`, `N,M`; inside `{…}`, after
+// `;` or a newline), the `w file` flag of `s` (also after other flags, any
+// delimiter), or GNU's command `e` or `e` flag of `s` (runs a shell
+// command). A `w`/`e` inside a regex, the replacement, `a`/`i`/`c` text or a
+// label does not count. The `in-place` rules (k10_…) are unchanged.
+// ---------------------------------------------------------------------------
+
+/// sed scripts that write a harness file or run a command naming one, with
+/// the fragment the denial must name. BSD sed (macOS) writes the file in the
+/// `w` forms (checked with a harmless target); GNU sed runs the `e` forms.
+/// Must be denied in a locked session.
+const SED_SCRIPTS_THAT_WRITE_OR_RUN: &[(&str, &str)] = &[
+    // The task's examples (critic finding on da69604, user decision
+    // 2026-10-15).
+    ("sed -n 'w xtask/f' /tmp/in", "xtask/"),
+    ("sed -n '1w .claude/x' /tmp/in", ".claude/"),
+    ("sed '$w harness/x' /tmp/in", "harness/"),
+    ("sed -n '/re/w Cargo.toml' /tmp/in", "Cargo.toml"),
+    ("sed -n '1,3w xtask/f' /tmp/in", "xtask/"),
+    ("sed 's/a/b/w xtask/f' /tmp/in", "xtask/"),
+    ("sed 's/a/b/gw xtask/f' /tmp/in", "xtask/"),
+    ("sed 's|a|b|w harness/x' /tmp/in", "harness/"),
+    ("sed -e p -e 'w xtask/f' /tmp/in", "xtask/"),
+    ("sed --expression='w xtask/f' /tmp/in", "xtask/"),
+    ("gsed -n 'W xtask/f' /tmp/in", "xtask/"),
+    ("/usr/bin/sed -n 'w xtask/f' /tmp/in", "xtask/"),
+    ("sed -n '1{w xtask/f\n}' /tmp/in", "xtask/"),
+    ("sed -n 'p;w xtask/f' /tmp/in", "xtask/"),
+    ("gsed '1e git stash push -- xtask' /tmp/in", "xtask"),
+    ("gsed 's/.*/git stash push -- xtask\\/x/e' /tmp/in", "xtask"),
+    // Derived: `--expression` with a separate argument, a regex range, a
+    // numeric flag before `w`, an option before the script, sed reading a
+    // pipe (no input file), `e` without an address (with a command that is
+    // no writer word of its own, unlike `rm `).
+    ("sed --expression 'w xtask/f' /tmp/in", "xtask/"),
+    ("sed -n '/a/,/b/w harness/x' /tmp/in", "harness/"),
+    ("sed 's/a/b/2w xtask/f' /tmp/in", "xtask/"),
+    ("sed -E -n 'w .github/x' /tmp/in", ".github/"),
+    ("cat /tmp/in | sed -n 'w xtask/f'", "xtask/"),
+    ("gsed 'e git clean -fdx harness' /tmp/in", "harness"),
+];
+
+/// sed scripts that only print, also of harness files; their `w`/`e` stands
+/// in a regex, a replacement, `a` text, a `y` list or a label. Must pass in a
+/// locked session.
+const SED_SCRIPTS_THAT_ONLY_READ: &[&str] = &[
+    // The task's examples (user decision 2026-10-15).
+    "sed -n 1,10p xtask/src/guard.rs",
+    "sed -n '/fn guard/,/^}/p' xtask/src/guard.rs",
+    "sed -n '/new word/p' xtask/src/guard.rs",
+    "sed -n '/^w /p' xtask/src/main.rs",
+    "sed 's/w /x /' harness/rules.md",
+    "sed 's/a/w x/' harness/rules.md",
+    "sed '1a new words' harness/rules.md",
+    "sed -n '/x/{p;}' xtask/src/guard.rs",
+    "sed -E -n 's/(w)/\\1/p' xtask/src/guard.rs",
+    // Derived: a regex naming a harness path, `e` as the replacement,
+    // `a\` text starting with `w `, a `y` list, the label `w` and a branch
+    // to it (BSD sed writes no file in any of them).
+    "sed -n '/w xtask/p' xtask/src/guard.rs",
+    "sed 's/a/e/' harness/rules.md",
+    "sed '$a\\\nw notes' harness/rules.md",
+    "sed 'y/w/x/' harness/rules.md",
+    "sed -e :w -e 's/a/b/' -e tw harness/rules.md",
+];
+
+// ADR-0037/ADR-0043 (critic finding on da69604): a sed script with a `w`
+// command or flag, or GNU's `e`, is a writer. Locked denied naming the
+// fragment, unlocked allowed; spec root and a temp repo.
+#[test]
+fn sed_scripts_that_write_or_run_are_writers() {
+    let root = repo("sed_scripts_write_or_run");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in SED_SCRIPTS_THAT_WRITE_OR_RUN {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(spec_shell(true, command), Ok(()), "{command:?} (unlocked)");
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15): a `w`/`e` in a regex, replacement,
+// `a` text, `y` list or label makes no writer; reading harness files with
+// sed passes. Locked, spec root and a temp repo.
+#[test]
+fn sed_scripts_that_only_read_pass() {
+    let root = repo("sed_scripts_only_read");
+    for command in SED_SCRIPTS_THAT_ONLY_READ {
         assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
         assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
     }
