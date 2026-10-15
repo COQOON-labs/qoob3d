@@ -19,8 +19,9 @@
 //!   without `$(`, `${` or a line ending in a backslash in the body, and
 //!   inside `$(…)` without a body line starting with the marker word. A
 //!   command with a construct the guard does not model (backticks, `$'`,
-//!   redirections with `&`, arithmetic `((`) keeps its comments and heredoc
-//!   bodies: fail closed (ADR-0049). In-place editors and inline code count
+//!   redirections with `&`, arithmetic `((`) or with a heredoc that keeps its
+//!   body or has no terminator keeps all its comments and heredoc bodies: fail
+//!   closed (ADR-0049). In-place editors and inline code count
 //!   also inside `$(…)`, backticks and `(…)`; a sed script with `w`/`W` or
 //!   `e`, from a file (`-f`) or expanded by the shell writes like `sed -i`.
 //!
@@ -274,9 +275,11 @@ fn models_prose(command: &str) -> bool {
 /// ([`is_message_form`]), with nothing after the marker but one file redirection
 /// ([`only_redirects_to_file`]), as the whole command ([`stands_alone`]), and
 /// under an unquoted marker only without `$(`, `${` or a line ending in a
-/// backslash in the body ([`expands`]), inside `$(…)` only without an early terminator
-/// ([`ends_early`]; ADR-0049). A backslash-newline continues the line. Only for
-/// commands that [`models_prose`].
+/// backslash in the body ([`expands`]), inside `$(…)` only without an early
+/// terminator ([`ends_early`]; ADR-0049). If any heredoc keeps its body or has
+/// no terminator, nothing is removed and `command` comes back unchanged: the
+/// quote tracking cannot follow a body (`it's`). A backslash-newline continues
+/// the line. Only for commands that [`models_prose`].
 fn without_prose(command: &str) -> String {
     let mut out = String::with_capacity(command.len());
     // Open quotes, parentheses `(` and substitutions `$(` (as `$`), innermost last.
@@ -332,6 +335,10 @@ fn without_prose(command: &str) -> String {
                     && stands_alone(&out[..line_start], &command[end + len..], open_parens > 0)
                 {
                     end += len;
+                } else {
+                    // A kept body is shell text the quote tracking cannot follow
+                    // (`it's`): remove no prose at all.
+                    return command.to_owned();
                 }
                 markers.clear();
                 out.push('\n');
@@ -352,7 +359,7 @@ fn without_prose(command: &str) -> String {
         word_start = outside_quotes && (c.is_whitespace() || COMMENT_STARTS.contains(c));
         i = end;
     }
-    out
+    if markers.is_empty() { out } else { command.to_owned() }
 }
 
 /// A heredoc `body` under an unquoted marker is not what the program reads:

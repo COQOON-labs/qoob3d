@@ -94,8 +94,10 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    every construct of the command. A command that contains anywhere a backtick, ANSI-C
    quoting `$'`, a redirection with `&` (`|&`, `>&`, `&>`, `<&`, so also `2>&1` and `>&2`), or
    arithmetic `((` (also `$((`, whose `<<` is a shift and whose `$(…)` runs) keeps its prose:
-   every word is checked, as if there were no comments or heredocs. A heredoc inside a
-   compound command (`{` newline `cat <<EOF` … `}` `| bash`) never stands alone
+   every word is checked, as if there were no comments or heredocs. The same holds when any
+   heredoc keeps its body as shell text or has no terminator: the quote and comment tracking
+   cannot follow a body (`it's`), so no comment and no other body is removed. A heredoc
+   inside a compound command (`{` newline `cat <<EOF` … `}` `| bash`) never stands alone
    (decision 3), so its body is shell text. Rare spellings are denied rather than parsed;
    the word rules (`xtask:`, the cargo exceptions) still apply.
 5. **sed scripts that write or run are writers**, like `sed -i`. `sed` and `gsed`, also by
