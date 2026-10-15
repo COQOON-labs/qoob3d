@@ -47,10 +47,12 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    - `cat` writing one regular file: `cat > path <<EOF`, `cat <<EOF > path`,
      `cat >> path`. `cat` and exactly one redirection `>` or `>>` without a descriptor
      number (not `1>`, `2>`, `>|`), before or after the marker, and no other word. The
-     target has no `dev` or `proc` path component, compared ignoring case (`/dev/stdout`,
-     `//dev/tty`, `/./dev/stdout`, `../../dev/stdout`, `/DEV/stdout`, `/proc/self/fd/1`);
-     `/tmp/devnotes` or `/tmp/proc.md` are files. `tee` is no message form: it copies the
-     body to stdout as well.
+     target is literal (no `$`, `*`, `?`, `[`, `{` or backtick, which the shell expands:
+     `/de?/stdout`, `$TTY`; `~` is fine) and has no `dev` or `proc` path component,
+     compared ignoring case (`/dev/stdout`, `//dev/tty`, `/./dev/stdout`,
+     `../../dev/stdout`, `/DEV/stdout`, `/proc/self/fd/1`); `/tmp/devnotes` or
+     `/tmp/proc.md` are files. `tee` is no message form: it copies the body to stdout as
+     well.
 
    Only that command's words precede the marker, counted from the start of the logical line
    or, for the `$(cat <<EOF` forms, the `git`/`gh` command before the `$(`. No `;`, `&`, `|`,
@@ -72,16 +74,21 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    `/dev/stdout`), a command after it can run the file it wrote (`bash /tmp/s`); the rule
    also denies harmless neighbours (`git add -A` newline `git commit -F -`), which is the
    price of not modelling them.
+
+   **An unquoted marker expands the body:** bash and zsh run `$(…)` and `${…}` in the body
+   of `<<EOF` before git, gh or cat reads it. Under an unquoted marker (the marker word has
+   no `'`, `"` or `\`) the body is data only if it contains no `$(` and no `${`; an escaped
+   `\$(` counts too. Quoted markers (`<<'EOF'`, `<<"EOF"`, `<<\EOF`, `<<E'O'F`,
+   `<<-'EOF'`) keep the body literal. `$NAME` and `$5` run nothing and stay data;
+   backticks and `$((` fail closed (decision 4).
 4. **Fail closed:** comments and heredoc bodies are removed only when the guard models
    every construct of the command. A command that contains anywhere a backtick, ANSI-C
    quoting `$'`, a redirection with `&` (`|&`, `>&`, `&>`, `<&`, so also `2>&1` and `>&2`), or
    arithmetic `((` (also `$((`, whose `<<` is a shift and whose `$(…)` runs) keeps its prose:
-   every word is checked, as if there were no comments or heredocs. The same holds when a
-   compound command closes after a removed heredoc body: a simple command starting with
-   `}`, `done`, `fi`, `esac` or a `)` that does not close a `$(…)` (`{` newline `cat <<EOF`
-   … `}` `| bash`), because the group's output may go to a shell. Closing words inside a
-   removed body do not count. Rare spellings are denied rather than parsed; the word rules
-   (`xtask:`, the cargo exceptions) still apply.
+   every word is checked, as if there were no comments or heredocs. A heredoc inside a
+   compound command (`{` newline `cat <<EOF` … `}` `| bash`) never stands alone
+   (decision 3), so its body is shell text. Rare spellings are denied rather than parsed;
+   the word rules (`xtask:`, the cargo exceptions) still apply.
 5. **sed scripts that write or run are writers**, like `sed -i`. `sed` and `gsed`, also by
    path, count as writing when a script contains the command `w file`/`W file` (with any
    address, inside `{…}`, after `;` or a newline), the `w file` flag of `s` (also after
@@ -94,6 +101,17 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    none. The regex is read twice, with and without BSD's bracket expressions (in BSD sed
    `s/[/]/x/` has the regex `[/]`), and either reading counts. A syntax error ends the
    scan, because sed then runs nothing.
+
+   **A script the guard cannot read counts as writing:** a script file (`-f`, `--file`,
+   `--file=`, also in a group like `-nf`), a script word the shell expands (a `$` outside
+   single quotes, a backtick, `$'…'`; `'$p'` is literal), and xargs' and find's
+   placeholder `{}` as the script. Only the script words count: a `$` in a file argument
+   (`sed -n 1p "$f"`) makes no writer.
+6. **In-place editors and inline code count inside substitutions.** The programs of the
+   in-place and inline-code tables (`sed -i`, `perl -pi`, `ruby -e`, `bash -c` …) are also
+   recognised as the first word inside `$(…)`, backticks and `(…)` subshells, using the
+   same quote-aware split into simple commands as decision 5. `echo $(sed -n 1p f)` only
+   reads and passes.
 
 ## Consequences
 
@@ -116,8 +134,8 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
   (`git -C repo commit -F -`, `tee path <<EOF`, `cat <<EOF` to the terminal or a device).
   Agents write the note with `cat > file <<EOF`, `git commit -F - <<'EOF'` or split the
   command into separate Bash calls.
-- sed scripts from a file (`sed -f script`, `--file`) are not read, a known gap. Neither are
-  scripts whose `w`/`e` comes from the shell (a variable, `$'\x77'`).
+- sed with a script file or an expanded script is denied next to a harness path even when
+  the script only reads; agents write the script literally in the command.
 - Clarifies ADR-0043 decision 4 without changing it for Edit/Write.
 
 ## Rejected alternatives
@@ -133,11 +151,13 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
 ## References
 
 - Code: `xtask/src/guard.rs` (`models_prose`, `without_prose`, `is_message_form`,
-  `stands_alone`, `writes_regular_file`, `only_redirects_to_file`, `sed_writes`,
-  `harness_in_shell`)
+  `stands_alone`, `expands`, `writes_regular_file`, `only_redirects_to_file`,
+  `simple_commands`, `sed_writes`, `sed_scripts`, `runs_with_flag`, `harness_in_shell`)
 - Sabotage cases: `harness/sabotage/guard-harness-shell-after-heredoc.case`,
   `guard-harness-shell-interpreter-heredoc.case`, `guard-prose-heredoc-body-checked.case`,
   `guard-harness-shell-fail-closed-prose.case`, `guard-harness-shell-backtick-comment.case`,
   `guard-harness-shell-heredoc-{tee,cat-stderr,device,not-alone}.case`,
-  `guard-harness-shell-sed-{write,execute}.case`
+  `guard-harness-shell-heredoc-{unquoted-substitution,cat-target-glob}.case`,
+  `guard-harness-shell-sed-{write,execute,expanded-script,script-file}.case`,
+  `guard-harness-shell-in-place-in-substitution.case`
 - Related: ADR-0037, ADR-0043

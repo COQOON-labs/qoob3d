@@ -13,13 +13,15 @@
 //!   outside heredoc bodies of the safe shape: an exact message form as the
 //!   heredoc's command (`git commit|tag -F -`, `gh pr|issue create|edit
 //!   --body-file -`, their `"$(cat <<EOF"` messages, `cat` writing one regular
-//!   file), with nothing after the marker but one file redirection, standing
-//!   alone as the whole command (around it only comments, blank lines and the
-//!   closing `)"`). A sed script with `w`/`W` or `e` writes like `sed -i`. A
-//!   command with a construct the guard does not model (backticks, `$'`,
-//!   redirections with `&`, arithmetic `((`), or a compound command closing
-//!   after a heredoc body (`}`, `done`, `fi`, `esac`, `)`), keeps its comments
-//!   and heredoc bodies: fail closed (ADR-0049).
+//!   file with a literal name), with nothing after the marker but one file
+//!   redirection, standing alone as the whole command (around it only
+//!   comments, blank lines and the closing `)"`), and under an unquoted marker
+//!   without `$(` or `${` in the body. A command with a construct the guard
+//!   does not model (backticks, `$'`, redirections with `&`, arithmetic `((`)
+//!   keeps its comments and heredoc bodies: fail closed (ADR-0049). In-place
+//!   editors and inline code count also inside `$(…)`, backticks and `(…)`; a
+//!   sed script with `w`/`W` or `e`, from a file (`-f`) or expanded by the
+//!   shell writes like `sed -i`.
 //!
 //! Edit/Write paths are collapsed (`.`, `..`) before any check. Shell commands
 //! are checked as text, at the three anchors of ADR-0043 (token start, `./`,
@@ -220,21 +222,23 @@ pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Resu
         return Err(self_unlock_message(&file));
     }
     check_git_dir_in_shell(&forms, &normalised, read)?;
+    let commands = simple_commands(command);
+    // Each simple command again as text, so that a program inside `$(…)`,
+    // backticks or `(…)` starts a segment of its own.
+    let joined: Vec<String> = commands
+        .iter()
+        .map(|words| words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "))
+        .collect();
     let writes = forms.iter().any(|form| writes(&without_null_redirections(form)))
         || [command, normalised.as_str()]
             .into_iter()
+            .chain(joined.iter().map(String::as_str))
             .any(|form| runs_with_flag(form, IN_PLACE) || runs_with_flag(form, INLINE_CODE))
-        || sed_writes(command);
+        || sed_writes(&commands);
     if session.unlocked || !writes {
         return Ok(());
     }
-    let shell = if models_prose(command)
-        && let Some(shell) = without_prose(command)
-    {
-        shell
-    } else {
-        command.to_owned()
-    };
+    let shell = if models_prose(command) { without_prose(command) } else { command.to_owned() };
     let shell_forms = [shell.to_lowercase(), unquoted(&shell).to_lowercase()];
     if let Some(path) =
         forms.iter().zip(&shell_forms).find_map(|(form, shell)| harness_in_shell(root, form, shell))
@@ -267,27 +271,22 @@ fn models_prose(command: &str) -> bool {
 /// character is part of a word. A heredoc body is removed only in the safe
 /// shape: the only heredoc of its line, read as a message or written to a file
 /// ([`is_message_form`]), with nothing after the marker but one file redirection
-/// ([`only_redirects_to_file`]), as the whole command ([`stands_alone`];
-/// ADR-0049). A backslash-newline continues the
-/// line. None if a compound command closes after a removed body
-/// ([`closes_compound`]): its output may go to a shell, so the caller checks
-/// the whole command (fail closed). Only for commands that [`models_prose`].
-fn without_prose(command: &str) -> Option<String> {
+/// ([`only_redirects_to_file`]), as the whole command ([`stands_alone`]), and
+/// under an unquoted marker only without `$(` and `${` in the body
+/// ([`expands`]; ADR-0049). A backslash-newline continues the line. Only for
+/// commands that [`models_prose`].
+fn without_prose(command: &str) -> String {
     let mut out = String::with_capacity(command.len());
     // Open quotes, parentheses `(` and substitutions `$(` (as `$`), innermost last.
     let mut open: Vec<char> = Vec::new();
-    let mut markers: Vec<(String, bool)> = Vec::new();
+    let mut markers: Vec<Marker> = Vec::new();
     // Where the current line starts in `out`, where the text after the last
-    // heredoc marker starts; whether the next character starts a word or a
-    // simple command; whether a heredoc body was removed.
+    // heredoc marker starts; whether the next character starts a word.
     let (mut line_start, mut after_marker) = (0, 0);
-    let (mut word_start, mut command_start, mut stripped) = (true, true, false);
+    let mut word_start = true;
     let mut i = 0;
     while let Some(c) = command[i..].chars().next() {
         let rest = &command[i..];
-        if stripped && command_start && closes_compound(rest, open.last().copied()) {
-            return None;
-        }
         let mut end = i + c.len_utf8();
         let heredocs = markers.len();
         match (open.last().copied(), c) {
@@ -326,14 +325,14 @@ fn without_prose(command: &str) -> Option<String> {
                         open_parens,
                     )
                     && let Some(len) = heredoc_bodies(&command[end..], &markers)
+                    && (markers[0].quoted || !expands(&command[end..end + len]))
                     && stands_alone(&out[..line_start], &command[end + len..], open_parens > 0)
                 {
                     end += len;
-                    stripped = true;
                 }
                 markers.clear();
                 out.push('\n');
-                (line_start, word_start, command_start) = (out.len(), true, true);
+                (line_start, word_start) = (out.len(), true);
                 i = end;
                 continue;
             }
@@ -348,23 +347,16 @@ fn without_prose(command: &str) -> Option<String> {
             line_start = out.len();
         }
         word_start = outside_quotes && (c.is_whitespace() || COMMENT_STARTS.contains(c));
-        command_start = outside_quotes
-            && (c == '\n' || COMMENT_STARTS.contains(c) || (command_start && c.is_whitespace()));
         i = end;
     }
-    Some(out)
+    out
 }
 
-/// `rest`, at the start of a simple command after a removed heredoc body,
-/// closes a compound command (`}`, `done`, `fi`, `esac`, or a `)` that does
-/// not close a `$(…)`, `top` being the innermost open quote or parenthesis),
-/// whose output may go to a shell (`{` … `cat <<EOF` … `} | bash`).
-fn closes_compound(rest: &str, top: Option<char>) -> bool {
-    let word =
-        rest.split(|c: char| c.is_whitespace() || ";|&)<>".contains(c)).next().unwrap_or_default();
-    rest.starts_with('}')
-        || matches!(word, "done" | "fi" | "esac")
-        || (rest.starts_with(')') && top != Some('$'))
+/// A heredoc `body` under an unquoted marker runs commands: the shell expands
+/// `$(…)` and `${…}` in it (backticks and `$((` fail closed, [`UNMODELLED`]).
+/// An escaped `\$(` counts too.
+fn expands(body: &str) -> bool {
+    body.contains("$(") || body.contains("${")
 }
 
 /// A message form is the whole Bash command (ADR-0049): `before`, the text
@@ -459,8 +451,9 @@ fn is_message_form(head: &str, tail: &str, open_parens: usize) -> bool {
 
 /// `redirection`, the words of a `cat` heredoc besides `cat` and the marker, is
 /// exactly one `>` or `>>` without a descriptor number (not `1>`, `2>`, `>|`)
-/// to a target with no `dev` or `proc` component, ignoring case
-/// (`/dev/stdout`, `//dev/tty`, `../dev/fd/3`, `/proc/self/fd/1`).
+/// to a literal target (no `$*?[{` or backtick, which the shell expands) with
+/// no `dev` or `proc` component, ignoring case (`/dev/stdout`, `//dev/tty`,
+/// `../dev/fd/3`, `/proc/self/fd/1`).
 fn writes_regular_file(redirection: &str) -> bool {
     let redirection = redirection.trim();
     let Some(target) = redirection.strip_prefix(">>").or_else(|| redirection.strip_prefix('>'))
@@ -468,6 +461,7 @@ fn writes_regular_file(redirection: &str) -> bool {
         return false;
     };
     only_redirects_to_file(redirection)
+        && !target.contains(['$', '*', '?', '[', '{', '`'])
         && !unquoted(target).to_lowercase().split('/').any(|c| matches!(c.trim(), "dev" | "proc"))
 }
 
@@ -507,26 +501,36 @@ fn program_name(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
+/// A heredoc marker: the terminator word without quotes, whether `<<-` strips
+/// leading tabs from the terminator line, and whether the word was quoted
+/// (`'EOF'`, `"EOF"`, `\EOF`, `E'O'F`), so that the shell expands nothing in
+/// the body.
+struct Marker {
+    word: String,
+    tabs: bool,
+    quoted: bool,
+}
+
 /// The heredoc that `rest` starts with (`<<EOF`, `<<-'EOF'`): the length of
-/// the operator with its marker, and the marker without quotes with whether
-/// `<<-` strips leading tabs from the terminator line. Arithmetic, whose `<<`
-/// is a shift, never gets here ([`UNMODELLED`]).
-fn heredoc(rest: &str) -> Option<(usize, (String, bool))> {
+/// the operator with its marker, and the marker. Arithmetic, whose `<<` is a
+/// shift, never gets here ([`UNMODELLED`]).
+fn heredoc(rest: &str) -> Option<(usize, Marker)> {
     let operator = rest.strip_prefix("<<")?;
     let (tabs, word) = operator.strip_prefix('-').map_or((false, operator), |word| (true, word));
     let word = word.trim_start_matches([' ', '\t']);
     let word_len =
         word.find(|c: char| c.is_whitespace() || ";|&<>()".contains(c)).unwrap_or(word.len());
-    let marker = unquoted(&word[..word_len]);
-    let after = &word[word_len..];
-    (!marker.is_empty()).then(|| (rest.len() - after.len(), (marker, tabs)))
+    let (marker, after) = word.split_at(word_len);
+    let quoted = marker.contains(['\'', '"', '\\']);
+    let marker = Marker { word: unquoted(marker), tabs, quoted };
+    (!marker.word.is_empty()).then(|| (rest.len() - after.len(), marker))
 }
 
 /// The length of the heredoc bodies at the start of `text`, through the
 /// terminator line of the last of `markers`; None if a terminator is missing.
-fn heredoc_bodies(text: &str, markers: &[(String, bool)]) -> Option<usize> {
+fn heredoc_bodies(text: &str, markers: &[Marker]) -> Option<usize> {
     let mut len = 0;
-    for (marker, tabs) in markers {
+    for Marker { word: marker, tabs, .. } in markers {
         loop {
             let line = text[len..].split_inclusive('\n').next()?;
             len += line.len();
@@ -626,7 +630,8 @@ fn writes(command: &str) -> bool {
 /// letter whose argument is the rest of the group (`-pi`, `-Ei.bak`, but not
 /// `-es/i/j/`), or by its long option, also abbreviated (`--in`). `command`
 /// keeps its case: lower-cased, sed's `-E -i` would read as `-e` with the
-/// script `-i`.
+/// script `-i`. The caller also passes each of the [`simple_commands`] as
+/// text, so that a program inside `$(…)`, backticks or `(…)` counts.
 fn runs_with_flag(command: &str, table: &[(&[&str], &str, &str, &[&str])]) -> bool {
     segments(command).any(|segment| {
         table.iter().any(|(programs, flags, argument, long)| {
@@ -648,18 +653,31 @@ fn runs_with_flag(command: &str, table: &[(&[&str], &str, &str, &[&str])]) -> bo
     })
 }
 
-/// A `sed` or `gsed`, also by path, whose script writes a file or runs a
-/// command ([`sed_script_writes`]), read in both bracket modes. In-place
-/// editing is in [`IN_PLACE`]; a script file (`-f`) is not read.
-fn sed_writes(command: &str) -> bool {
-    simple_commands(command).iter().any(|words| {
+/// A `sed` or `gsed`, also by path, in one of the simple `commands`, whose
+/// script writes a file or runs a command ([`sed_script_writes`], read in
+/// both bracket modes) or is no literal the guard can read ([`sed_scripts`]).
+/// In-place editing is in [`IN_PLACE`].
+fn sed_writes(commands: &[Vec<Word>]) -> bool {
+    commands.iter().any(|words| {
         words.iter().enumerate().any(|(i, word)| {
-            ["sed", "gsed"].iter().any(|p| program_name(word).eq_ignore_ascii_case(p))
-                && sed_scripts(&words[i + 1..]).iter().any(|script| {
-                    sed_script_writes(script, false) || sed_script_writes(script, true)
+            ["sed", "gsed"].iter().any(|p| program_name(&word.text).eq_ignore_ascii_case(p))
+                && sed_scripts(&words[i + 1..]).is_none_or(|scripts| {
+                    scripts.iter().any(|script| {
+                        sed_script_writes(script, false) || sed_script_writes(script, true)
+                    })
                 })
         })
     })
+}
+
+/// A word of a simple command ([`simple_commands`]): its text with quotes and
+/// backslashes resolved, and whether the shell expands it (a `$` outside
+/// single quotes, a backtick, `$'…'`), so that the text is not what the
+/// program gets.
+#[derive(Default)]
+struct Word {
+    text: String,
+    expanded: bool,
 }
 
 /// The simple commands of `command` as words, with quotes and backslashes
@@ -667,10 +685,10 @@ fn sed_writes(command: &str) -> bool {
 /// `;|&()` and newlines outside quotes separate them, and so do command
 /// substitutions (`$(…)`, backticks), also inside double quotes. Comments and
 /// redirections (`2> file`, `&>file`, `<<EOF`) are no words.
-fn simple_commands(command: &str) -> Vec<Vec<String>> {
+fn simple_commands(command: &str) -> Vec<Vec<Word>> {
     let (mut commands, mut words) = (Vec::new(), Vec::new());
     // The word being read and whether it is the target of a redirection.
-    let (mut word, mut target): (Option<String>, bool) = (None, false);
+    let (mut word, mut target): (Option<Word>, bool) = (None, false);
     // Open quotes and substitutions, innermost last: `'`, `"`, `$` for
     // `$'…'`, `(` for `(…)` and `$(…)`, `` ` ``.
     let mut open: Vec<char> = Vec::new();
@@ -678,13 +696,17 @@ fn simple_commands(command: &str) -> Vec<Vec<String>> {
     let mut chars = command.chars().peekable();
     while let Some(c) = chars.next() {
         let top = open.last().copied();
-        let substitution = matches!(top, None | Some('"' | '(' | '`'))
+        let unquoted = matches!(top, None | Some('(' | '`'));
+        let substitution = (unquoted || top == Some('"'))
             && (c == '`' || (c == '$' && chars.peek() == Some(&'(')));
-        let separator =
-            matches!(top, None | Some('(' | '`')) && (c.is_whitespace() || ";|&()<>".contains(c));
+        let separator = unquoted && (c.is_whitespace() || ";|&()<>".contains(c));
+        if substitution {
+            // The output of the substitution is (part of) a word.
+            word.get_or_insert_default().expanded = true;
+        }
         if substitution || separator {
             let descriptor = matches!(c, '<' | '>')
-                && word.as_ref().is_some_and(|w| w.bytes().all(|b| b.is_ascii_digit()));
+                && word.as_ref().is_some_and(|w| w.text.bytes().all(|b| b.is_ascii_digit()));
             if let Some(w) = word.take()
                 && !std::mem::take(&mut target)
                 && !descriptor
@@ -696,22 +718,21 @@ fn simple_commands(command: &str) -> Vec<Vec<String>> {
             (Some('\''), '\'') | (Some('"'), '"') | (Some('$'), '\'') => {
                 open.pop();
             }
-            (Some('\''), _) => word.get_or_insert_default().push(c),
             // ANSI-C quoting: `\'` does not end it; escapes stay undecoded.
             (Some('$'), _) => {
-                let word = word.get_or_insert_default();
+                let word = &mut word.get_or_insert_default().text;
                 word.push(c);
                 if c == '\\' {
                     word.extend(chars.next());
                 }
             }
-            (_, '\\') => match chars.next() {
+            (_, '\\') if top != Some('\'') => match chars.next() {
                 Some('\n') | None => {}
                 // In double quotes a backslash escapes only these.
                 Some(next) if top != Some('"') || "$`\"\\".contains(next) => {
-                    word.get_or_insert_default().push(next);
+                    word.get_or_insert_default().text.push(next);
                 }
-                Some(next) => word.get_or_insert_default().extend(['\\', next]),
+                Some(next) => word.get_or_insert_default().text.extend(['\\', next]),
             },
             _ if substitution => {
                 commands.push(std::mem::take(&mut words));
@@ -725,18 +746,18 @@ fn simple_commands(command: &str) -> Vec<Vec<String>> {
                     open.push('`');
                 }
             }
-            (Some('"'), _) => word.get_or_insert_default().push(c),
-            (_, '$') if chars.peek() == Some(&'\'') => {
+            (_, '$') if unquoted && chars.peek() == Some(&'\'') => {
                 chars.next();
                 open.push('$');
-                word.get_or_insert_default();
+                word.get_or_insert_default().expanded = true;
             }
-            (_, '\'' | '"') => {
+            (_, '\'' | '"') if unquoted => {
                 open.push(c);
                 word.get_or_insert_default();
             }
             (_, '#')
-                if word.is_none()
+                if unquoted
+                    && word.is_none()
                     && previous
                         .is_none_or(|p: char| p.is_whitespace() || COMMENT_STARTS.contains(p)) =>
             {
@@ -760,7 +781,11 @@ fn simple_commands(command: &str) -> Vec<Vec<String>> {
                 }
                 _ => {}
             },
-            _ => word.get_or_insert_default().push(c),
+            _ => {
+                let word = word.get_or_insert_default();
+                word.text.push(c);
+                word.expanded |= c == '$' && top != Some('\'');
+            }
         }
         previous = Some(c);
     }
@@ -772,53 +797,70 @@ fn simple_commands(command: &str) -> Vec<Vec<String>> {
 /// The scripts in sed's `arguments`: the `-e`/`--expression` scripts joined
 /// by newlines, as sed joins them, and the first non-option argument if it
 /// comes before any `-e`/`-f`. BSD sed takes that one as the script and the
-/// rest as files; GNU sed also reads options after it.
-fn sed_scripts(arguments: &[String]) -> Vec<String> {
+/// rest as files; GNU sed also reads options after it. None if a script is no
+/// literal: from a file (`-f`, `--file`), expanded by the shell, or xargs' and
+/// find's placeholder `{}`.
+fn sed_scripts(arguments: &[Word]) -> Option<Vec<String>> {
     let (mut expressions, mut first, mut script_option) = (Vec::new(), None, false);
     let mut words = arguments.iter();
+    let literal = |word: &Word| (!word.expanded && word.text != "{}").then(|| word.text.clone());
     while let Some(word) = words.next() {
         let (name, value) =
-            word.split_once('=').map_or((word.as_str(), None), |(n, v)| (n, Some(v)));
+            word.text.split_once('=').map_or((word.text.as_str(), None), |(n, v)| (n, Some(v)));
         let long = |option: &str, min: usize| name.len() >= min && option.starts_with(name);
-        if word == "--" {
+        if word.text == "--" {
             if !script_option && first.is_none() {
-                first = words.next().cloned();
+                first = words.next();
             }
             break;
-        } else if long("--expression", 3) || long("--file", 4) {
-            let argument = value.map(str::to_owned).or_else(|| words.next().cloned());
-            if long("--expression", 3) {
-                expressions.extend(argument);
-            }
+        } else if long("--file", 4) {
+            return None;
+        } else if long("--expression", 3) {
+            let argument = match value {
+                Some(value) => literal(word).map(|_| value.to_owned()),
+                None => literal(words.next()?),
+            };
+            expressions.push(argument?);
             script_option = true;
         } else if long("--line-length", 3) {
             if value.is_none() {
                 words.next();
             }
-        } else if let Some(flags) = short_flags(word) {
+        } else if let Some(flags) = short_flags(&word.text) {
             // getopt: `e`, `f` and GNU's `l` take the rest of the group or the
             // next word, `i`/`I` the rest of the group. BSD's `-l` takes none,
             // so only a number is skipped.
             let Some(at) = flags.find(['e', 'f', 'l', 'i', 'I']) else { continue };
             let (letter, rest) = (&flags[at..=at], &flags[at + 1..]);
-            if matches!(letter, "e" | "f") {
-                let argument =
-                    if rest.is_empty() { words.next().cloned() } else { Some(rest.to_owned()) };
-                if letter == "e" {
-                    expressions.extend(argument);
-                }
+            if letter == "f" {
+                return None;
+            } else if letter == "e" {
+                let argument = match rest {
+                    "" => literal(words.next()?),
+                    rest => literal(word).map(|_| rest.to_owned()),
+                };
+                expressions.push(argument?);
                 script_option = true;
             } else if letter == "l"
                 && rest.is_empty()
-                && words.clone().next().is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+                && words.clone().next().is_some_and(|n| n.text.bytes().all(|b| b.is_ascii_digit()))
             {
                 words.next();
             }
-        } else if !word.starts_with("--") && !script_option && first.is_none() {
-            first = Some(word.clone());
+        } else if !word.text.starts_with("--") && !script_option && first.is_none() {
+            first = Some(word);
         }
     }
-    first.into_iter().chain((!expressions.is_empty()).then(|| expressions.join("\n"))).collect()
+    let first = match first {
+        Some(word) => Some(literal(word)?),
+        None => None,
+    };
+    Some(
+        first
+            .into_iter()
+            .chain((!expressions.is_empty()).then(|| expressions.join("\n")))
+            .collect(),
+    )
 }
 
 /// A sed script that writes a file or runs a command: the command `w`/`W` or
