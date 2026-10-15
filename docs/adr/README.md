@@ -59,4 +59,5 @@ Accepted ADRs are not rewritten but superseded by a new ADR.
 | [ADR-0047](0047-opencascade-sys-fork-with-links-key.md) | opencascade-sys as a minimal fork with `links = "occt"`, the kernel takes the OCCT headers from DEP_OCCT_INCLUDE | accepted | 2026-10-14 | qoob3d-kernel |
 | [ADR-0048](0048-pre-push-checks-the-pushed-commit-in-a-worktree.md) | The pre-push hook checks the tip of every pushed ref in a temporary worktree | accepted | 2026-10-14 | – |
 | [ADR-0049](0049-guard-checks-shell-commands-textually.md) | The guard checks shell commands as text at three anchors; heredoc bodies are data only in exact message forms | accepted | 2026-10-14 | xtask |
+| [ADR-0050](0050-ci-caches-the-occt-install-by-version.md) | CI caches the OCCT install by OCCT version; the opencascade-sys fork skips the OCCT build when the pinned install exists | accepted | 2026-10-15 | qoob3d-kernel |
 <!-- adr-index:end -->

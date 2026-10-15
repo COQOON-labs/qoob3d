@@ -3,6 +3,11 @@
 /// Pre-installed OpenCASCADE library will be checked for compatibility using semver rules.
 const OCCT_VERSION: (u8, u8) = (7, 8);
 
+/// QOOB3D: OCCT version that the pinned occt-sys (`=7.8.1` in Cargo.toml) builds; keep both
+/// in step (ADR-0050).
+#[cfg(feature = "builtin")]
+const BUILTIN_OCCT_VERSION: &str = "7.8.1";
+
 /// The list of used OpenCASCADE libraries which needs to be linked with.
 const OCCT_LIBS: &[&str] = &[
     "TKMath",
@@ -140,7 +145,11 @@ impl OcctConfig {
         // Add path to builtin OCCT
         #[cfg(feature = "builtin")]
         {
-            occt_sys::build_occt();
+            // QOOB3D: occt-sys reruns the whole cmake build every time; skip it when the
+            // pinned OCCT is already installed, e.g. restored from the CI cache (ADR-0050).
+            if !builtin_occt_installed(&occt_sys::occt_path()) {
+                occt_sys::build_occt();
+            }
             std::env::set_var("DEP_OCCT_ROOT", occt_sys::occt_path().as_os_str());
         }
 
@@ -193,4 +202,20 @@ impl OcctConfig {
             panic!("OpenCASCADE library found but something wrong with config.");
         }
     }
+}
+
+/// QOOB3D: whether `prefix` holds a complete install of `BUILTIN_OCCT_VERSION`: the version
+/// header names it and every linked library exists (cmake installs the libraries last).
+/// See ADR-0050.
+#[cfg(feature = "builtin")]
+fn builtin_occt_installed(prefix: &std::path::Path) -> bool {
+    let header = std::fs::read_to_string(prefix.join("include").join("Standard_Version.hxx"))
+        .unwrap_or_default();
+    let wanted = format!("#define OCC_VERSION_COMPLETE \"{BUILTIN_OCCT_VERSION}\"");
+    let lib_dir = prefix.join("lib");
+    header.lines().any(|line| line.split_whitespace().eq(wanted.split_whitespace()))
+        && OCCT_LIBS.iter().all(|lib| {
+            lib_dir.join(format!("lib{lib}.a")).is_file()
+                || lib_dir.join(format!("{lib}.lib")).is_file()
+        })
 }
