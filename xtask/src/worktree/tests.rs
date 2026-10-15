@@ -226,9 +226,46 @@ fn shell_code(script: &str) -> Vec<&str> {
     script.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect()
 }
 
+/// The name assigned on a shell line of the form `[local |readonly |export ]NAME=…`.
+fn assigned_name(line: &str) -> Option<&str> {
+    let line = ["local ", "readonly ", "export "]
+        .iter()
+        .find_map(|p| line.strip_prefix(p))
+        .unwrap_or(line);
+    let (name, _) = line.split_once('=')?;
+    let valid = !name.is_empty()
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !name.starts_with(|c: char| c.is_ascii_digit());
+    valid.then_some(name)
+}
+
+/// The positions of the `else` (if any) and the `fi` of the shell `if` that
+/// starts at `code[start]`, counting nested `if … fi` blocks.
+fn if_branches(code: &[&str], start: usize) -> (Option<usize>, Option<usize>) {
+    let mut depth = 0_usize;
+    let mut otherwise = None;
+    for (i, line) in code.iter().enumerate().skip(start + 1) {
+        if line.starts_with("if ") {
+            depth += 1;
+        } else if *line == "fi" || line.starts_with("fi ") || line.starts_with("fi;") {
+            if depth == 0 {
+                return (otherwise, Some(i));
+            }
+            depth -= 1;
+        } else if depth == 0 && (*line == "else" || line.starts_with("else ")) {
+            otherwise = Some(i);
+        }
+    }
+    (otherwise, None)
+}
+
 // ADR-0051: each hook that runs xtask sources `lib.sh` before its first
 // `cargo xtask` line; `lib.sh` builds xtask and, on macOS only, removes
 // `com.apple.quarantine` from the built binary, after the build.
+// The binary path is kept in a variable; inside the Darwin block an
+// `if [ -f "$var" ]` (or `test -f`) precedes the `xattr` call, and the branch
+// where the file is missing writes a message to stderr (`>&2`) instead of
+// running xattr blindly, whose failures are discarded (critic finding).
 #[test]
 fn hooks_build_xtask_and_strip_the_macos_quarantine_before_running_it() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
@@ -252,7 +289,19 @@ fn hooks_build_xtask_and_strip_the_macos_quarantine_before_running_it() {
     }
 
     let lib = fs::read_to_string(root.join(".githooks/lib.sh")).unwrap();
-    let code = shell_code(&lib);
+    assert_lib_sh_strips_quarantine(&lib);
+}
+
+/// Why `lib.sh` must check that the binary exists; part of the failure messages.
+const MISSING: &str = "if the xtask binary is missing, lib.sh must say so on stderr \
+     (`>&2`, e.g. `hooks: … not found, quarantine not removed`) instead of calling \
+     xattr blindly and discarding its failure";
+
+/// Panics unless `lib` (the text of `.githooks/lib.sh`) builds xtask and then,
+/// inside a Darwin check, removes the quarantine from the binary held in a
+/// variable, after an `if [ -f "$var" ]` whose missing branch writes to stderr.
+fn assert_lib_sh_strips_quarantine(lib: &str) {
+    let code = shell_code(lib);
     let build = code
         .iter()
         .position(|l| l.starts_with("cargo build") && l.contains("--package xtask"))
@@ -262,15 +311,34 @@ fn hooks_build_xtask_and_strip_the_macos_quarantine_before_running_it() {
             )
         });
     let binary = "\"${CARGO_TARGET_DIR:-target}/debug/xtask\"";
-    let strip = code
+    let (assignment, var) = code
         .iter()
-        .position(|l| l.starts_with("xattr -d com.apple.quarantine") && l.contains(binary))
+        .enumerate()
+        .find_map(|(i, l)| {
+            let name = assigned_name(l)?;
+            (l.split_once('=')?.1 == binary).then_some((i, name))
+        })
         .unwrap_or_else(|| {
             panic!(
-                "lib.sh must remove com.apple.quarantine from {binary} with `xattr -d` \
-                 ({QUARANTINE_REASON})"
+                "lib.sh must store the binary path {binary} in a variable, so that it can \
+                 check the file exists before calling xattr ({QUARANTINE_REASON})"
             )
         });
+    let uses =
+        |l: &str| l.contains(&format!("\"${var}\"")) || l.contains(&format!("\"${{{var}}}\""));
+    let strip = code
+        .iter()
+        .position(|l| l.starts_with("xattr -d com.apple.quarantine") && uses(l))
+        .unwrap_or_else(|| {
+            panic!(
+                "lib.sh must remove com.apple.quarantine from \"${var}\" ({binary}) with \
+                 `xattr -d` ({QUARANTINE_REASON})"
+            )
+        });
+    assert!(
+        assignment < strip,
+        "lib.sh must assign {var} before the xattr call ({QUARANTINE_REASON})"
+    );
     assert!(
         build < strip,
         "lib.sh must strip the quarantine after the build ({QUARANTINE_REASON})"
@@ -283,9 +351,47 @@ fn hooks_build_xtask_and_strip_the_macos_quarantine_before_running_it() {
         .unwrap_or_else(|| {
             panic!("lib.sh must guard the xattr call with a Darwin check ({QUARANTINE_REASON})")
         });
+    let (_, darwin_end) = if_branches(&code, guard);
+    let darwin_end = darwin_end.unwrap_or_else(|| panic!("lib.sh: the Darwin check has no `fi`"));
     assert!(
-        !code[guard + 1..strip].contains(&"fi"),
+        strip < darwin_end,
         "the xattr call in lib.sh must sit inside the Darwin check ({QUARANTINE_REASON})"
+    );
+
+    // Inside the Darwin block, before the xattr call: `if [ -f "$var" ]` or
+    // `if test -f "$var"` (possibly negated with `!`).
+    let tests_file = |l: &str| {
+        l.starts_with("if ")
+            && (l.contains("[ ") || l.contains("test "))
+            && [format!("-f \"${var}\""), format!("-f \"${{{var}}}\"")]
+                .iter()
+                .any(|t| l.contains(t.as_str()))
+    };
+    let Some(offset) = code[guard + 1..strip].iter().position(|l| tests_file(l)) else {
+        panic!(
+            "inside the Darwin check, lib.sh must test `[ -f \"${var}\" ]` before the \
+             xattr call ({MISSING})"
+        )
+    };
+    let check = guard + 1 + offset;
+    let negated = code[check].contains("! -f") || code[check].contains("! test");
+    let (otherwise, check_end) = if_branches(&code, check);
+    let check_end = check_end.unwrap_or_else(|| panic!("lib.sh: the file check has no `fi`"));
+    assert!(check_end < darwin_end, "the file check must sit inside the Darwin check");
+    let otherwise = otherwise
+        .unwrap_or_else(|| panic!("the file check in lib.sh has no `else` branch ({MISSING})"));
+    let (exists, missing) = if negated {
+        (otherwise..check_end, check..otherwise)
+    } else {
+        (check..otherwise, otherwise..check_end)
+    };
+    assert!(
+        exists.contains(&strip) && strip != exists.start,
+        "the xattr call must sit in the branch where {var} exists ({MISSING})"
+    );
+    assert!(
+        code[missing.start + 1..missing.end].iter().any(|l| l.contains(">&2")),
+        "the branch where {var} is missing writes nothing to stderr ({MISSING})"
     );
 }
 
@@ -427,21 +533,279 @@ fn check_rev_builds_xtask_and_strips_the_macos_quarantine_before_the_check() {
     }
 
     let own = fs::read_to_string(src.join("worktree.rs")).unwrap();
-    let build_xtask = function_source(&own, "build_xtask");
+    assert_build_xtask_strips_quarantine(&function_source(&own, "build_xtask"));
+}
+
+/// Panics unless `build_xtask` (the source of `fn build_xtask`) builds with
+/// `build_xtask_command(` and then removes the quarantine from
+/// `xtask_binary(…)` in an `if cfg!(target_os = "macos")` block, not in a
+/// `#[cfg(target_os …)]` item.
+fn assert_build_xtask_strips_quarantine(build_xtask: &str) {
     let run = build_xtask.find("build_xtask_command(").unwrap_or_else(|| {
         panic!("build_xtask must build with `build_xtask_command(` ({QUARANTINE_REASON})")
     });
-    let cfg = build_xtask.find("#[cfg(target_os = \"macos\")]").unwrap_or_else(|| {
-        panic!("build_xtask must strip the quarantine only on macOS ({QUARANTINE_REASON})")
+    // A `#[cfg(target_os = …)]` item compiles the strip, and with it the only
+    // non-test use of `xtask_binary`, away on Linux: clippy `-D warnings`
+    // then rejects `xtask_binary` as dead code there (critic finding).
+    if let Some(at) = build_xtask.find("#[cfg(target_os") {
+        panic!(
+            "build_xtask must not gate the quarantine strip with a `#[cfg(target_os …)]` item: \
+             the helper must be used on every platform, otherwise it is dead code on Linux and \
+             clippy fails there; use `if cfg!(target_os = \"macos\") {{ … }}` \
+             ({QUARANTINE_REASON}): {}",
+            attributed_item(build_xtask, at)
+        );
+    }
+    let cfg = build_xtask.find("if cfg!(target_os = \"macos\")").unwrap_or_else(|| {
+        panic!(
+            "build_xtask must strip the quarantine only on macOS, in an \
+             `if cfg!(target_os = \"macos\")` block ({QUARANTINE_REASON})"
+        )
     });
     assert!(
         run < cfg,
         "build_xtask must strip the quarantine after the build ({QUARANTINE_REASON})"
     );
-    let strip = attributed_item(&build_xtask, cfg);
+    let strip = if_block(build_xtask, cfg);
     assert!(
         strip.contains("com.apple.quarantine") && strip.contains("xtask_binary("),
-        "the macOS-only part of build_xtask must remove com.apple.quarantine from \
+        "the macOS-only block of build_xtask must remove com.apple.quarantine from \
          xtask_binary(…) ({QUARANTINE_REASON}): {strip}"
     );
+}
+
+/// The first `{ … }` block in `code` after byte `at`, braces included, up to
+/// the `}` that closes it (the body of an `if` that starts at `at`).
+fn if_block(code: &str, at: usize) -> &str {
+    let Some(open) = code[at..].find('{').map(|i| at + i) else {
+        return &code[at..];
+    };
+    let mut depth = 0_i32;
+    for (i, c) in code[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &code[open..=open + i];
+                }
+            }
+            _ => {}
+        }
+    }
+    &code[open..]
+}
+
+/// The panic message of `check`, or `None` if it does not panic.
+fn panic_text(check: impl FnOnce()) -> Option<String> {
+    let payload = catch_unwind(AssertUnwindSafe(check)).err()?;
+    Some(
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+            .unwrap_or_default(),
+    )
+}
+
+/// The part of `lib.sh` before the Darwin check, as in the repository.
+const LIB_HEAD: &str = "set -euo pipefail\n\
+    export PATH=\"/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH\"\n\
+    cd \"$(git rev-parse --show-toplevel)\"\n\
+    # Builds xtask before the hook runs it.\n\
+    cargo build --quiet --package xtask\n";
+
+// Oracle self-check for `assert_lib_sh_strips_quarantine` (ADR-0051, critic
+// finding): the shapes the fix may take pass. Without this and the next
+// test, a matcher that never fires (or always fires) would decide the
+// repository test whatever lib.sh contains.
+#[test]
+fn lib_sh_quarantine_check_accepts_a_guarded_strip() {
+    let accepted = [
+        // `[ -f ]`, missing branch in `else`
+        "if [ \"$(uname)\" = Darwin ]; then\n\
+           xtask_binary=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
+           if [ -f \"$xtask_binary\" ]; then\n\
+             xattr -d com.apple.quarantine \"$xtask_binary\" 2>/dev/null || true\n\
+           else\n\
+             echo \"hooks: $xtask_binary not found, quarantine not removed\" >&2\n\
+           fi\n\
+         fi\n",
+        // negated `test -f`, braces, variable assigned before the Darwin check
+        "binary=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
+         if [ \"$(uname)\" = Darwin ]; then\n\
+           if ! test -f \"${binary}\"; then\n\
+             echo \"hooks: ${binary} not found, quarantine not removed\" >&2\n\
+           else\n\
+             xattr -d com.apple.quarantine \"${binary}\" 2>/dev/null || true\n\
+           fi\n\
+         fi\n",
+    ];
+    for tail in accepted {
+        let lib = format!("{LIB_HEAD}{tail}");
+        assert_eq!(panic_text(|| assert_lib_sh_strips_quarantine(&lib)), None, "{lib}");
+    }
+}
+
+// Oracle self-check for `assert_lib_sh_strips_quarantine` (ADR-0051, critic
+// finding): each regression fails with the message that names it.
+#[test]
+fn lib_sh_quarantine_check_rejects_each_regression() {
+    let rejected = [
+        // the code before the critic finding: xattr runs blindly on a literal path
+        (
+            "if [ \"$(uname)\" = Darwin ]; then\n\
+               xattr -d com.apple.quarantine \"${CARGO_TARGET_DIR:-target}/debug/xtask\" \
+               2>/dev/null || true\n\
+             fi\n",
+            "in a variable",
+        ),
+        // the sabotage `hooks-keep-quarantine`: no xattr call left
+        (
+            "if [ \"$(uname)\" = Darwin ]; then\n\
+               b=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
+               if [ -f \"$b\" ]; then\n\
+                 true\n\
+               else\n\
+                 echo \"hooks: $b not found\" >&2\n\
+               fi\n\
+             fi\n",
+            "lib.sh must remove com.apple.quarantine",
+        ),
+        // variable, but no file check
+        (
+            "if [ \"$(uname)\" = Darwin ]; then\n\
+               b=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
+               xattr -d com.apple.quarantine \"$b\" 2>/dev/null || true\n\
+             fi\n",
+            "must test `[ -f",
+        ),
+        // file check without an else branch: a missing binary stays silent
+        (
+            "if [ \"$(uname)\" = Darwin ]; then\n\
+               b=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
+               if [ -f \"$b\" ]; then\n\
+                 xattr -d com.apple.quarantine \"$b\" 2>/dev/null || true\n\
+               fi\n\
+             fi\n",
+            "no `else` branch",
+        ),
+        // else branch, but its message goes to stdout
+        (
+            "if [ \"$(uname)\" = Darwin ]; then\n\
+               b=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
+               if [ -f \"$b\" ]; then\n\
+                 xattr -d com.apple.quarantine \"$b\" 2>/dev/null || true\n\
+               else\n\
+                 echo \"hooks: $b not found\"\n\
+               fi\n\
+             fi\n",
+            "writes nothing to stderr",
+        ),
+        // the branches swapped: xattr runs exactly when the file is missing
+        (
+            "if [ \"$(uname)\" = Darwin ]; then\n\
+               b=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
+               if [ -f \"$b\" ]; then\n\
+                 echo \"hooks: $b found\" >&2\n\
+               else\n\
+                 xattr -d com.apple.quarantine \"$b\" 2>/dev/null || true\n\
+               fi\n\
+             fi\n",
+            "branch where b exists",
+        ),
+        // the strip outside the Darwin check
+        (
+            "b=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
+             if [ \"$(uname)\" = Darwin ]; then\n\
+               true\n\
+             fi\n\
+             if [ -f \"$b\" ]; then\n\
+               xattr -d com.apple.quarantine \"$b\" 2>/dev/null || true\n\
+             else\n\
+               echo \"hooks: $b not found\" >&2\n\
+             fi\n",
+            "inside the Darwin check",
+        ),
+    ];
+    for (tail, expected) in rejected {
+        let lib = format!("{LIB_HEAD}{tail}");
+        let message = panic_text(|| assert_lib_sh_strips_quarantine(&lib))
+            .unwrap_or_else(|| panic!("accepted, but must fail with {expected:?}:\n{lib}"));
+        assert!(message.contains(expected), "expected {expected:?}, got {message:?}\n{lib}");
+    }
+    // The strip before the build.
+    let lib = "if [ \"$(uname)\" = Darwin ]; then\n\
+                 b=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
+                 if [ -f \"$b\" ]; then\n\
+                   xattr -d com.apple.quarantine \"$b\" 2>/dev/null || true\n\
+                 else\n\
+                   echo \"hooks: $b not found\" >&2\n\
+                 fi\n\
+               fi\n\
+               cargo build --quiet --package xtask\n";
+    let message = panic_text(|| assert_lib_sh_strips_quarantine(lib)).expect("strip before build");
+    assert!(message.contains("after the build"), "{message}");
+}
+
+// Oracle self-check for `assert_build_xtask_strips_quarantine` (ADR-0051,
+// critic finding: `#[cfg(target_os = "macos")]` leaves `xtask_binary` dead on
+// Linux, where clippy `-D warnings` then fails).
+#[test]
+fn build_xtask_quarantine_check_requires_a_cfg_macro_block_after_the_build() {
+    const SIGNATURE: &str =
+        "pub(crate) fn build_xtask(worktree: &Path, target_dir: &Path) -> Result<(), String> {\n";
+    const BUILD: &str = "    let status = build_xtask_command(worktree, target_dir)\n\
+        .status()\n\
+        .map_err(|e| e.to_string())?;\n\
+        if !status.success() {\n\
+            return Err(status.to_string());\n\
+        }\n";
+    const STRIP: &str = "{\n\
+            if let Err(e) = Command::new(\"xattr\")\n\
+                .args([\"-d\", \"com.apple.quarantine\"])\n\
+                .arg(xtask_binary(target_dir))\n\
+                .output()\n\
+            {\n\
+                eprintln!(\"check-rev: could not run xattr: {e}\");\n\
+            }\n\
+        }\n";
+    let accepted =
+        format!("{SIGNATURE}{BUILD}    if cfg!(target_os = \"macos\") {STRIP}    Ok(())\n}}");
+    assert_eq!(panic_text(|| assert_build_xtask_strips_quarantine(&accepted)), None, "{accepted}");
+
+    let rejected = [
+        // the code before the critic finding
+        (
+            format!(
+                "{SIGNATURE}{BUILD}    #[cfg(target_os = \"macos\")]\n    {STRIP}    Ok(())\n}}"
+            ),
+            "dead code on Linux",
+        ),
+        // not gated at all: xattr would run on Linux too
+        (format!("{SIGNATURE}{BUILD}    {STRIP}    Ok(())\n}}"), "only on macOS"),
+        // gated on the wrong platform
+        (
+            format!("{SIGNATURE}{BUILD}    if cfg!(target_os = \"linux\") {STRIP}    Ok(())\n}}"),
+            "only on macOS",
+        ),
+        // the macOS block no longer strips; the strip runs on every platform
+        (
+            format!(
+                "{SIGNATURE}{BUILD}    if cfg!(target_os = \"macos\") {{\n        let _ = 0;\n    }}\n    \
+                 {STRIP}    Ok(())\n}}"
+            ),
+            "must remove com.apple.quarantine",
+        ),
+        // the strip before the build
+        (
+            format!("{SIGNATURE}    if cfg!(target_os = \"macos\") {STRIP}{BUILD}    Ok(())\n}}"),
+            "after the build",
+        ),
+    ];
+    for (source, expected) in rejected {
+        let message = panic_text(|| assert_build_xtask_strips_quarantine(&source))
+            .unwrap_or_else(|| panic!("accepted, but must fail with {expected:?}:\n{source}"));
+        assert!(message.contains(expected), "expected {expected:?}, got {message:?}\n{source}");
+    }
 }
