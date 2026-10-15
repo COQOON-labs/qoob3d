@@ -1,0 +1,13 @@
+# check-rev no longer builds the worktree's xtask (and strips its quarantine)
+# before the check, so a push from Sourcetree fails because Gatekeeper refuses
+# the xtask that `cargo xtask check` builds in the worktree (ADR-0051)
+command: cargo test -p xtask --quiet check_rev_builds_xtask_and_strips_the_macos_quarantine_before_the_check
+expect: check_rev must call `worktree::build_xtask(`
+--- patch
+diff --git a/xtask/src/main.rs b/xtask/src/main.rs
+--- a/xtask/src/main.rs
++++ b/xtask/src/main.rs
+@@ -189,3 +189,2 @@
+         println!("check-rev: checking {rev} in {}", dir.display());
+-        worktree::build_xtask(dir, &target)?;
+         match worktree::check_command(dir, &target).status() {

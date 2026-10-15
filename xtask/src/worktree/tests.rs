@@ -288,3 +288,129 @@ fn hooks_build_xtask_and_strip_the_macos_quarantine_before_running_it() {
         "the xattr call in lib.sh must sit inside the Darwin check ({QUARANTINE_REASON})"
     );
 }
+
+// ADR-0051: before the check, `check-rev` builds the xtask of the worktree
+// with `cargo build --quiet --package xtask`, in the worktree, into the shared
+// target dir (the one the check uses, so the check reuses this build), and
+// without the hook's git environment (as `check_command`, ADR-0048).
+#[test]
+fn build_xtask_command_builds_xtask_in_the_worktree_with_the_shared_target_dir() {
+    let worktree = Path::new("/tmp/qoob3d-wt");
+    let target = Path::new("/work/qoob3d/target/check-rev");
+    let command = build_xtask_command(worktree, target);
+    let program = Path::new(command.get_program());
+    assert_eq!(program.file_name(), Some(OsStr::new("cargo")), "program {program:?}");
+    let args: Vec<&OsStr> = command.get_args().collect();
+    assert_eq!(args, ["build", "--quiet", "--package", "xtask"].map(OsStr::new));
+    assert_eq!(command.get_current_dir(), Some(worktree));
+    let envs: Vec<(&OsStr, Option<&OsStr>)> = command.get_envs().collect();
+    assert!(
+        envs.contains(&(OsStr::new("CARGO_TARGET_DIR"), Some(target.as_os_str()))),
+        "CARGO_TARGET_DIR must be {}: {envs:?}",
+        target.display()
+    );
+    // The variables a git hook sets (see `crate::GIT_ENV`), written out here so
+    // that shrinking that list does not shrink this test.
+    for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+        assert!(envs.contains(&(OsStr::new(key), None)), "{key} is not removed: {envs:?}");
+    }
+}
+
+// ADR-0051: the binary whose quarantine is stripped is the one cargo builds
+// with the dev profile: `<target_dir>/debug/xtask` (cargo's directory layout).
+#[test]
+fn xtask_binary_is_debug_xtask_in_the_target_dir() {
+    assert_eq!(
+        xtask_binary(Path::new("/work/qoob3d/target/check-rev")),
+        PathBuf::from("/work/qoob3d/target/check-rev/debug/xtask")
+    );
+    assert_eq!(xtask_binary(Path::new("rel/t")), PathBuf::from("rel/t/debug/xtask"));
+}
+
+/// The source of `fn {name}` in `text`: from its signature to the first line
+/// that is a bare `}` (end of a top-level item), without comment lines.
+fn function_source(text: &str, name: &str) -> String {
+    let signature = format!("fn {name}(");
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.contains(&signature) && !l.trim_start().starts_with("//"))
+        .unwrap_or_else(|| panic!("no `{signature}` found"));
+    let end = start
+        + lines[start..].iter().position(|l| *l == "}").unwrap_or_else(|| panic!("{name}: no end"));
+    let code: Vec<&str> =
+        lines[start..=end].iter().filter(|l| !l.trim_start().starts_with("//")).copied().collect();
+    code.join("\n")
+}
+
+/// The item that the attribute starting at byte `at` of `code` applies to: up
+/// to its `;` or the `}` that closes its first block, at nesting depth zero.
+fn attributed_item(code: &str, at: usize) -> &str {
+    let after = code[at..].find(']').map_or(code.len(), |i| at + i + 1);
+    let mut depth = 0_i32;
+    for (i, c) in code[after..].char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' => depth -= 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &code[after..=after + i];
+                }
+            }
+            ';' if depth == 0 => return &code[after..=after + i],
+            _ => {}
+        }
+    }
+    &code[after..]
+}
+
+// ADR-0051: `check_rev` builds the worktree's xtask with
+// `worktree::build_xtask(` (which strips the quarantine) before it builds or
+// starts the check command; otherwise `cargo xtask check` in the worktree
+// starts a quarantined binary that Gatekeeper refuses. `build_xtask` runs
+// `build_xtask_command(` and then, on macOS only, removes
+// `com.apple.quarantine` from `xtask_binary(…)`.
+#[test]
+fn check_rev_builds_xtask_and_strips_the_macos_quarantine_before_the_check() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let main = fs::read_to_string(src.join("main.rs")).unwrap();
+    let check_rev = function_source(&main, "check_rev");
+    let build = check_rev.find("worktree::build_xtask(").unwrap_or_else(|| {
+        panic!("check_rev must call `worktree::build_xtask(` ({QUARANTINE_REASON})")
+    });
+    let check = check_rev
+        .find("worktree::check_command(")
+        .expect("check_rev must run `worktree::check_command(`");
+    assert!(
+        build < check,
+        "check_rev must build xtask before the check command ({QUARANTINE_REASON})"
+    );
+    for start in [".status()", ".spawn()", ".output()"] {
+        if let Some(at) = check_rev.find(start) {
+            assert!(
+                build < at,
+                "check_rev runs `{start}` before `worktree::build_xtask(` ({QUARANTINE_REASON})"
+            );
+        }
+    }
+
+    let own = fs::read_to_string(src.join("worktree.rs")).unwrap();
+    let build_xtask = function_source(&own, "build_xtask");
+    let run = build_xtask.find("build_xtask_command(").unwrap_or_else(|| {
+        panic!("build_xtask must build with `build_xtask_command(` ({QUARANTINE_REASON})")
+    });
+    let cfg = build_xtask.find("#[cfg(target_os = \"macos\")]").unwrap_or_else(|| {
+        panic!("build_xtask must strip the quarantine only on macOS ({QUARANTINE_REASON})")
+    });
+    assert!(
+        run < cfg,
+        "build_xtask must strip the quarantine after the build ({QUARANTINE_REASON})"
+    );
+    let strip = attributed_item(&build_xtask, cfg);
+    assert!(
+        strip.contains("com.apple.quarantine") && strip.contains("xtask_binary("),
+        "the macOS-only part of build_xtask must remove com.apple.quarantine from \
+         xtask_binary(…) ({QUARANTINE_REASON}): {strip}"
+    );
+}
