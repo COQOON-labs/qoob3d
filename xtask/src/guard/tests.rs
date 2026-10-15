@@ -2930,7 +2930,7 @@ const HARNESS_PATHS_NEXT_TO_PROSE: &[(&str, &str)] = &[
     ("cat > /tmp/n <<EOF\nthe harness\nEOF\nrm -rf xtask", "xtask"),
     ("cat <<EOF > /tmp/n; rm -rf harness\nbody\nEOF", "harness"),
     ("cat > /tmp/n <<-EOF\n\tthe harness\n\tEOF\nrm -rf .claude", ".claude"),
-    ("cat > /tmp/n <<'EOF'\nxtask\nEOF\nmv harness /tmp", "harness"),
+    ("cat > /tmp/n <<'EOF'\nnotes\nEOF\nmv harness /tmp", "harness"),
     ("cat > /tmp/n <<EOF\nEOF is the marker\nEOF\nrm -rf .github", ".github"),
     // Derived: a comment ends at its line, the path before a comment counts,
     // a `#` inside a word is no comment.

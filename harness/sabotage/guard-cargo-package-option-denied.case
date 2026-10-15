@@ -7,10 +7,11 @@ expect: cargo_package_option_and_xtask_subcommand_pass
 diff --git a/xtask/src/guard.rs b/xtask/src/guard.rs
 --- a/xtask/src/guard.rs
 +++ b/xtask/src/guard.rs
-@@ -629,5 +629,5 @@
+@@ -1160,6 +1160,6 @@
      let words = command_words(segment);
      let Some((program, arguments)) = words.split_first() else { return false };
-     program.trim_start_matches(['\'', '"']).rsplit('/').next() == Some("cargo")
+     let program = program.trim_start_matches(['\'', '"']);
+     program_name(program) == "cargo"
 -        && arguments.last().is_none_or(|w| matches!(*w, "-p" | "--package" | "--package="))
 +        && arguments.is_empty()
  }
