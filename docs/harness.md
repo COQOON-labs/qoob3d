@@ -79,9 +79,10 @@ cargo xtask selftest              # check the harness against all sabotage cases
 
 ## Limits (honestly)
 
-- A determined agent can get around local brakes: the guard detects shell writes
-  heuristically, the role ledger and the critic record live in directories the agent
-  can reach. CI catches this as long as the agent cannot merge with admin rights.
+- A determined agent can get around local brakes: the guard reads shell commands as text
+  (a harness path needs a pure read, an allowlist, and so do test, code and fixture paths
+  outside the agent's role, ADR-0049), the role ledger and the critic record live in directories
+  the agent can reach. CI catches this as long as the agent cannot merge with admin rights.
 - The critic is not deterministic. It only blocks through verified findings.
 - Usability and accessibility are so far checked by the critic (`/usability-review`). Still
   missing as deterministic checks: AccessKit names of all controls, contrast of the theme

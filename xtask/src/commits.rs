@@ -159,17 +159,11 @@ pub(crate) fn check_range(root: &Path, rev_list_args: &[String]) -> Result<(), V
     if problems.is_empty() { Ok(()) } else { Err(problems) }
 }
 
-/// `(status, path)` per path of a `--name-status` listing; a rename or copy
-/// (`R100`, `C75`) contributes both paths. With `-z` every field ends with a
-/// NUL (`M\0path\0R100\0old\0new\0`) and paths may hold tabs and newlines;
-/// without, fields end with a tab or newline (`M\tpath\nR100\told\tnew\n`).
+/// `(status, path)` per path of a `--name-status -z` listing, where every field
+/// ends with a NUL (`M\0path\0R100\0old\0new\0`) and paths may hold tabs and
+/// newlines; a rename or copy (`R100`, `C75`) contributes both paths.
 pub(crate) fn parse_name_status(listing: &str) -> Vec<(String, String)> {
-    let fields: Vec<&str> = if listing.contains('\0') {
-        listing.split('\0').collect()
-    } else {
-        listing.split(['\t', '\n']).collect()
-    };
-    let mut fields = fields.into_iter().filter(|f| !f.is_empty());
+    let mut fields = listing.split('\0').filter(|f| !f.is_empty());
     let mut files = Vec::new();
     while let Some(status) = fields.next() {
         let paths = if status.starts_with(['R', 'C']) { 2 } else { 1 };

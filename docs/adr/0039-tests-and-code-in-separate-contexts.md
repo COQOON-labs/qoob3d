@@ -25,7 +25,9 @@ should be an independent oracle. In Rust, unit tests idiomatically live in the s
 2. **Roles:** the subagent `test-author` may only change tests, the subagent `implementer`
    only production code. Every other agent context (main session, other subagents) is
    pinned to one of the two kinds on its first write access (ledger in
-   `.git/qoob3d/roles/`). The guard blocks switching.
+   `.git/qoob3d/roles/`). The guard blocks switching, also through shell commands that
+   are no pure read and name test or code paths (`sed -i`, `cp`, `>` …; `git add`,
+   `git commit` and `git push` excepted; ADR-0049).
 3. **Commits:** a commit changes either tests or production code. Exceptions (e.g.
    renaming an API together with all callers) need the trailer
    `Mixed-Change: <reason>`. Checked in `pre-push` and CI.

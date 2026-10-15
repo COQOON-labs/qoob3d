@@ -124,9 +124,12 @@ Crate-specific pitfalls are in the respective `crates/<crate>/CLAUDE.md`.
 - **Unit tests live in `<module>/tests.rs`** (`#[cfg(test)] mod tests;`), never inline
   (ADR-0039, `xtask hygiene`).
 - **The guard blocks shell commands** that name a harness path of this repository (token
-  start, `./`, repo root) and could write (`>`, `sed -i`, `cp` …; `2>/dev/null`, `>/dev/null`,
-  `&>/dev/null` and `2>&1` do not count); a harness directory named in a comment of a
-  writing command counts too (ADR-0049); also any command naming
+  start, `./`, repo root) unless they are a pure read (`cat`, `grep`, `sed -n`, `git log`/
+  `diff`/`show`/`status` … ; `2>/dev/null`, `>/dev/null`, `&>/dev/null` and `2>&1` do not
+  count); a harness directory named in a comment counts too (ADR-0049). A shell command
+  that is no pure read follows the role rule for the test or code paths it names (`git add`,
+  `git commit`, `git push` excepted) and is denied for fixture paths. Also blocked: any
+  command naming
   `QOOB3D_HARNESS_UNLOCK`/`QOOB3D_SKIP_REVIEW`. Then run the command with a different target,
   or edit with Edit/Write.
 - **Never change fixtures** under `crates/qoob3d-core/tests/fixtures/`. New format version →

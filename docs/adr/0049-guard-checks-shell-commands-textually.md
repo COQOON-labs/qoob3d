@@ -145,6 +145,27 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    `sparse-checkout`, `submodule`, `worktree`, also after git's global options
    (`git -C . clean`). A harness path in a global option counts like any other
    (`git -C xtask switch main`). False alarms like `ls harness | grep rm` are accepted.
+8. **A harness path in a shell command needs a pure read (an allowlist).** A command that
+   names a harness path (the anchors and bare directories with the exceptions above, the
+   bodies of safe message forms removed) passes in a locked session only if every simple
+   command of both readings only reads: the read-only programs (`cat`, `grep`, `ls`, `rg`,
+   `find` without actions …), `sed` without in-place editing and with a readable script
+   that writes nothing, `git log|diff|show|status|blame|ls-files|grep|rev-parse|cat-file`
+   without a global option and without `--output`/`-o`/`--ext-diff`/`--textconv`, `echo`,
+   `printf`, `cd`, `shellcheck`, `true`, `:`, the compound keywords
+   `if`/`then`/`else`/`elif`/`fi`/`{`/`}`, and assignments on their own; no redirection
+   but `/dev/null` and `2>&1`. A program after an assignment (`GIT_EXTERNAL_DIFF=x git
+   diff`) or given by an expansion is no read. Anything else is denied (`ed`, `vim -es`,
+   `git archive -o`, `cmake -E`, `unzip`, `php -r` were missed by a list of writers). This
+   replaces the writer list of decisions 5 to 7: the sed rules of decision 5 now decide
+   whether a sed only reads; the programs of decisions 6 and 7 are simply no reads.
+   Roles and fixtures follow the same allowlist: a shell command that is no pure read
+   follows the Edit/Write rules for the repository paths named by its simple commands that
+   do not only read (with a file redirection or a lost sed, every word counts). A fixture
+   path is denied (ADR-0030, also unlocked, before the role check), and a test or code path
+   goes through the role check (ADR-0039), which binds the role of a context without an
+   agent type. A read binds nothing, and neither do `git add`, `git commit` and `git push`,
+   which change no file content, so the main context stages tests and code separately.
 
 ## Consequences
 
@@ -171,6 +192,13 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
   the script only reads; agents write the script literally in the command.
 - Rare false alarms: a writing command that names a harness directory only in a comment
   (`echo done > /tmp/x # harness`) is denied. Agents drop the comment or split the command.
+- In a locked session `git add <harness path>`, `cargo add --path xtask` and running a
+  harness script (`bash .githooks/pre-push`, `node xtask/tool.js`) are denied; `git add
+  -u`/`-A`, `git commit`, `git push` and the hooks git runs itself are not, because they
+  name no harness path.
+- Shell commands that are no pure read bind and respect the agent role like Edit/Write
+  for the test or code paths they name (`git add`/`commit`/`push` excepted), and never touch
+  a fixture path, not even to add a new fixture (use Write).
 - Clarifies ADR-0043 decision 4 without changing it for Edit/Write.
 
 ## Rejected alternatives
@@ -191,7 +219,8 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
 
 - Code: `xtask/src/guard.rs` (`models_prose`, `without_prose`, `is_message_form`,
   `stands_alone`, `expands`, `ends_early`, `writes_regular_file`, `only_redirects_to_file`,
-  `simple_commands`, `sed_writes`, `sed_scripts`, `runs_with_flag`, `harness_in_shell`)
+  `simple_commands`, `sed_writes`, `sed_scripts`, `runs_with_flag`, `harness_in_shell`,
+  `pure_read`, `reads`, `git_reads`, `check_shell_paths`, `stages`)
 - Sabotage cases: `harness/sabotage/guard-harness-shell-after-heredoc.case`,
   `guard-harness-shell-interpreter-heredoc.case`, `guard-prose-heredoc-body-checked.case`,
   `guard-harness-shell-fail-closed-prose.case`, `guard-harness-shell-backtick-comment.case`,
@@ -200,5 +229,7 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
   `guard-harness-shell-heredoc-{split-substitution,paren-terminator}.case`,
   `guard-harness-shell-hash-in-glob-group.case`,
   `guard-harness-shell-sed-{write,execute,expanded-script,script-file}.case`,
-  `guard-harness-shell-in-place-in-substitution.case`
-- Related: ADR-0037, ADR-0043
+  `guard-harness-shell-in-place-in-substitution.case`,
+  `guard-harness-shell-unlisted-writer.case`, `guard-implementer-shell-writes-test.case`,
+  `guard-test-author-shell-writes-code.case`, `guard-shell-writes-fixture.case`
+- Related: ADR-0030, ADR-0037, ADR-0039, ADR-0043

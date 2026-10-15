@@ -8,10 +8,14 @@
 //!   (ADR-0043): an unlocked session may change the guard itself (`guard.rs`,
 //!   `.claude/hooks/guard.sh`, the project `.claude/settings.json`); the
 //!   owner's review covers that,
-//! - format fixtures are never modified,
+//! - format fixtures are never modified, also not by a shell command that is
+//!   no pure read ([`check_shell_paths`]),
 //! - one agent context writes either tests or production code, never both,
-//! - shell commands must not bypass the git hooks or write harness files; a
-//!   harness directory counts also when named without its trailing slash, as a
+//!   also through a shell command that is no pure read and names test or code
+//!   paths (`git add`, `git commit` and `git push` excepted),
+//! - shell commands must not bypass the git hooks; a command that names a
+//!   harness path must be a pure read ([`pure_read`], an allowlist; ADR-0049).
+//!   A harness directory counts also when named without its trailing slash, as a
 //!   whole shell argument, also in a comment (every rule for where the shell
 //!   starts a comment was bypassable: `${x:- #}`, zsh's `(#i)` and
 //!   `x(a| #)`), but not in the heredoc body of an exact message form
@@ -21,17 +25,16 @@
 //!   redirection, standing alone as the whole command (around it only blank
 //!   lines and the closing `)"`), under an unquoted marker without `$(`, `${`
 //!   or a line ending in a backslash in the body, and inside `$(…)` without a
-//!   body line starting with the marker word. A command with a construct the guard does not model
-//!   (backticks, `$'`, redirections with `&`, arithmetic `((`) or with a
-//!   heredoc that keeps its body or has no terminator keeps all heredoc
-//!   bodies: fail closed (ADR-0049). In-place editors and inline code count
-//!   also inside `$(…)`, backticks and `(…)`; a sed script with `w`/`W` or
-//!   `e`, from a file (`-f`) or expanded by the shell writes like `sed -i`.
-//!   Where a `#` may start a comment, the guard takes the reading that checks
-//!   more: writers are searched with comments skipped and with comments as
-//!   words, and a `#` on a heredoc line keeps its body. A sed that a naive
-//!   split puts in command position but neither reading finds counts as
-//!   writing.
+//!   body line starting with the marker word. A command with a construct the
+//!   guard does not model (backticks, `$'`, redirections with `&`, arithmetic
+//!   `((`) or with a heredoc that keeps its body or has no terminator keeps
+//!   all heredoc bodies: fail closed (ADR-0049). A sed with in-place editing,
+//!   a script with `w`/`W` or `e`, a script file (`-f`) or a script expanded
+//!   by the shell is no read. Where a `#` may start a comment, the guard takes
+//!   the reading that checks more: a command is a pure read only if it is
+//!   one with comments skipped and with comments as words, and a `#` on a
+//!   heredoc line keeps its body. A sed that a naive split puts in command
+//!   position but neither reading finds is no read.
 //!
 //! Edit/Write paths are collapsed (`.`, `..`) before any check. Shell commands
 //! are checked as text, at the three anchors of ADR-0043 (token start, `./`,
@@ -57,54 +60,11 @@ const BYPASSES: &[&str] =
 /// The shortest abbreviation of `--no-verify` git accepts (`--no-ver` is
 /// ambiguous with `--no-verbose`).
 const NO_VERIFY_MIN: &str = "--no-veri";
-/// Shell fragments that (may) write files; also `dd` and `install` as words,
-/// the programs with an output option in [`writes`], the in-place editors
-/// and inline-code interpreters of [`runs_with_flag`], and sed scripts that
-/// write or run commands ([`sed_writes`]).
-const WRITES: &[&str] = &[
-    ">",
-    "of=",
-    "tee ",
-    "mv ",
-    "cp ",
-    "rm ",
-    "ln ",
-    "truncate",
-    "chmod",
-    "touch ",
-    "git checkout",
-    "git restore",
-    "git apply",
-    "patch ",
-    "python",
-    "<<",
-    "rsync",
-    "ditto",
-    "wget",
-];
-/// Programs that rewrite the files they name ([`runs_with_flag`]): names,
-/// in-place short flags, short flags taking the rest of the group as
-/// argument, long options. sed: `-i[ext]`, BSD `-I ext`, GNU `--in-place`;
-/// perl/ruby: `-i[ext]`; awk: `-i inplace` or `--include=inplace` loads gawk's
-/// inplace extension.
-const IN_PLACE: &[(&[&str], &str, &str, &[&str])] = &[
-    (&["sed", "gsed"], "iI", "ef", &["--in-place"]),
-    (&["perl", "ruby"], "i", "IMmr", &[]),
-    (&["awk", "gawk"], "i", "vFfeE", &["--include"]),
-];
-/// Interpreters running code from the command line, which can write any file
-/// ([`runs_with_flag`]), in the shape of [`IN_PLACE`]. ruby: `-e`; perl:
-/// `-e`/`-E`; node: `-e`/`--eval`, `-p`/`--print`; deno: the subcommand
-/// `eval`, matched like a long option; sh/bash/zsh: `-c`. The argument
-/// letters are the options taking an attached argument (`-rdigest`,
-/// `-I/usr/share/perl5`, ruby's `-Ke`). python is a writer in [`WRITES`].
-const INLINE_CODE: &[(&[&str], &str, &str, &[&str])] = &[
-    (&["ruby"], "e", "CEFIKrTWx", &[]),
-    (&["perl"], "eE", "CFIMmVx", &[]),
-    (&["node"], "ep", "", &["--eval", "--print"]),
-    (&["deno"], "", "", &["eval"]),
-    (SHELLS, "c", "", &[]),
-];
+/// sed's in-place editing ([`runs_with_flag`], [`reads`]): names, in-place
+/// short flags, short flags taking the rest of the group as argument, long
+/// options: `-i[ext]`, BSD `-I ext`, GNU `--in-place`.
+const IN_PLACE: &[(&[&str], &str, &str, &[&str])] =
+    &[(&["sed", "gsed"], "iI", "ef", &["--in-place"])];
 /// Shells whose `-c` runs its argument as a command line.
 const SHELLS: &[&str] = &["sh", "bash", "zsh"];
 /// Path fragments of the harness as they appear in shell commands; a directory
@@ -180,29 +140,9 @@ const READ_ONLY: &[&str] = &[
 ];
 /// Prefixes of the `find` primaries that write or run something.
 const FIND_ACTIONS: &[&str] = &["-exec", "-ok", "-delete", "-fprint", "-fls"];
-/// git subcommands that remove or rewrite files in the work tree or index
-/// ([`writes`]); `checkout`, `restore` and `apply` also as text in [`WRITES`].
-const GIT_WRITES: &[&str] = &[
-    "clean",
-    "stash",
-    "reset",
-    "checkout",
-    "restore",
-    "apply",
-    "switch",
-    "rebase",
-    "merge",
-    "pull",
-    "cherry-pick",
-    "revert",
-    "am",
-    "read-tree",
-    "checkout-index",
-    "update-index",
-    "sparse-checkout",
-    "submodule",
-    "worktree",
-];
+/// git subcommands that only read ([`git_reads`]).
+const GIT_READS: &[&str] =
+    &["log", "diff", "show", "status", "blame", "ls-files", "grep", "rev-parse", "cat-file"];
 /// git's global options that take the next word as their argument.
 const GIT_GLOBAL_ARGUMENTS: &[&str] =
     &["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env", "--exec-path"];
@@ -227,7 +167,11 @@ pub(crate) fn pre_tool_use(root: &Path, session: &Session, input: &Value) -> Res
     let tool = input["tool_name"].as_str().unwrap_or_default();
     let tool_input = &input["tool_input"];
     match tool {
-        "Bash" => check_shell(root, session, tool_input["command"].as_str().unwrap_or_default()),
+        "Bash" => {
+            let command = tool_input["command"].as_str().unwrap_or_default();
+            check_shell(root, session, command)?;
+            check_shell_paths(root, input, command)
+        }
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
             let Some(file) =
                 tool_input["file_path"].as_str().or(tool_input["notebook_path"].as_str())
@@ -256,34 +200,14 @@ pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Resu
         return Err(self_unlock_message(&file));
     }
     check_git_dir_in_shell(&forms, &normalised, read)?;
-    // Both readings of every `#` that may start a comment: an odd quote in a
-    // comment shifts the quote state of the other one (ADR-0049).
-    let commands: Vec<Vec<Word>> =
-        [false, true].into_iter().flat_map(|comments| simple_commands(command, comments)).collect();
-    // Each simple command again as text, so that a program inside `$(…)`,
-    // backticks or `(…)` starts a segment of its own.
-    let joined: Vec<String> = commands
-        .iter()
-        .map(|words| words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "))
-        .collect();
-    let writes = forms
-        .iter()
-        .cloned()
-        .chain(joined.iter().map(|text| text.to_lowercase()))
-        .any(|form| writes(&without_null_redirections(&form)))
-        || [command, normalised.as_str()]
-            .into_iter()
-            .chain(joined.iter().map(String::as_str))
-            .any(|form| runs_with_flag(form, IN_PLACE) || runs_with_flag(form, INLINE_CODE))
-        || sed_writes(&commands)
-        || hides_sed(command, &commands);
-    if session.unlocked || !writes {
+    if session.unlocked {
         return Ok(());
     }
     let shell = if models_prose(command) { without_prose(command) } else { command.to_owned() };
     let shell_forms = [shell.to_lowercase(), unquoted(&shell).to_lowercase()];
     if let Some(path) =
         forms.iter().zip(&shell_forms).find_map(|(form, shell)| harness_in_shell(root, form, shell))
+        && !pure_read(command)
     {
         return Err(format!(
             "Shell command could modify the harness file `{path}` (ADR-0037). Harness changes \
@@ -291,6 +215,127 @@ pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Resu
         ));
     }
     Ok(())
+}
+
+/// The simple commands of `command` in both readings of every `#` that may
+/// start a comment: an odd quote in a comment shifts the quote state of the
+/// other one (ADR-0049).
+fn both_readings(command: &str) -> Vec<Vec<Word>> {
+    [false, true].into_iter().flat_map(|comments| simple_commands(command, comments)).collect()
+}
+
+/// The texts of `words`, joined by blanks.
+fn joined_words(words: &[Word]) -> String {
+    words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ")
+}
+
+/// `command` only reads (ADR-0049, an allowlist): no redirection besides
+/// those in [`without_null_redirections`], no sed the tokenizer loses
+/// ([`hides_sed`]), and every simple command of both readings [`reads`].
+fn pure_read(command: &str) -> bool {
+    let commands = both_readings(command);
+    !without_null_redirections(command).contains('>')
+        && !hides_sed(command, &commands)
+        && commands.iter().all(|words| reads(words))
+}
+
+/// A simple command that only reads: nothing but assignments (their
+/// substitutions are simple commands of their own), a compound keyword before
+/// a read, a comment (a command `#…` in the reading that keeps comments, the
+/// other reading checks what follows it), `echo`, `printf`, `cd`,
+/// `shellcheck`, `true`, `:`, sed without
+/// in-place editing and with a readable script that writes nothing, a git
+/// read ([`git_reads`]), or one of [`reads_only`]. A program after an
+/// assignment (`GIT_EXTERNAL_DIFF=x git diff`) or given by an expansion is
+/// none.
+fn reads(words: &[Word]) -> bool {
+    let Some(index) = words.iter().position(|w| !is_assignment(&w.text)) else { return true };
+    let (program, arguments) = (&words[index], &words[index + 1..]);
+    if index > 0 || program.expanded {
+        return false;
+    }
+    match program.text.as_str() {
+        // In the reading that keeps comments, a comment is a command `#…`.
+        comment if comment.starts_with('#') => true,
+        "if" | "then" | "else" | "elif" | "fi" | "{" | "}" => reads(arguments),
+        "echo" | "printf" | "cd" | "shellcheck" | "true" | ":" => true,
+        "git" => git_reads(arguments),
+        name if is_sed(name) => {
+            !runs_with_flag(&joined_words(words), IN_PLACE) && !sed_command_writes(arguments)
+        }
+        _ => reads_only(&joined_words(words)),
+    }
+}
+
+/// `NAME=value`, a shell assignment.
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// The `arguments` of git run a read subcommand ([`GIT_READS`]) without a
+/// global option before it and without an option that writes a file or runs
+/// a program (`--output`, `-o`, `--ext-diff`, `--textconv`, also abbreviated).
+fn git_reads(arguments: &[Word]) -> bool {
+    let Some((subcommand, rest)) = arguments.split_first() else { return false };
+    GIT_READS.contains(&subcommand.text.as_str())
+        && !rest.iter().any(|w| {
+            w.text == "-o" || ["--output", "--ext", "--textc"].iter().any(|o| w.text.starts_with(o))
+        })
+}
+
+/// A shell command that is no [`pure_read`] follows the rules of Edit/Write
+/// for the repository paths named by its simple commands that do not only read
+/// ([`reads`]): a fixture path is denied (ADR-0030), and every test or code
+/// path goes through the role check (ADR-0039), which binds the role of a
+/// context without an agent type. A read binds nothing, and neither do
+/// `git add`, `git commit` and `git push`, which change no file content (the
+/// main context stages tests and code separately); the bodies of safe message
+/// forms are no paths. With a file redirection, whose target is no word, or a
+/// sed the tokenizer lost, every word of the other commands counts.
+fn check_shell_paths(root: &Path, input: &Value, command: &str) -> Result<(), String> {
+    if pure_read(command) {
+        return Ok(());
+    }
+    let text = if models_prose(command) { without_prose(command) } else { command.to_owned() };
+    let commands = both_readings(&text);
+    let words: Vec<String> =
+        if without_null_redirections(&text).contains('>') || hides_sed(&text, &commands) {
+            unquoted(&text)
+                .split(|c: char| ";|&\n()`".contains(c))
+                .filter(|segment| !stages(segment.split_whitespace()))
+                .flat_map(|segment| segment.split(|c: char| c.is_whitespace() || "<>".contains(c)))
+                .map(str::to_owned)
+                .collect()
+        } else {
+            commands
+                .iter()
+                .filter(|words| !reads(words) && !stages(words.iter().map(|w| w.text.as_str())))
+                .flatten()
+                .map(|word| word.text.clone())
+                .collect()
+        };
+    let named: Vec<String> = words
+        .iter()
+        .flat_map(|word| word.split('='))
+        .filter(|word| !word.is_empty())
+        .filter_map(|word| relative(root, word))
+        .collect();
+    if let Some(fixture) = named.iter().find(|rel| rel.to_lowercase().starts_with(paths::FIXTURES))
+    {
+        return Err(fixture_message(fixture));
+    }
+    named.iter().try_for_each(|rel| check_role(root, input, rel))
+}
+
+/// The `words` of a simple command are `git add`, `git commit` or `git push`
+/// (git also by path, also after global options), which change no file
+/// content.
+fn stages<'a>(mut words: impl Iterator<Item = &'a str>) -> bool {
+    words.next().is_some_and(|w| program_name(w) == "git")
+        && git_subcommand(words).is_some_and(|sub| matches!(sub, "add" | "commit" | "push"))
 }
 
 /// `command` with quotes and backslashes removed.
@@ -669,47 +714,6 @@ fn file_name_positions<'a>(command: &'a str, name: &'a str) -> impl Iterator<Ite
     })
 }
 
-/// A lower-cased command that (may) write files; in-place editors and
-/// inline-code interpreters in [`runs_with_flag`] need the case. Also the
-/// words `dd`, `install`, `unlink`, `rmdir`, `shred` (also by path), `rm` at
-/// the end or before `;|&)` (`| xargs rm`), `find` (also by path) with an
-/// action ([`FIND_ACTIONS`]) and the git subcommands of [`GIT_WRITES`], also
-/// after global options (`git -C . clean`).
-fn writes(command: &str) -> bool {
-    WRITES.iter().any(|w| command.contains(w))
-        || command
-            .split(|c: char| !(c.is_ascii_alphanumeric() || "_-".contains(c)))
-            .any(|w| matches!(w, "dd" | "install" | "unlink" | "rmdir" | "shred"))
-        || command.match_indices("rm").any(|(i, _)| {
-            command[..i]
-                .chars()
-                .next_back()
-                .is_none_or(|c| c.is_whitespace() || "/;|&(".contains(c))
-                && command[i + 2..]
-                    .chars()
-                    .next()
-                    .is_none_or(|c| c.is_whitespace() || ";|&)".contains(c))
-        })
-        || segments(command).any(|segment| {
-            let mut words = segment.split_whitespace();
-            words.any(|w| program_name(w) == "find") && runs_find_action(words)
-        })
-        || segments(command).any(|segment| {
-            let mut words = segment.split_whitespace();
-            words.any(|w| program_name(w) == "git")
-                && git_subcommand(words).is_some_and(|sub| GIT_WRITES.contains(&sub))
-        })
-        || runs_with_option(command, &["curl"], 'o', &["--output", "--remote-name"])
-        || runs_with_option(command, &["tar"], 'x', &["--extract"])
-        || runs_with_option(command, &["git", "config"], 'f', &["--file"])
-        || segments(command).any(|segment| {
-            // `tar xzf`: the first word bundles the flags without a dash.
-            let mut words = segment.split_whitespace();
-            words.any(|w| w == "tar")
-                && words.next().is_some_and(|w| !w.starts_with('-') && w.contains('x'))
-        })
-}
-
 /// One of the `words` after `find` is an action primary ([`FIND_ACTIONS`]).
 fn runs_find_action<'a>(mut words: impl Iterator<Item = &'a str>) -> bool {
     words.any(|w| FIND_ACTIONS.iter().any(|a| w.starts_with(a)))
@@ -728,7 +732,7 @@ fn git_subcommand<'a>(mut words: impl Iterator<Item = &'a str>) -> Option<&'a st
     None
 }
 
-/// A program of `table` ([`IN_PLACE`], [`INLINE_CODE`]), also by path,
+/// A program of `table` ([`IN_PLACE`]), also by path,
 /// followed by a short-flag group with one of its flag letters before any
 /// letter whose argument is the rest of the group (`-pi`, `-Ei.bak`, but not
 /// `-es/i/j/`), or by its long option, also abbreviated (`--in`). `command`
@@ -756,20 +760,13 @@ fn runs_with_flag(command: &str, table: &[(&[&str], &str, &str, &[&str])]) -> bo
     })
 }
 
-/// A `sed` or `gsed`, also by path, in one of the simple `commands`, whose
-/// script writes a file or runs a command ([`sed_script_writes`], read in
-/// both bracket modes) or is no literal the guard can read ([`sed_scripts`]).
-/// In-place editing is in [`IN_PLACE`].
-fn sed_writes(commands: &[Vec<Word>]) -> bool {
-    commands.iter().any(|words| {
-        words.iter().enumerate().any(|(i, word)| {
-            is_sed(&word.text)
-                && sed_scripts(&words[i + 1..]).is_none_or(|scripts| {
-                    scripts.iter().any(|script| {
-                        sed_script_writes(script, false) || sed_script_writes(script, true)
-                    })
-                })
-        })
+/// The script in sed's `arguments` writes a file or runs a command, or the
+/// guard cannot read it ([`sed_scripts`]).
+fn sed_command_writes(arguments: &[Word]) -> bool {
+    sed_scripts(arguments).is_none_or(|scripts| {
+        scripts
+            .iter()
+            .any(|script| sed_script_writes(script, false) || sed_script_writes(script, true))
     })
 }
 
@@ -835,8 +832,8 @@ struct Word {
 /// followed like a quote, one word with its blanks and quotes. Redirections
 /// (`2> file`, `&>file`, `<<EOF`) are no words. With `comments`, a `#` that
 /// may start a comment ([`starts_comment`]) ends the line; without, comments
-/// are words like any other. The caller takes both readings, so that a
-/// comment never hides a writer (ADR-0049). Each word records where it starts
+/// are words like any other. The callers take both readings, so that a
+/// comment never hides a command (ADR-0049). Each word records where it starts
 /// in `command`.
 fn simple_commands(command: &str, comments: bool) -> Vec<Vec<Word>> {
     let (mut commands, mut words) = (Vec::new(), Vec::new());
@@ -1440,12 +1437,16 @@ fn check_file_write(root: &Path, session: &Session, rel: &str) -> Result<(), Str
         ));
     }
     if lower_rel.starts_with(paths::FIXTURES) && root.join(rel).exists() {
-        return Err(format!(
-            "`{rel}` is a format fixture and immutable (ADR-0030). \
-             New format version → new fixture + migration."
-        ));
+        return Err(fixture_message(rel));
     }
     Ok(())
+}
+
+fn fixture_message(rel: &str) -> String {
+    format!(
+        "`{rel}` is a format fixture and immutable (ADR-0030). New format version → new \
+         fixture + migration."
+    )
 }
 
 /// One context writes tests or code, never both (ADR-0039). Role agents are
