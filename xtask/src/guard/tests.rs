@@ -2620,12 +2620,13 @@ const INLINE_CODE_WRITES: &[(&str, &str)] = &[
 /// perl only checks syntax; the `e` in `-I/usr/share/perl5` belongs to the
 /// directory.
 const INLINE_CODE_HARMLESS: &[&str] = &[
-    // The task's examples.
+    // The task's examples. (`bash .claude/hooks/guard.sh` moved to
+    // DENIED_SINCE_PURE_READS: Q2, running a harness script can write
+    // anything.)
     "bash -c 'cargo xtask check'",
     "sh -c 'echo hi'",
     "ruby -e 'puts 1'",
     "node -e 'console.log(1)'",
-    "bash .claude/hooks/guard.sh",
     "ruby script.rb",
     "perl -n script.pl",
     // Derived.
@@ -5592,5 +5593,71 @@ fn former_must_pass_entries_without_a_pure_read_are_denied() {
         assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
         assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
     }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0039/ADR-0030 (decided by the coordinator 2026-10-15, Q1 trigger): the
+// role and fixture checks apply to every shell command that is no pure read,
+// not only to listed writers; `git add`, `git commit` and `git push` change
+// no file content, so they neither bind a role nor are checked, and the main
+// context can stage tests and code separately.
+#[test]
+fn shell_role_and_fixture_checks_cover_every_non_read() {
+    let root = repo("shell_roles_every_non_read");
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &unused_home());
+        let implementer = bash_as(
+            "printf ',d\\nw\\n' | ed -s crates/qoob3d-core/src/mesh/tests.rs",
+            Some("i1"),
+            Some("implementer"),
+        );
+        assert_denied(
+            pre_tool_use(&root, &s, &implementer),
+            &[MSG_ROLE_CODE, "`test-author`"],
+            &format!("implementer ed (unlocked: {unlocked})"),
+        );
+        let author = bash_as(
+            "vim -es -c wq crates/qoob3d-core/src/mesh.rs",
+            Some("t1"),
+            Some("test-author"),
+        );
+        assert_denied(
+            pre_tool_use(&root, &s, &author),
+            &[MSG_ROLE_TESTS, "`implementer`"],
+            &format!("test-author vim (unlocked: {unlocked})"),
+        );
+        for (id, kind) in
+            [(None, None), (Some("i1"), Some("implementer")), (Some("t1"), Some("test-author"))]
+        {
+            let cmake = bash_as(
+                "cmake -E copy /tmp/x crates/qoob3d-core/tests/fixtures/format_v1.qbd",
+                id,
+                kind,
+            );
+            assert_denied(
+                pre_tool_use(&root, &s, &cmake),
+                &[MSG_FIXTURE],
+                &format!("{kind:?}: cmake fixture (unlocked: {unlocked})"),
+            );
+        }
+        // Derived: an implementer staging a test path is not checked.
+        let stage =
+            bash_as("git add crates/qoob3d-core/tests/a.rs", Some("i1"), Some("implementer"));
+        assert_eq!(
+            pre_tool_use(&root, &s, &stage),
+            Ok(()),
+            "implementer git add (unlocked: {unlocked})"
+        );
+    });
+    // The coordinator's example: a main context stages a test and a code path
+    // and still edits a test afterwards (git add bound nothing).
+    let s = locked();
+    for command in ["git add crates/qoob3d-core/tests/a.rs", "git add crates/qoob3d-core/src/a.rs"]
+    {
+        let input = bash_as(command, Some("m5"), None);
+        assert_eq!(pre_tool_use(&root, &s, &input), Ok(()), "{command}");
+    }
+    let edit = write("Edit", &abs(&root, TEST), "s", Some("m5"), None);
+    assert_eq!(pre_tool_use(&root, &s, &edit), Ok(()), "test edit after git add");
     fs::remove_dir_all(&root).unwrap();
 }
