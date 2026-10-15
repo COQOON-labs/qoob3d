@@ -26,7 +26,9 @@
 //!   `e`, from a file (`-f`) or expanded by the shell writes like `sed -i`.
 //!   Where a `#` may start a comment, the guard takes the reading that checks
 //!   more: writers are searched with comments skipped and with comments as
-//!   words, and a `#` on a heredoc line keeps its body.
+//!   words, and a `#` on a heredoc line keeps its body. A sed that a naive
+//!   split puts in command position but neither reading finds counts as
+//!   writing.
 //!
 //! Edit/Write paths are collapsed (`.`, `..`) before any check. Shell commands
 //! are checked as text, at the three anchors of ADR-0043 (token start, `./`,
@@ -240,7 +242,8 @@ pub(crate) fn check_shell(root: &Path, session: &Session, command: &str) -> Resu
             .into_iter()
             .chain(joined.iter().map(String::as_str))
             .any(|form| runs_with_flag(form, IN_PLACE) || runs_with_flag(form, INLINE_CODE))
-        || sed_writes(&commands);
+        || sed_writes(&commands)
+        || hides_sed(command, &commands);
     if session.unlocked || !writes {
         return Ok(());
     }
@@ -686,7 +689,7 @@ fn runs_with_flag(command: &str, table: &[(&[&str], &str, &str, &[&str])]) -> bo
 fn sed_writes(commands: &[Vec<Word>]) -> bool {
     commands.iter().any(|words| {
         words.iter().enumerate().any(|(i, word)| {
-            ["sed", "gsed"].iter().any(|p| program_name(&word.text).eq_ignore_ascii_case(p))
+            is_sed(&word.text)
                 && sed_scripts(&words[i + 1..]).is_none_or(|scripts| {
                     scripts.iter().any(|script| {
                         sed_script_writes(script, false) || sed_script_writes(script, true)
@@ -696,14 +699,59 @@ fn sed_writes(commands: &[Vec<Word>]) -> bool {
     })
 }
 
+/// `word` names sed or gsed, also by path.
+fn is_sed(word: &str) -> bool {
+    ["sed", "gsed"].iter().any(|p| program_name(word).eq_ignore_ascii_case(p))
+}
+
+/// A `sed` that a naive split of `command` puts in command position is no
+/// sed word of the tokenizer's `commands` in any reading: the tokenizer lost
+/// it (a quote in a comment, an unmodelled construct), so its script is
+/// unknown (fail closed, ADR-0049).
+fn hides_sed(command: &str, commands: &[Vec<Word>]) -> bool {
+    naive_seds(command).into_iter().any(|position| {
+        !commands.iter().flatten().any(|word| word.start == position && is_sed(&word.text))
+    })
+}
+
+/// Where a naive split of `command`, ignoring quotes, puts `sed` or `gsed`
+/// (also by path, quotes removed) in command position: at the start of a line
+/// or after `;`, `|`, `&`, `(` (also `$(`), a backtick, or the words `{`,
+/// `then`, `do`, `else`, with blanks between.
+fn naive_seds(command: &str) -> Vec<usize> {
+    let mut seds = Vec::new();
+    let (mut position, mut start) = (true, None);
+    for (i, c) in command.char_indices().chain([(command.len(), '\n')]) {
+        let boundary = c.is_whitespace() || ";|&()`".contains(c);
+        if let Some(from) = start.filter(|_| boundary) {
+            let word = &command[from..i];
+            if position && is_sed(&unquoted(word)) {
+                seds.push(from);
+            }
+            position = position && matches!(word, "{" | "then" | "do" | "else");
+            start = None;
+        }
+        if c == '\n' || ";|&(`".contains(c) {
+            position = true;
+        } else if c == ')' {
+            position = false;
+        } else if !boundary && start.is_none() {
+            start = Some(i);
+        }
+    }
+    seds
+}
+
 /// A word of a simple command ([`simple_commands`]): its text with quotes and
-/// backslashes resolved, and whether the shell expands it (a `$` outside
+/// backslashes resolved, where it starts, and whether the shell expands it (a `$` outside
 /// single quotes, a backtick, `$'…'`), so that the text is not what the
 /// program gets.
 #[derive(Default)]
 struct Word {
     text: String,
     expanded: bool,
+    /// The byte offset in the command where the word starts.
+    start: usize,
 }
 
 /// The simple commands of `command` as words, with quotes and backslashes
@@ -714,7 +762,8 @@ struct Word {
 /// (`2> file`, `&>file`, `<<EOF`) are no words. With `comments`, a `#` that
 /// may start a comment ([`starts_comment`]) ends the line; without, comments
 /// are words like any other. The caller takes both readings, so that a
-/// comment never hides a writer (ADR-0049).
+/// comment never hides a writer (ADR-0049). Each word records where it starts
+/// in `command`.
 fn simple_commands(command: &str, comments: bool) -> Vec<Vec<Word>> {
     let (mut commands, mut words) = (Vec::new(), Vec::new());
     // The word being read and whether it is the target of a redirection.
@@ -723,21 +772,30 @@ fn simple_commands(command: &str, comments: bool) -> Vec<Vec<Word>> {
     // `$'…'`, `(` for `(…)` and `$(…)`, `` ` ``, and for `${…}` `{` (or `}`
     // inside double quotes, where `'` is literal).
     let mut open: Vec<char> = Vec::new();
-    let mut previous = None;
-    let mut chars = command.chars().peekable();
-    while let Some(c) = chars.next() {
+    // The character before `c` (`(` for `$(`), and where the word being read
+    // starts.
+    let (mut previous, mut start) = (None, 0);
+    let peek = |chars: &std::str::Chars<'_>| chars.clone().next();
+    let mut chars = command.chars();
+    loop {
+        let i = command.len() - chars.as_str().len();
+        let Some(c) = chars.next() else { break };
+        if word.is_none() {
+            start = i;
+        }
         let top = open.last().copied();
         let unquoted = matches!(top, None | Some('(' | '`'));
         let expanding = !matches!(top, Some('\'' | '$'));
-        let substitution = expanding && (c == '`' || (c == '$' && chars.peek() == Some(&'(')));
-        let opens = opened(top, c, chars.peek().copied());
+        let substitution = expanding && (c == '`' || (c == '$' && peek(&chars) == Some('(')));
+        let opens = opened(top, c, peek(&chars));
         let separator = unquoted && (c.is_whitespace() || ";|&()<>".contains(c));
         if substitution {
             // The output of the substitution is (part of) a word.
             word.get_or_insert_default().expanded = true;
         }
         if substitution || separator {
-            end_word(&mut words, word.take(), &mut target, matches!(c, '<' | '>'));
+            let word = word.take().map(|w| Word { start, ..w });
+            end_word(&mut words, word, &mut target, matches!(c, '<' | '>'));
         }
         match (top, c) {
             (Some('\''), '\'') | (Some('"'), '"') | (Some('$'), '\'') | (Some('{' | '}'), '}') => {
@@ -774,7 +832,7 @@ fn simple_commands(command: &str, comments: bool) -> Vec<Vec<Word>> {
                 }
             }
             (_, '#') if comments && starts_comment(unquoted, word.is_some(), previous) => {
-                while chars.next_if(|c| *c != '\n').is_some() {}
+                skip_while(&mut chars, |c| c != '\n');
             }
             _ if opens.is_some() => {
                 open.extend(opens);
@@ -786,10 +844,10 @@ fn simple_commands(command: &str, comments: bool) -> Vec<Vec<Word>> {
             }
             _ if separator => match c {
                 '<' | '>' => {
-                    while chars.next_if(|c| "<>&|-".contains(*c)).is_some() {}
+                    skip_while(&mut chars, |c| "<>&|-".contains(c));
                     target = true;
                 }
-                '&' if chars.peek() == Some(&'>') => {}
+                '&' if peek(&chars) == Some('>') => {}
                 ';' | '|' | '&' | '(' | ')' | '\n' => {
                     commands.push(std::mem::take(&mut words));
                     // `<(…)` and `>(…)` are commands, not targets.
@@ -810,11 +868,18 @@ fn simple_commands(command: &str, comments: bool) -> Vec<Vec<Word>> {
                 word.expanded |= c == '$' && top != Some('\'');
             }
         }
-        previous = Some(c);
+        previous = Some(if substitution && c == '$' { '(' } else { c });
     }
-    words.extend(word.filter(|_| !target));
+    words.extend(word.filter(|_| !target).map(|w| Word { start, ..w }));
     commands.push(words);
     commands
+}
+
+/// Advances `chars` past the characters that satisfy `f`.
+fn skip_while(chars: &mut std::str::Chars<'_>, f: impl Fn(char) -> bool) {
+    while chars.clone().next().is_some_and(&f) {
+        chars.next();
+    }
 }
 
 /// Ends the `word` being read at a separator or substitution: it joins `words`
@@ -830,9 +895,10 @@ fn end_word(words: &mut Vec<Word>, word: Option<Word>, target: &mut bool, redire
 
 /// A `#` after `previous` may start a comment for the shell: outside quotes
 /// (`unquoted`), not inside a word, at the start or after whitespace or one of
-/// `;|&()<>` (bash and zsh read `true;#x` and `(true)#x` as comments).
+/// `;|&()<>` and a backtick (bash and zsh read `true;#x`, `(true)#x` and
+/// `$(#x` as comments).
 fn starts_comment(unquoted: bool, in_word: bool, previous: Option<char>) -> bool {
-    unquoted && !in_word && previous.is_none_or(|p| p.is_whitespace() || ";|&()<>".contains(p))
+    unquoted && !in_word && previous.is_none_or(|p| p.is_whitespace() || ";|&()<>`".contains(p))
 }
 
 /// What `c`, followed by `next`, opens inside `top` in [`simple_commands`]: a

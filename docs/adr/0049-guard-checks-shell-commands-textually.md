@@ -126,7 +126,10 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    `--file=`, also in a group like `-nf`), a script word the shell expands (a `$` outside
    single quotes, a backtick, `$'…'`; `'$p'` is literal), and xargs' and find's
    placeholder `{}` as the script. Only the script words count: a `$` in a file argument
-   (`sed -n 1p "$f"`) makes no writer.
+   (`sed -n 1p "$f"`) makes no writer. Every `sed`/`gsed` that a naive split of the raw
+   text, ignoring quotes, puts in command position (after a line start, `;`, `|`, `&`, `(`,
+   `$(`, a backtick, `{`, `then`, `do`, `else`) must be found by one of the tokenizer's
+   readings, or the command counts as writing (`x=$(# it's` newline `sed …` hid it).
 6. **In-place editors and inline code count inside substitutions.** The programs of the
    in-place and inline-code tables (`sed -i`, `perl -pi`, `ruby -e`, `bash -c` …) are also
    recognised as the first word inside `$(…)`, backticks and `(…)` subshells, using the
