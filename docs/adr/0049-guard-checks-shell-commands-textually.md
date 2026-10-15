@@ -30,12 +30,13 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
 2. **Comments and heredoc bodies of the safe shape are data:** a bare harness directory
    name in them is no path. A path with its slash (`xtask/…`) still counts everywhere. A
    comment starts only where the shell starts one: at an unquoted, unescaped `#` that starts
-   a word (`$(true)#`, `\ #` and `'a'#` start none). A heredoc body is data only when its
-   logical line (comments removed, backslash-newlines joined) has a single heredoc and
-   nothing after `<<MARKER` (also `<<-`, `<<'M'`, `<<"M"`) but at most one output
-   redirection to a file (`> path`, `>> path`). Anything else after the marker (a pipe,
-   `;`, `&&`, `&`, a subshell or brace group, `>(…)`, a second redirection, another word)
-   keeps the body as shell text, so `cat <<EOF | tee /tmp/x` is checked too.
+   a word (`$(true)#`, `\ #` and `'a'#` start none), and never inside an open `${…}`, also
+   nested and inside double quotes or `$(…)` (`${x:- #}` is one word). A heredoc body is
+   data only when its logical line (comments removed, backslash-newlines joined) has a
+   single heredoc and nothing after `<<MARKER` (also `<<-`, `<<'M'`, `<<"M"`) but at most
+   one output redirection to a file (`> path`, `>> path`). Anything else after the marker
+   (a pipe, `;`, `&&`, `&`, a subshell or brace group, `>(…)`, a second redirection,
+   another word) keeps the body as shell text, so `cat <<EOF | tee /tmp/x` is checked too.
 3. **Only the exact message forms make a body data**, where the body ends up in a message
    or a file and never runs (programs also by path):
    - `git commit` / `git tag` reading it with `-F -` (`--file=-`, `--file -`), or as

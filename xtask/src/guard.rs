@@ -9,7 +9,8 @@
 //! - one agent context writes either tests or production code, never both,
 //! - shell commands must not bypass the git hooks or write harness files; a
 //!   harness directory counts also when named without its trailing slash, as a
-//!   whole shell argument outside comments (from a `#` that starts a word) and
+//!   whole shell argument outside comments (from a `#` that starts a word,
+//!   not inside `${…}`) and
 //!   outside heredoc bodies of the safe shape: an exact message form as the
 //!   heredoc's command (`git commit|tag -F -`, `gh pr|issue create|edit
 //!   --body-file -`, their `"$(cat <<EOF"` messages, `cat` writing one regular
@@ -268,8 +269,9 @@ fn models_prose(command: &str) -> bool {
 /// `command` without what the shell reads as no words: heredoc bodies (from
 /// the line after `<<MARKER` through the line `MARKER`) and comments (from an
 /// unquoted, unescaped `#` that starts a word to the end of its line).
-/// Quotes, backslashes and `$(…)` in double quotes are followed, so a quoted
-/// `#` or `<<` starts neither; a `#` after a closing quote, `)` or an escaped
+/// Quotes, backslashes, `$(…)` and `${…}` (also in double quotes) are
+/// followed, so a quoted `#` or `<<` starts neither and no comment starts
+/// inside `${…}` (`${x:- #}`); a `#` after a closing quote, `)` or an escaped
 /// character is part of a word. A heredoc body is removed only in the safe
 /// shape: the only heredoc of its line, read as a message or written to a file
 /// ([`is_message_form`]), with nothing after the marker but one file redirection
@@ -282,7 +284,9 @@ fn models_prose(command: &str) -> bool {
 /// the line. Only for commands that [`models_prose`].
 fn without_prose(command: &str) -> String {
     let mut out = String::with_capacity(command.len());
-    // Open quotes, parentheses `(` and substitutions `$(` (as `$`), innermost last.
+    // Open quotes, parentheses `(`, substitutions `$(` (as `$`) and parameter
+    // expansions `${` (as `{`, or `}` inside double quotes, where `'` is
+    // literal), innermost last.
     let mut open: Vec<char> = Vec::new();
     let mut markers: Vec<Marker> = Vec::new();
     // Where the current line starts in `out`, where the text after the last
@@ -295,7 +299,10 @@ fn without_prose(command: &str) -> String {
         let mut end = i + c.len_utf8();
         let heredocs = markers.len();
         match (open.last().copied(), c) {
-            (Some('\''), '\'') | (Some('"'), '"') | (Some('(' | '$'), ')') => {
+            (Some('\''), '\'')
+            | (Some('"'), '"')
+            | (Some('(' | '$'), ')')
+            | (Some('{' | '}'), '}') => {
                 open.pop();
             }
             (Some('\''), _) => {}
@@ -304,7 +311,11 @@ fn without_prose(command: &str) -> String {
                 open.push('$');
                 end += 1;
             }
-            (Some('"'), _) => {}
+            (top, '$') if rest.starts_with("${") => {
+                open.push(if matches!(top, Some('"' | '}')) { '}' } else { '{' });
+                end += 1;
+            }
+            (Some('"'), _) | (Some('}'), '\'') => {}
             (_, '\'' | '"' | '(') => open.push(c),
             (_, '#') if word_start => {
                 i += rest.find('\n').unwrap_or(rest.len());
@@ -356,7 +367,10 @@ fn without_prose(command: &str) -> String {
         if outside_quotes && c == '\n' {
             line_start = out.len();
         }
-        word_start = outside_quotes && (c.is_whitespace() || COMMENT_STARTS.contains(c));
+        // No comment starts inside `${…}` (`${x:- #}`), also nested.
+        word_start = outside_quotes
+            && !open.iter().any(|o| matches!(o, '{' | '}'))
+            && (c.is_whitespace() || COMMENT_STARTS.contains(c));
         i = end;
     }
     if markers.is_empty() { out } else { command.to_owned() }
@@ -707,39 +721,35 @@ struct Word {
 /// The simple commands of `command` as words, with quotes and backslashes
 /// resolved as the shell does ([`segments`] splits inside quotes too).
 /// `;|&()` and newlines outside quotes separate them, and so do command
-/// substitutions (`$(…)`, backticks), also inside double quotes. Comments and
+/// substitutions (`$(…)`, backticks), also inside double quotes. A `${…}` is
+/// followed like a quote, so no comment starts in it. Comments and
 /// redirections (`2> file`, `&>file`, `<<EOF`) are no words.
 fn simple_commands(command: &str) -> Vec<Vec<Word>> {
     let (mut commands, mut words) = (Vec::new(), Vec::new());
     // The word being read and whether it is the target of a redirection.
     let (mut word, mut target): (Option<Word>, bool) = (None, false);
     // Open quotes and substitutions, innermost last: `'`, `"`, `$` for
-    // `$'…'`, `(` for `(…)` and `$(…)`, `` ` ``.
+    // `$'…'`, `(` for `(…)` and `$(…)`, `` ` ``, and for `${…}` `{` (or `}`
+    // inside double quotes, where `'` is literal).
     let mut open: Vec<char> = Vec::new();
     let mut previous = None;
     let mut chars = command.chars().peekable();
     while let Some(c) = chars.next() {
         let top = open.last().copied();
         let unquoted = matches!(top, None | Some('(' | '`'));
-        let substitution = (unquoted || top == Some('"'))
-            && (c == '`' || (c == '$' && chars.peek() == Some(&'(')));
+        let expanding = !matches!(top, Some('\'' | '$'));
+        let substitution = expanding && (c == '`' || (c == '$' && chars.peek() == Some(&'(')));
+        let opens = opened(top, c, chars.peek().copied());
         let separator = unquoted && (c.is_whitespace() || ";|&()<>".contains(c));
         if substitution {
             // The output of the substitution is (part of) a word.
             word.get_or_insert_default().expanded = true;
         }
         if substitution || separator {
-            let descriptor = matches!(c, '<' | '>')
-                && word.as_ref().is_some_and(|w| w.text.bytes().all(|b| b.is_ascii_digit()));
-            if let Some(w) = word.take()
-                && !std::mem::take(&mut target)
-                && !descriptor
-            {
-                words.push(w);
-            }
+            end_word(&mut words, word.take(), &mut target, matches!(c, '<' | '>'));
         }
         match (top, c) {
-            (Some('\''), '\'') | (Some('"'), '"') | (Some('$'), '\'') => {
+            (Some('\''), '\'') | (Some('"'), '"') | (Some('$'), '\'') | (Some('{' | '}'), '}') => {
                 open.pop();
             }
             // ANSI-C quoting: `\'` does not end it; escapes stay undecoded.
@@ -753,7 +763,7 @@ fn simple_commands(command: &str) -> Vec<Vec<Word>> {
             (_, '\\') if top != Some('\'') => match chars.next() {
                 Some('\n') | None => {}
                 // In double quotes a backslash escapes only these.
-                Some(next) if top != Some('"') || "$`\"\\".contains(next) => {
+                Some(next) if !matches!(top, Some('"' | '}')) || "$`\"\\".contains(next) => {
                     word.get_or_insert_default().text.push(next);
                 }
                 Some(next) => word.get_or_insert_default().text.extend(['\\', next]),
@@ -761,30 +771,26 @@ fn simple_commands(command: &str) -> Vec<Vec<Word>> {
             _ if substitution => {
                 commands.push(std::mem::take(&mut words));
                 target = false;
-                if c == '$' {
-                    chars.next();
-                    open.push('(');
-                } else if top == Some('`') {
-                    open.pop();
-                } else {
-                    open.push('`');
+                match (c, top) {
+                    ('$', _) => {
+                        chars.next();
+                        open.push('(');
+                    }
+                    (_, Some('`')) => {
+                        open.pop();
+                    }
+                    _ => open.push('`'),
                 }
             }
-            (_, '$') if unquoted && chars.peek() == Some(&'\'') => {
-                chars.next();
-                open.push('$');
-                word.get_or_insert_default().expanded = true;
+            _ if opens.is_some() => {
+                open.extend(opens);
+                let word = word.get_or_insert_default();
+                if c == '$' {
+                    chars.next();
+                    word.expanded = true;
+                }
             }
-            (_, '\'' | '"') if unquoted => {
-                open.push(c);
-                word.get_or_insert_default();
-            }
-            (_, '#')
-                if unquoted
-                    && word.is_none()
-                    && previous
-                        .is_none_or(|p: char| p.is_whitespace() || COMMENT_STARTS.contains(p)) =>
-            {
+            (_, '#') if word.is_none() && starts_comment(&open, previous) => {
                 while chars.next_if(|c| *c != '\n').is_some() {}
             }
             _ if separator => match c {
@@ -797,10 +803,12 @@ fn simple_commands(command: &str) -> Vec<Vec<Word>> {
                     commands.push(std::mem::take(&mut words));
                     // `<(…)` and `>(…)` are commands, not targets.
                     target = false;
-                    if c == '(' {
-                        open.push('(');
-                    } else if c == ')' && top == Some('(') {
-                        open.pop();
+                    match (c, top) {
+                        ('(', _) => open.push('('),
+                        (')', Some('(')) => {
+                            open.pop();
+                        }
+                        _ => {}
                     }
                 }
                 _ => {}
@@ -816,6 +824,43 @@ fn simple_commands(command: &str) -> Vec<Vec<Word>> {
     words.extend(word.filter(|_| !target));
     commands.push(words);
     commands
+}
+
+/// Ends the `word` being read at a separator or substitution: it joins `words`
+/// unless it is the `target` of a redirection or, before a `redirection`
+/// operator, its descriptor number (`2>`).
+fn end_word(words: &mut Vec<Word>, word: Option<Word>, target: &mut bool, redirection: bool) {
+    let Some(word) = word else { return };
+    let descriptor = redirection && word.text.bytes().all(|b| b.is_ascii_digit());
+    if !std::mem::take(target) && !descriptor {
+        words.push(word);
+    }
+}
+
+/// A `#` after `previous`, starting a word, starts a comment in
+/// [`simple_commands`]: outside quotes and `${…}` (also nested), after a blank
+/// or one of [`COMMENT_STARTS`].
+fn starts_comment(open: &[char], previous: Option<char>) -> bool {
+    matches!(open.last(), None | Some('(' | '`'))
+        && !open.iter().any(|o| matches!(o, '{' | '}'))
+        && previous.is_none_or(|p| p.is_whitespace() || COMMENT_STARTS.contains(p))
+}
+
+/// What `c`, followed by `next`, opens inside `top` in [`simple_commands`]: a
+/// quote, `$` for `$'…'`, or `{` for `${…}` (`}` inside double quotes, where
+/// `'` is literal and `"` nests).
+fn opened(top: Option<char>, c: char, next: Option<char>) -> Option<char> {
+    let unquoted = matches!(top, None | Some('(' | '`'));
+    let brace = top == Some('{');
+    match (c, next) {
+        ('$', Some('{')) if !matches!(top, Some('\'' | '$')) => {
+            Some(if matches!(top, Some('"' | '}')) { '}' } else { '{' })
+        }
+        ('$', Some('\'')) if unquoted || brace => Some('$'),
+        ('"', _) if unquoted || matches!(top, Some('{' | '}')) => Some('"'),
+        ('\'', _) if unquoted || brace => Some('\''),
+        _ => None,
+    }
 }
 
 /// The scripts in sed's `arguments`: the `-e`/`--expression` scripts joined
