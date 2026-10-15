@@ -1,0 +1,6 @@
+# The test author removes the fixtures with a glob: a path whose literal
+# prefix before `*?[{` reaches the fixture directory is a fixture path
+# (ADR-0030; critic finding T2 on 3be49fb)
+command: cargo xtask guard
+expect: is a format fixture and immutable
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "rm -rf crates/qoob3d-core/tests/*"}, "hook_event_name": "PreToolUse", "agent_type": "test-author", "agent_id": "a1"}

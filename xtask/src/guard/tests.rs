@@ -6073,3 +6073,178 @@ fn hook_environment_reads_use_the_shared_allowlist() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// A heredoc is never a pure read (critic finding T1 on 3be49fb, blocker; user
+// decision 2026-10-15): the tokenizer cannot follow a heredoc body, so one
+// apostrophe in it hides the commands after it. A command with a heredoc
+// that is not a removed message-form body is no pure read for the harness,
+// role/fixture, hook-environment and `.git` checks. The message forms stay:
+// their body is removed first and the rest of the command is judged.
+// ---------------------------------------------------------------------------
+
+/// A body with an odd quote before a harness write, with the fragment the
+/// denial must name. Must be denied in a locked session.
+const HEREDOCS_HIDING_HARNESS_WRITES: &[(&str, &str)] = &[
+    // The finding's example (T1 on 3be49fb, user decision 2026-10-15).
+    ("cat <<EOF\necho it's\nEOF\nrm -rf harness", "harness"),
+    // Derived: a quoted marker, a pipe after the marker, a `"` in the body
+    // (all three denied already before T1, regression guards).
+    ("cat <<'EOF'\nit's\nEOF\nrm -rf xtask", "xtask"),
+    ("cat <<EOF | wc -l\nit's\nEOF\nmv harness /tmp/h", "harness"),
+    ("cat <<EOF\nsay \"hi\nEOF\nrm -rf .claude", ".claude"),
+];
+
+/// Message forms with an apostrophe and harness words in the body, standing
+/// alone. Must pass in a locked session.
+const MESSAGE_FORMS_WITH_APOSTROPHES: &[&str] = &[
+    "git commit -F - <<'EOF'\nfix: it's the harness guard\nEOF",
+    "gh pr create --title X --body-file - <<'EOF'\nit's the xtask guard\nEOF",
+    "git commit -m \"$(cat <<'EOF'\nit's the harness\nEOF\n)\"",
+    "cat > /tmp/note <<'EOF'\nit's the harness\nEOF",
+];
+
+// ADR-0037/ADR-0043/ADR-0049 (critic finding T1 on 3be49fb): a heredoc makes a
+// command no pure read; message forms stay data.
+#[test]
+fn heredocs_are_never_pure_reads() {
+    let root = repo("heredocs_never_pure");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in HEREDOCS_HIDING_HARNESS_WRITES {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    for command in MESSAGE_FORMS_WITH_APOSTROPHES {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    // The `.git` and hook-environment checks, locked and unlocked.
+    both_sessions(|unlocked| {
+        let git = "cat <<EOF\necho it's\nEOF\necho x > .git/hooks/pre-push";
+        assert_denied(spec_shell(unlocked, git), &[MSG_GIT_DIR], &format!("{git:?} ({unlocked})"));
+        let startup = "cat <<EOF\necho it's\nEOF\necho x >> ~/.zshrc";
+        assert_denied(
+            spec_shell(unlocked, startup),
+            &[MSG_SELF_UNLOCK],
+            &format!("{startup:?} ({unlocked})"),
+        );
+    });
+    // Roles and fixtures.
+    let s = locked();
+    let implementer = bash_as(
+        "cat <<EOF\necho it's\nEOF\nsed -i s/a/b/ crates/qoob3d-core/src/mesh/tests.rs",
+        Some("i1"),
+        Some("implementer"),
+    );
+    assert_denied(pre_tool_use(&root, &s, &implementer), &[MSG_ROLE_CODE], "implementer heredoc");
+    for (id, kind) in
+        [(None, None), (Some("i1"), Some("implementer")), (Some("t1"), Some("test-author"))]
+    {
+        let fixture = bash_as(
+            "cat <<EOF\necho it's\nEOF\nrm crates/qoob3d-core/tests/fixtures/v1.qbd",
+            id,
+            kind,
+        );
+        assert_denied(pre_tool_use(&root, &s, &fixture), &[MSG_FIXTURE], &format!("{kind:?}"));
+    }
+    // Derived: a commit message naming a test path, by the implementer.
+    let commit = bash_as(
+        "git commit -F - <<'EOF'\nit's crates/qoob3d-core/tests/expr.rs\nEOF",
+        Some("i1"),
+        Some("implementer"),
+    );
+    assert_eq!(pre_tool_use(&root, &s, &commit), Ok(()), "implementer commit message");
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Globs and braces in paths (critic findings T2 and T3 on 3be49fb, majors;
+// user decision 2026-10-15):
+// - T2: each named path is cut at its first `*?[{`; it is a fixture path if
+//   that literal prefix (lower-cased) is a prefix of the fixture directory
+//   or starts with it.
+// - T3: a source-tree path with `*?[{` in any component holds tests and code.
+// Reads with globs pass.
+// ---------------------------------------------------------------------------
+
+// ADR-0030 (critic finding T2 on 3be49fb): globs and braces that may reach
+// the fixtures are fixture paths for every agent.
+#[test]
+fn globbed_paths_reaching_fixtures_are_fixtures() {
+    let root = repo("globbed_fixtures");
+    let s = locked();
+    for (id, kind) in
+        [(None, None), (Some("i1"), Some("implementer")), (Some("t1"), Some("test-author"))]
+    {
+        for command in [
+            // The finding's examples.
+            "rm -rf crates/qoob3d-core/tests/*",
+            "rm -rf crates/qoob3d-core/tests/fix*",
+            "rm -rf crates/*/tests/fixtures/*",
+            "rm -rf crates/qoob3d-core/tests/fixture{s,}",
+            // Derived: `?` and `[` in the fixture directory name, upper case.
+            "rm -rf crates/qoob3d-core/tests/fixture?",
+            "rm -rf crates/qoob3d-core/tests/[f]ixtures",
+            "rm -rf CRATES/qoob3d-core/TESTS/*",
+        ] {
+            assert_denied(
+                pre_tool_use(&root, &s, &bash_as(command, id, kind)),
+                &[MSG_FIXTURE],
+                &format!("{kind:?}: {command}"),
+            );
+        }
+    }
+    let new_test =
+        bash_as("cp /tmp/x crates/qoob3d-core/tests/new_test.rs", Some("t1"), Some("test-author"));
+    assert_eq!(pre_tool_use(&root, &s, &new_test), Ok(()), "test-author new test file");
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0039 (critic finding T3 on 3be49fb): a source-tree path with a glob or
+// brace in any component conflicts with both roles; reads with globs pass.
+#[test]
+fn globbed_source_paths_hold_tests_and_code() {
+    let root = repo("globbed_source_paths");
+    let s = locked();
+    let implementer = |c: &str| bash_as(c, Some("i1"), Some("implementer"));
+    let author = |c: &str| bash_as(c, Some("t1"), Some("test-author"));
+    for command in [
+        // The finding's examples.
+        "perl -pi -e s/a/b/ crates/qoob3d-core/src/expr/tests.r{s,}",
+        "sed -i s/a/b/ crates/qoob3d-kernel/t[e]sts/features.rs",
+        // Derived: `?` in a file name (denied already before T3, a
+        // regression guard), `*` in a directory (not `crates/*`: its literal
+        // prefix `crates/` reaches the fixtures, T2).
+        "sed -i s/a/b/ crates/qoob3d-core/src/expr/test?.rs",
+        "sed -i s/a/b/ crates/qoob3d-sketch/*/lib.rs",
+    ] {
+        assert_denied(
+            pre_tool_use(&root, &s, &implementer(command)),
+            &[MSG_ROLE_CODE, "`test-author`"],
+            &format!("implementer: {command}"),
+        );
+    }
+    for command in [
+        // The finding's example.
+        "sed -i s/a/b/ crates/qoob3d-core/src/ex*/mod.rs",
+        // Derived: a brace in a test directory name. (Both cases are denied
+        // already before T3, regression guards.)
+        "sed -i s/a/b/ crates/qoob3d-app/{tests,src}/x.rs",
+    ] {
+        assert_denied(
+            pre_tool_use(&root, &s, &author(command)),
+            &[MSG_ROLE_TESTS, "`implementer`"],
+            &format!("test-author: {command}"),
+        );
+    }
+    for (input, what) in [
+        (implementer("ls crates/*/src"), "implementer ls glob"),
+        (author("grep -rn x crates/*/tests"), "test-author grep glob"),
+        (author("ls crates/*/src"), "test-author ls glob"),
+    ] {
+        assert_eq!(pre_tool_use(&root, &s, &input), Ok(()), "{what}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}

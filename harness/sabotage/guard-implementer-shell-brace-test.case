@@ -1,0 +1,6 @@
+# The implementer edits a unit test file named through a brace expansion:
+# a source-tree path with `*?[{` holds tests and code (ADR-0039; critic
+# finding T3 on 3be49fb)
+command: cargo xtask guard
+expect: This agent context already writes production code
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "perl -pi -e s/a/b/ crates/qoob3d-core/src/expr/tests.r{s,}"}, "hook_event_name": "PreToolUse", "agent_type": "implementer", "agent_id": "a1"}
