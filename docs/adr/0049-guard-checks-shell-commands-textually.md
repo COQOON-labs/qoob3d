@@ -80,7 +80,15 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
    no `'`, `"` or `\`) the body is data only if it contains no `$(` and no `${`; an escaped
    `\$(` counts too. Quoted markers (`<<'EOF'`, `<<"EOF"`, `<<\EOF`, `<<E'O'F`,
    `<<-'EOF'`) keep the body literal. `$NAME` and `$5` run nothing and stay data;
-   backticks and `$((` fail closed (decision 4).
+   backticks and `$((` fail closed (decision 4). The search runs after joining
+   backslash-newlines (also repeated ones, and dropping the tabs `<<-` strips), because the
+   shell joins them before expanding: `$\` newline `(` is a substitution.
+
+   **Early terminators inside `$(…)`:** bash (and sh) end a heredoc inside an open `$(` at a
+   line such as `EOF)`, `EOF )`, `EOFX)`, bash 3.2 also after leading blanks; zsh does not.
+   So inside `$(…)` the body is data only if no body line before the terminator starts,
+   after optional blanks and tabs, with the marker word (fail closed). Outside `$(…)` no
+   shell does this and nothing changes.
 4. **Fail closed:** comments and heredoc bodies are removed only when the guard models
    every construct of the command. A command that contains anywhere a backtick, ANSI-C
    quoting `$'`, a redirection with `&` (`|&`, `>&`, `&>`, `<&`, so also `2>&1` and `>&2`), or
@@ -151,13 +159,14 @@ commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` w
 ## References
 
 - Code: `xtask/src/guard.rs` (`models_prose`, `without_prose`, `is_message_form`,
-  `stands_alone`, `expands`, `writes_regular_file`, `only_redirects_to_file`,
+  `stands_alone`, `expands`, `ends_early`, `writes_regular_file`, `only_redirects_to_file`,
   `simple_commands`, `sed_writes`, `sed_scripts`, `runs_with_flag`, `harness_in_shell`)
 - Sabotage cases: `harness/sabotage/guard-harness-shell-after-heredoc.case`,
   `guard-harness-shell-interpreter-heredoc.case`, `guard-prose-heredoc-body-checked.case`,
   `guard-harness-shell-fail-closed-prose.case`, `guard-harness-shell-backtick-comment.case`,
   `guard-harness-shell-heredoc-{tee,cat-stderr,device,not-alone}.case`,
   `guard-harness-shell-heredoc-{unquoted-substitution,cat-target-glob}.case`,
+  `guard-harness-shell-heredoc-{split-substitution,paren-terminator}.case`,
   `guard-harness-shell-sed-{write,execute,expanded-script,script-file}.case`,
   `guard-harness-shell-in-place-in-substitution.case`
 - Related: ADR-0037, ADR-0043

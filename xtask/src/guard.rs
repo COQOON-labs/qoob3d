@@ -15,8 +15,9 @@
 //!   --body-file -`, their `"$(cat <<EOF"` messages, `cat` writing one regular
 //!   file with a literal name), with nothing after the marker but one file
 //!   redirection, standing alone as the whole command (around it only
-//!   comments, blank lines and the closing `)"`), and under an unquoted marker
-//!   without `$(` or `${` in the body. A command with a construct the guard
+//!   comments, blank lines and the closing `)"`), under an unquoted marker
+//!   without `$(` or `${` in the body (backslash-newlines joined), and inside
+//!   `$(…)` without a body line starting with the marker word. A command with a construct the guard
 //!   does not model (backticks, `$'`, redirections with `&`, arithmetic `((`)
 //!   keeps its comments and heredoc bodies: fail closed (ADR-0049). In-place
 //!   editors and inline code count also inside `$(…)`, backticks and `(…)`; a
@@ -273,7 +274,8 @@ fn models_prose(command: &str) -> bool {
 /// ([`is_message_form`]), with nothing after the marker but one file redirection
 /// ([`only_redirects_to_file`]), as the whole command ([`stands_alone`]), and
 /// under an unquoted marker only without `$(` and `${` in the body
-/// ([`expands`]; ADR-0049). A backslash-newline continues the line. Only for
+/// ([`expands`]), inside `$(…)` only without an early terminator
+/// ([`ends_early`]; ADR-0049). A backslash-newline continues the line. Only for
 /// commands that [`models_prose`].
 fn without_prose(command: &str) -> String {
     let mut out = String::with_capacity(command.len());
@@ -326,6 +328,7 @@ fn without_prose(command: &str) -> String {
                     )
                     && let Some(len) = heredoc_bodies(&command[end..], &markers)
                     && (markers[0].quoted || !expands(&command[end..end + len]))
+                    && (open_parens == 0 || !ends_early(&command[end..end + len], &markers[0].word))
                     && stands_alone(&out[..line_start], &command[end + len..], open_parens > 0)
                 {
                     end += len;
@@ -354,9 +357,23 @@ fn without_prose(command: &str) -> String {
 
 /// A heredoc `body` under an unquoted marker runs commands: the shell expands
 /// `$(…)` and `${…}` in it (backticks and `$((` fail closed, [`UNMODELLED`]).
-/// An escaped `\$(` counts too.
+/// The shell joins backslash-newlines first (`$\` newline `(`), here also
+/// with the tabs `<<-` strips; an escaped `\$(` counts too.
 fn expands(body: &str) -> bool {
-    body.contains("$(") || body.contains("${")
+    let joined: String = body.split("\\\n").map(|part| part.trim_start_matches('\t')).collect();
+    joined.contains("$(") || joined.contains("${")
+}
+
+/// Inside `$(…)` bash ends a heredoc early at a line that starts with the
+/// marker `word` (`EOF)`, `EOF )`, `EOFX)`, bash 3.2 also after blanks), zsh
+/// does not; the guard cannot tell which shell runs. True if a line of `body`
+/// before its terminator line starts with `word` after optional blanks (fail
+/// closed).
+fn ends_early(body: &str, word: &str) -> bool {
+    let lines: Vec<&str> = body.lines().collect();
+    lines[..lines.len().saturating_sub(1)]
+        .iter()
+        .any(|line| line.trim_start_matches([' ', '\t']).starts_with(word))
 }
 
 /// A message form is the whole Bash command (ADR-0049): `before`, the text
