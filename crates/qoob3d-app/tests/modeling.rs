@@ -354,6 +354,77 @@ fn coil_then_edited_into_a_flat_spiral() {
     assert!(bounds.max[2] - bounds.min[2] < 2.5, "flat: only the wire thickness");
 }
 
+/// A neutral click: empty viewport area in model mode, which does nothing
+/// (no command, no selection). The left middle of the viewport is far from
+/// the ViewCube (top right), the navigation bar (bottom centre), the browser
+/// and the timeline, so the double click that follows lands well beyond
+/// egui's `max_click_dist` (6 pt) from it.
+fn neutral_click(h: &mut H) {
+    let rect = h.state().viewport().layout().expect("viewport laid out").rect;
+    click_at(h, rect.left_center() + egui::vec2(60.0, 0.0));
+    assert!(matches!(h.state().mode(), Mode::Model), "the neutral click changes nothing");
+    assert!(h.state().command().is_none(), "the neutral click opens nothing");
+}
+
+/// KO-FT-09: a double click on a timeline chip edits the feature, even when
+/// the user clicked somewhere else just before (e.g. OK, then quickly the
+/// chip). Regression for the flaky `coil_then_edited_into_a_flat_spiral`.
+///
+/// Timing (step_dt = 1/60 s): the neutral click releases at frame t0,
+/// `click_at` adds 2 frames, `double_click_at` needs 3 frames to the first
+/// release and 2 more to the second, so the second release is ~7 frames
+/// ≈ 0.12 s after t0. That is below egui's triple-click window
+/// (2 × `max_double_click_delay` = 0.6 s), so egui reports the second
+/// release as click count 3 although the neutral click was far away; a
+/// double click on the chip must still edit it.
+#[test]
+fn timeline_double_click_edits_right_after_a_click_elsewhere() {
+    let mut h = harness();
+    button(&mut h, "🌀 Coil");
+    ok(&mut h);
+    assert!(h.state().command().is_none(), "dialog closed");
+
+    neutral_click(&mut h);
+    let chip = h.get_by_label("🌀 Coil1").rect().center();
+    double_click_at(&mut h, chip);
+    assert!(
+        h.state().command().is_some_and(|c| c.editing.is_some()),
+        "double click on the Coil1 chip right after another click must edit Coil1"
+    );
+}
+
+/// SK-LC-06: a double click on a sketch in the browser edits it, even when
+/// the user clicked somewhere else just before. Same timing as
+/// `timeline_double_click_edits_right_after_a_click_elsewhere`.
+#[test]
+fn browser_double_click_edits_sketch_right_after_a_click_elsewhere() {
+    let mut h = harness();
+    let sketch = sketch_on(&mut h, "▫ XY Plane");
+    key(&mut h, egui::Key::C);
+    let origin = sketch_at(&h, [0.0, 0.0]);
+    click_at(&mut h, origin);
+    move_to(&mut h, [5.0, 0.0]);
+    type_text(&mut h, "20");
+    key(&mut h, egui::Key::Enter);
+    finish_sketch(&mut h);
+    settle(&mut h); // the camera returns from the sketch view
+
+    let name = h.state().project().doc().feature(sketch).expect("sketch exists").name.clone();
+    // The timeline chip has the same label: take the browser entry (left).
+    let entry = h
+        .get_all_by_label(&format!("✏ {name}"))
+        .map(|n| n.rect().center())
+        .min_by(|a, b| a.x.total_cmp(&b.x))
+        .expect("sketch in the browser");
+
+    neutral_click(&mut h);
+    double_click_at(&mut h, entry);
+    assert!(
+        matches!(h.state().mode(), Mode::Sketch(s) if s.feature == sketch),
+        "double click on the browser entry right after another click must edit {name}"
+    );
+}
+
 /// `cargo xtask screenshot`: the Extrude dialog with its live preview and
 /// a finished multi-body model, for visual review.
 #[test]
