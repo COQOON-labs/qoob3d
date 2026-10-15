@@ -7,7 +7,7 @@ use clap::{Parser, ValueEnum};
 use qoob3d_render::ViewPreset;
 
 #[derive(Debug, Parser)]
-#[command(name = "qoob3d", version, about = "QOOB3D – parametrisches CAD für den FDM-Druck")]
+#[command(name = "qoob3d", version, about = "QOOB3D – parametric CAD for FDM printing")]
 pub struct Cli {
     /// `.qbd` file to open.
     pub file: Option<PathBuf>,
@@ -97,21 +97,4 @@ fn parse_size(s: &str) -> Result<[u32; 2], String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn size_parsing() {
-        assert_eq!(parse_size("1280x800"), Ok([1280, 800]));
-        assert_eq!(parse_size("64X64"), Ok([64, 64]));
-        assert!(parse_size("1280").is_err());
-        assert!(parse_size("0x10").is_err());
-        assert!(parse_size("99999x10").is_err());
-    }
-
-    #[test]
-    fn cli_definition_is_valid() {
-        use clap::CommandFactory;
-        Cli::command().debug_assert();
-    }
-}
+mod tests;

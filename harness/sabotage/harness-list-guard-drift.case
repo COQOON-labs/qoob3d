@@ -1,0 +1,16 @@
+# A new harness path in paths::HARNESS that the guard's shell detection does
+# not know: one source of truth for harness paths (ADR-0037)
+command: cargo test -p xtask --quiet harness_list_drift_every_entry_is_guarded_in_shell
+expect: harness_list_drift_every_entry_is_guarded_in_shell
+--- patch
+diff --git a/xtask/src/paths.rs b/xtask/src/paths.rs
+--- a/xtask/src/paths.rs
++++ b/xtask/src/paths.rs
+@@ -26,6 +26,7 @@ pub(crate) const HARNESS: &[&str] = &[
+     "deny.toml",
+     "rustfmt.toml",
+     "rust-toolchain.toml",
++    "typos.toml",
+     // `cargo xtask` runs this binary, cargo links it from `deps/` (ADR-0037).
+     "target/debug/xtask",
+     "target/debug/deps/xtask-",

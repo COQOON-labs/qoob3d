@@ -556,7 +556,7 @@ impl QoobApp {
         for action in actions {
             match action {
                 Action::Edit { sketch, label } => {
-                    self.project.replace_sketch(feature, sketch, label)
+                    self.project.replace_sketch(feature, sketch, label);
                 }
                 Action::Preview(sketch) => self.project.preview_sketch(feature, sketch),
                 Action::CommitPreview(label) => self.project.commit_preview(label),
@@ -816,6 +816,7 @@ impl QoobApp {
 }
 
 impl eframe::App for QoobApp {
+    #[expect(clippy::too_many_lines, reason = "predates ADR-0040; split when next changed")]
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let now = ui.input(|i| i.time);

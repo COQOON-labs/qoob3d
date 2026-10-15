@@ -1,0 +1,13 @@
+# The CI step "Flag harness changes" gets its own hand-written path list again
+# instead of asking xtask: one source of truth for harness paths (ADR-0037)
+command: cargo test -p xtask --quiet ci_flags_harness_changes_through_xtask
+expect: ci_flags_harness_changes_through_xtask
+--- patch
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -73,3 +73,3 @@
+         run: |
+-          changed=$(cargo xtask harness-changes "$PR_BASE" "$PR_HEAD")
++          changed=$(git diff --name-only "$PR_BASE" "$PR_HEAD" | grep -E '^(\.claude/|\.githooks/|\.github/|\.cargo/|xtask/|harness/|Cargo\.toml$|clippy\.toml$|deny\.toml$|rustfmt\.toml$|rust-toolchain\.toml$)' || true)
+           if [ -n "$changed" ]; then

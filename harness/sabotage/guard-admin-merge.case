@@ -1,0 +1,4 @@
+# Agent merges a pull request past the branch protection (ADR-0037)
+command: cargo xtask guard
+expect: `--admin` bypasses the quality gates
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "gh pr merge 12 --merge --admin"}, "hook_event_name": "PreToolUse"}

@@ -63,11 +63,11 @@ fn cube_is_drawn_over_background() {
 }
 
 fn write_png(path: &str, rgba: &[u8]) {
-    let file = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+    let file = std::io::BufWriter::new(std::fs::File::create(path).expect("create png"));
     let mut enc = png::Encoder::new(file, W, H);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
-    enc.write_header().unwrap().write_image_data(rgba).unwrap();
+    enc.write_header().expect("png header").write_image_data(rgba).expect("png data");
 }
 
 /// Axis-aligned cube on the XY plane with flat normals, CCW from outside.

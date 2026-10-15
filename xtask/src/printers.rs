@@ -42,7 +42,7 @@ struct Printer {
     geometry: Geometry,
 }
 
-pub fn generate(root: &Path, profiles: &Path) -> Result<(), Vec<String>> {
+pub(crate) fn generate(root: &Path, profiles: &Path) -> Result<(), Vec<String>> {
     let mut printers = Vec::new();
     let mut skipped = Vec::new();
     let mut vendor_files: Vec<_> = std::fs::read_dir(profiles)
@@ -92,14 +92,8 @@ pub fn generate(root: &Path, profiles: &Path) -> Result<(), Vec<String>> {
         p.id = id;
     }
 
-    let commit = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(profiles)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".into());
+    let commit = crate::git(profiles, &["rev-parse", "--short", "HEAD"])
+        .map_or_else(|_| "unknown".into(), |out| out.trim().to_string());
 
     let path = root.join(OUTPUT);
     std::fs::write(&path, render(&printers, &commit)).map_err(|e| vec![e.to_string()])?;
@@ -292,28 +286,4 @@ fn render(printers: &[Printer], commit: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_all_point_formats() {
-        let a = polygon(&serde_json::json!(["0x0", "256x0", "256x256"])).unwrap();
-        let b = polygon(&serde_json::json!("0x0,256x0,256x256")).unwrap();
-        let c = polygon(&serde_json::json!(["0x0,256x0", "256x256"])).unwrap();
-        assert_eq!(a, b);
-        assert_eq!(a, c);
-        assert_eq!(a[2], [256.0, 256.0]);
-        assert!(parse_points("1x").is_err());
-    }
-
-    #[test]
-    fn slugs_are_stable() {
-        assert_eq!(slug("Bambu Lab X1 Carbon"), "bambu-lab-x1-carbon");
-        assert_eq!(slug("Troodon 2.0 - Klipper"), "troodon-2-0-klipper");
-    }
-
-    #[test]
-    fn polygon_area() {
-        assert_eq!(area(&[[0.0, 0.0], [2.0, 0.0], [2.0, 3.0], [0.0, 3.0]]), 6.0);
-    }
-}
+mod tests;

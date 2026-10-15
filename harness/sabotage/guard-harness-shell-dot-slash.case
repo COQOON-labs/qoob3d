@@ -1,0 +1,4 @@
+# Agent writes a harness file through a `./` path (ADR-0043: harness paths after `./` refer to the repo)
+command: cargo xtask guard
+expect: could modify the harness file `xtask/`
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "cp /tmp/main.rs ./xtask/src/main.rs"}, "hook_event_name": "PreToolUse"}

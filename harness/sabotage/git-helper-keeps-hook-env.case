@@ -1,0 +1,15 @@
+# The shared git helper no longer removes the variables a git hook exports, so
+# xtask's git calls from a hook could mean another repository (ADR-0048)
+command: cargo test -p xtask --quiet git_command_removes_the_hook_git_environment
+expect: git_command_removes_the_hook_git_environment
+--- patch
+diff --git a/xtask/src/main.rs b/xtask/src/main.rs
+--- a/xtask/src/main.rs
++++ b/xtask/src/main.rs
+@@ -400,6 +400,3 @@ pub(crate) fn git_command(root: &Path, args: &[&str]) -> Command {
+     command.args(args).current_dir(root);
+-    for key in GIT_ENV {
+-        command.env_remove(key);
+-    }
+     command
+ }

@@ -1,0 +1,16 @@
+# A check named in the rule register disappears (ADR-0040)
+command: cargo xtask rules
+expect: R-02: check `critic:K-01` does not exist
+--- patch
+diff --git a/harness/critic-checklist.md b/harness/critic-checklist.md
+--- a/harness/critic-checklist.md
++++ b/harness/critic-checklist.md
+@@ -15,7 +15,7 @@
+ 
+ | ID | Check item |
+ | --- | --- |
+-| K-01 | **Minimality:** Every line is needed. No duplicates of what exists (search first!), no speculative generality, no unused parameters, options or configuration. |
++| K-1 | **Minimality:** Every line is needed. No duplicates of what exists (search first!), no speculative generality, no unused parameters, options or configuration. |
+ | K-02 | **Single responsibility:** Every function, type and module has exactly one reason to change. No mixing of UI, logic and IO. The name describes everything it does. |
+ | K-03 | **Open-closed in the Rust sense:** The compiler forces a new variant (feature, curve, command kind) into every relevant place: exhaustive `match` without `_ =>` over these enums. Extend via the intended points (`Request`/`Response`, `FeatureKind`) instead of special cases. |
+ | K-04 | **Abstraction only when needed (YAGNI beats OCP/DIP):** A trait, generic or indirection needs at least two real implementations or a crate boundary that enforces it (ST-07). |

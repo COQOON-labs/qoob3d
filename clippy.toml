@@ -1,0 +1,5 @@
+# Thresholds for the size and complexity lints (ADR-0040). Only ever lower them.
+too-many-lines-threshold = 100
+cognitive-complexity-threshold = 25
+# Tests may unwrap; production code uses `expect("why this holds")` or `?` (ST-05).
+allow-unwrap-in-tests = true

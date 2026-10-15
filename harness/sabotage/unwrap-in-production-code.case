@@ -1,0 +1,16 @@
+# `unwrap()` in production code (ST-05)
+command: cargo clippy -p qoob3d-core --all-targets -- -D warnings
+expect: used `unwrap()`
+--- patch
+diff --git a/crates/qoob3d-core/src/profile.rs b/crates/qoob3d-core/src/profile.rs
+--- a/crates/qoob3d-core/src/profile.rs
++++ b/crates/qoob3d-core/src/profile.rs
+@@ -18,7 +18,7 @@
+     /// Whether `p` (sketch coordinates) lies inside the region.
+     pub fn contains(&self, p: [f64; 2]) -> bool {
+         self.triangles.iter().any(|t| {
+-            let [a, b, c] = t.map(|i| self.positions[i as usize]);
++            let [a, b, c] = t.map(|i| *self.positions.get(i as usize).unwrap());
+             let s1 = side(p, a, b);
+             let s2 = side(p, b, c);
+             let s3 = side(p, c, a);

@@ -1,0 +1,5 @@
+# Agent deletes a git hook through ripgrep's preprocessor, which runs `rm` on every searched file, even unlocked (ADR-0043)
+command: cargo xtask guard
+expect: `.git/` is managed by git and the guard
+env: QOOB3D_HARNESS_UNLOCK=1
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "rg --pre=rm x .git/hooks/pre-push"}, "hook_event_name": "PreToolUse"}

@@ -1,0 +1,14 @@
+# More lint suppressions than allowed (ADR-0040)
+command: cargo xtask hygiene
+expect: lint suppressions (#[expect]),
+--- patch
+diff --git a/crates/qoob3d-core/src/profile.rs b/crates/qoob3d-core/src/profile.rs
+--- a/crates/qoob3d-core/src/profile.rs
++++ b/crates/qoob3d-core/src/profile.rs
+@@ -33,3 +33,6 @@
+ 
+ #[cfg(test)]
+ mod tests;
++
++#[expect(dead_code, reason = "sabotage")]
++fn unused() {}

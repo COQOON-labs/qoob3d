@@ -1,0 +1,5 @@
+# cargo builds a foreign binary into the guard's target dir via --config, even unlocked (ADR-0043)
+command: cargo xtask guard
+expect: `.git/` is managed by git and the guard
+env: QOOB3D_HARNESS_UNLOCK=1
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "cargo build -p xtask --config build.target-dir=\".git/qoob3d/guard-target\""}, "hook_event_name": "PreToolUse"}

@@ -1,5 +1,5 @@
 {
-  "why": "Kugel r=15: V = 4/3·π·r³",
+  "why": "Sphere r=15: V = 4/3·π·r³",
   "bodies": 1,
   "volume_mm3": 14137.166941154068,
   "volume_rel_tol": 1e-05,

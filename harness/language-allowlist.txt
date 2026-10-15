@@ -1,0 +1,13 @@
+# The repository is English (ADR-0045). `cargo xtask hygiene` rejects German umlauts and
+# the sharp s in every versioned text file, except:
+#   path: <prefix>   files under this directory (ends with `/`) or this exact file
+#   word: <word>     occurrences of this word (proper names)
+# Keep this list small; every entry needs a reason.
+
+# The German language pack.
+path: crates/qoob3d-app/locales/de/
+# The sabotage case for this rule must contain an umlaut.
+path: harness/sabotage/hygiene-german-text.case
+# Proper names.
+word: Möller
+word: Gröner

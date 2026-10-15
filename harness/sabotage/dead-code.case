@@ -1,0 +1,15 @@
+# Unused function (R-13)
+command: cargo clippy -p qoob3d-core --all-targets -- -D warnings
+expect: function `unused_helper` is never used
+--- patch
+diff --git a/crates/qoob3d-core/src/profile.rs b/crates/qoob3d-core/src/profile.rs
+--- a/crates/qoob3d-core/src/profile.rs
++++ b/crates/qoob3d-core/src/profile.rs
+@@ -33,3 +33,7 @@
+ 
+ #[cfg(test)]
+ mod tests;
++
++fn unused_helper() -> u32 {
++    42
++}

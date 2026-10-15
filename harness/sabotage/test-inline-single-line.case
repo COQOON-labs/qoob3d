@@ -1,0 +1,13 @@
+# Inline test module on a single line (ADR-0039, gap found by the test author)
+command: cargo xtask hygiene
+expect: test code belongs in its own file
+--- patch
+diff --git a/crates/qoob3d-core/src/profile.rs b/crates/qoob3d-core/src/profile.rs
+--- a/crates/qoob3d-core/src/profile.rs
++++ b/crates/qoob3d-core/src/profile.rs
+@@ -33,3 +33,5 @@
+ 
+ #[cfg(test)]
+ mod tests;
++
++#[cfg(test)] mod inline { #[test] fn t() {} }

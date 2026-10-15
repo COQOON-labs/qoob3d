@@ -21,8 +21,6 @@ tracing.workspace = true
 
 [build-dependencies]
 cxx-build = "1"
-# Same version opencascade-sys builds; only used to locate the OCCT headers.
-occt-sys = "7.8.1"
 
 [lints]
 workspace = true

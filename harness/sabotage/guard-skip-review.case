@@ -1,0 +1,5 @@
+# Agent skips the critic review on push (ADR-0041)
+command: cargo xtask guard
+expect: `qoob3d_skip_review` bypasses the quality gates
+env: QOOB3D_HARNESS_UNLOCK=1
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "QOOB3D_SKIP_REVIEW=1 git push origin feature"}, "hook_event_name": "PreToolUse"}

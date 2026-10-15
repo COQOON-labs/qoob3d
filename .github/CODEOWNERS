@@ -1,0 +1,17 @@
+# Code owners (ADR-0037, ADR-0044). With "Require review from Code Owners" in the
+# ruleset for `main`, every change needs the owner's review. The harness paths are
+# listed explicitly; `cargo xtask hygiene` checks that each one has an owner line.
+* @Ben-Gee
+
+# Harness (xtask/src/paths.rs, `HARNESS`)
+/.claude/ @Ben-Gee
+/.githooks/ @Ben-Gee
+/.github/ @Ben-Gee
+/.cargo/ @Ben-Gee
+/xtask/ @Ben-Gee
+/harness/ @Ben-Gee
+/Cargo.toml @Ben-Gee
+/clippy.toml @Ben-Gee
+/deny.toml @Ben-Gee
+/rustfmt.toml @Ben-Gee
+/rust-toolchain.toml @Ben-Gee

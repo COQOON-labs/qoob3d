@@ -1,59 +1,59 @@
-# Theme und Layout
+# Theme and layout
 
-Beschreibende Spezifikation (keine Entscheidung). Begründungen stehen in den ADRs. Wird hier
-etwas geändert, müssen die Konstanten im Code mitgezogen werden. Die Orte stehen jeweils dabei.
-Aktuelle Optik prüfen: `cargo xtask screenshot` → `target/screenshots/ui.png`.
+Descriptive specification (not a decision). The rationale is in the ADRs. If something is
+changed here, the constants in the code must be updated too. The locations are given alongside.
+Check the current look: `cargo xtask screenshot` → `target/screenshots/ui.png`.
 
-## Charakter
+## Character
 
-Dunkel, ruhig, wenig Kontrast im Chrome. Die Aufmerksamkeit gehört dem Modell.
-**Eine** Akzentfarbe (Mint) für Auswahl, aktive Werkzeuge, Skizzenelemente und Fokus.
-Kein zweiter Akzent. Fehler sind rot, Warnungen bernstein, beides sparsam.
+Dark, calm, low contrast in the chrome. The attention belongs to the model.
+**One** accent color (mint) for selection, active tools, sketch elements and focus.
+No second accent. Errors are red, warnings amber, both used sparingly.
 
-## Farben – UI (sRGB, `crates/qoob3d-app/src/theme.rs`)
+## Colors – UI (sRGB, `crates/qoob3d-app/src/theme.rs`)
 
-| Token | Wert | Verwendung |
+| Token | Value | Usage |
 | --- | --- | --- |
-| `ACCENT` | `#3DE0B0` | Auswahl, aktives Werkzeug, Hover am ViewCube, Orbit-Pivot, Marke |
-| `PANEL_BG` | `#1D1F23` | Werkzeugleiste, Browser |
-| `PANEL_BG_DARK` | `#17191C` | Timeline, Eingabefelder |
-| `STROKE` | `#2C3036` | Trennlinien, Rahmen |
+| `ACCENT` | `#3DE0B0` | Selection, active tool, hover on the ViewCube, orbit pivot, brand |
+| `PANEL_BG` | `#1D1F23` | Toolbar, browser |
+| `PANEL_BG_DARK` | `#17191C` | Timeline, input fields |
+| `STROKE` | `#2C3036` | Separators, frames |
 | `TEXT` | `#D4D7DC` | Text |
-| `TEXT_MUTED` | `#8A9099` | Beschriftungen (Captions), Statuszeile, Hinweise |
-| `OVERLAY_BG` | `#1D1F23` mit 90 % Deckkraft | Navigationsleiste im Viewport |
-| Warnung (Bernstein) | `#F5A623` | Sperrzonen (schraffiert), Einzeldüsen-Zonen (getönt) |
-| `CONSTRUCTION` | `#C08A3A` | Konstruktionsgeometrie (gestrichelt), auch in der Vorschau |
-| `ERROR` | `#E5534B` | Offene Kurvenenden, ungültige HUD-Eingabe, Kernel-Fehler |
+| `TEXT_MUTED` | `#8A9099` | Captions, status line, hints |
+| `OVERLAY_BG` | `#1D1F23` at 90 % opacity | Navigation bar in the viewport |
+| Warning (amber) | `#F5A623` | Exclusion zones (hatched), single-nozzle zones (tinted) |
+| `CONSTRUCTION` | `#C08A3A` | Construction geometry (dashed), also in the preview |
+| `ERROR` | `#E5534B` | Open curve ends, invalid HUD input, kernel errors |
 
-## Skizzen (`crates/qoob3d-app/src/sketch_ui.rs`, SK-VS-*)
+## Sketches (`crates/qoob3d-app/src/sketch_ui.rs`, SK-VS-*)
 
-| Element | Darstellung |
+| Element | Appearance |
 | --- | --- |
-| Kurven der aktiven Skizze | `ACCENT`, 1,6 pt; Auswahl/Hover heller und breiter |
-| Konstruktion | `CONSTRUCTION`, gestrichelt |
-| Profile | `ACCENT` mit ~12 % Deckkraft, Hover ~25 % |
-| Offene Enden | `ERROR`-Punkt |
-| Vorschau beim Zeichnen | gestrichelt, `ACCENT` (im Konstruktionsmodus `CONSTRUCTION`) |
-| Fangen | Symbol am Cursor, Ausrichtungslinien gestrichelt |
-| Werte-HUD | deckend `PANEL_BG`, Monospace, aktives Feld `ACCENT`, Fehler `ERROR` |
-| Inaktive Skizzen | dünn, grau, ohne Profile |
+| Curves of the active sketch | `ACCENT`, 1.6 pt; selection/hover brighter and wider |
+| Construction | `CONSTRUCTION`, dashed |
+| Profiles | `ACCENT` at ~12 % opacity, hover ~25 % |
+| Open ends | `ERROR` dot |
+| Preview while drawing | dashed, `ACCENT` (in construction mode `CONSTRUCTION`) |
+| Snapping | Symbol at the cursor, alignment lines dashed |
+| Value HUD | opaque `PANEL_BG`, monospace, active field `ACCENT`, error `ERROR` |
+| Inactive sketches | thin, gray, without profiles |
 
-Aussehen prüfen: `cargo xtask screenshot` → `sketch-plane-pick.png`, `sketch.png`.
+Check the appearance: `cargo xtask screenshot` → `sketch-plane-pick.png`, `sketch.png`.
 
-## Farben – Viewport (linear, `crates/qoob3d-render/src/renderer.rs::palette`)
+## Colors – viewport (linear, `crates/qoob3d-render/src/renderer.rs::palette`)
 
-| Token | Wert (linear) | Verwendung |
+| Token | Value (linear) | Usage |
 | --- | --- | --- |
-| `BG_TOP` / `BG_BOTTOM` | `0.032, 0.036, 0.042` / `0.010, 0.011, 0.013` | Verlauf |
-| `BODY` | `0.50, 0.53, 0.57` | Volumenkörper |
-| `EDGE` | `0.006, 0.007, 0.008` | Kanten, 1,3 pt |
-| `GRID_MINOR` / `GRID_MAJOR` | grau, α 0,35 / 0,6 | Raster (Zehnerstufen) |
-| `PLATE_FILL` / `PLATE_BORDER` | etwas heller als Hintergrund / hellgrau | Druckbett |
-| `AXIS_X` / `AXIS_Y` / `AXIS_Z` | rot / grün / blau | Achsen (Z als Linie bis ¼ Bettbreite) |
+| `BG_TOP` / `BG_BOTTOM` | `0.032, 0.036, 0.042` / `0.010, 0.011, 0.013` | Gradient |
+| `BODY` | `0.50, 0.53, 0.57` | Solid bodies |
+| `EDGE` | `0.006, 0.007, 0.008` | Edges, 1.3 pt |
+| `GRID_MINOR` / `GRID_MAJOR` | gray, α 0.35 / 0.6 | Grid (powers of ten) |
+| `PLATE_FILL` / `PLATE_BORDER` | slightly brighter than the background / light gray | Print bed |
+| `AXIS_X` / `AXIS_Y` / `AXIS_Z` | red / green / blue | Axes (Z as a line up to ¼ of the bed width) |
 
-Licht: Hauptlicht von links oben aus Sicht des Betrachters, Aufhelllicht von rechts unten,
-Himmel/Boden-Ambient. Dadurch sind Flächen unterschiedlicher Orientierung in jeder Ansicht
-unterscheidbar.
+Lighting: key light from the top left as seen by the viewer, fill light from the bottom right,
+sky/ground ambient. This makes faces with different orientations distinguishable in every
+view.
 
 ## Layout
 
@@ -72,15 +72,15 @@ unterscheidbar.
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-- Funktionen späterer Meilensteine sind sichtbar, aber deaktiviert, mit dem Hinweis
-  „Kommt mit Mx“.
-- ViewCube: 118 pt, oben rechts. Beschriftung FRONT/BACK/… (bzw. VORNE/HINTEN/…) liegt
-  geschert in der Würfelfläche. Kanten und Ecken sind jeweils **eine** Auswahl über alle
-  beteiligten Flächen und leuchten beim Überfahren gemeinsam Mint.
+- Functions of later milestones are visible but disabled, with the hint
+  "Coming in Mx".
+- ViewCube: 118 pt, top right. The labels FRONT/BACK/… (or VORNE/HINTEN/… in German) lie
+  sheared in the cube face. Edges and corners are each **one** selection across all
+  involved faces and light up mint together on hover.
 
-## Sprache
+## Language
 
-Basissprache ist **Englisch**, Deutsch ist ein Sprachpaket, wählbar unter ⚙ Settings
-(ADR-0020). Texte sind kurz und ohne Ausrufezeichen, Workspace-Captions in Großbuchstaben
-(DESIGN, SKETCH …). Einheiten werden immer angezeigt (`20 mm`). Das Dezimaltrennzeichen folgt
-der Sprache (`15.70` / `15,70 cm³`).
+The base language is **English**, German is a language pack, selectable under ⚙ Settings
+(ADR-0020). Texts are short and without exclamation marks, workspace captions in capitals
+(DESIGN, SKETCH …). Units are always shown (`20 mm`). The decimal separator follows
+the language (`15.70` / `15,70 cm³`).

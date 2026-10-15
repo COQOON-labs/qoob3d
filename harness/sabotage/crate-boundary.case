@@ -1,0 +1,15 @@
+# The renderer depends on the kernel (ADR-0036)
+command: cargo xtask arch
+expect: qoob3d-render → qoob3d-kernel is not allowed
+--- patch
+diff --git a/crates/qoob3d-render/Cargo.toml b/crates/qoob3d-render/Cargo.toml
+--- a/crates/qoob3d-render/Cargo.toml
++++ b/crates/qoob3d-render/Cargo.toml
+@@ -7,6 +7,7 @@
+ publish.workspace = true
+ 
+ [dependencies]
++qoob3d-kernel.workspace = true
+ qoob3d-core.workspace = true
+ # wgpu is taken from eframe's re-export (egui_wgpu::wgpu) so versions never diverge.
+ eframe.workspace = true

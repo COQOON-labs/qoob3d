@@ -1,0 +1,5 @@
+# Agent edits VS Code settings (the Claude Code extension passes their env to hooks), even unlocked (ADR-0043)
+command: cargo xtask guard
+expect: can set the environment of Claude Code hooks
+env: QOOB3D_HARNESS_UNLOCK=1
+stdin: {"session_id": "selftest", "tool_name": "Write", "tool_input": {"file_path": ".vscode/settings.json", "content": "{}"}, "hook_event_name": "PreToolUse"}

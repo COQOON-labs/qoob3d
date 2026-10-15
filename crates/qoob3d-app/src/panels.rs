@@ -15,7 +15,7 @@ use crate::theme;
 
 /// Something the user asked for in a panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UiAction {
+pub(crate) enum UiAction {
     NewDocument,
     Open,
     Save,
@@ -37,13 +37,13 @@ pub enum UiAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExportFormat {
+pub(crate) enum ExportFormat {
     Stl,
     ThreeMf,
 }
 
 /// The state panels need to render.
-pub struct PanelState<'a> {
+pub(crate) struct PanelState<'a> {
     pub doc: &'a Document,
     pub sketching: Option<FeatureId>,
     pub picking_plane: bool,
@@ -95,7 +95,11 @@ fn history_button(
     }
 }
 
-pub fn toolbar(ui: &mut egui::Ui, settings: &mut Settings, s: &PanelState<'_>) -> Vec<UiAction> {
+pub(crate) fn toolbar(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    s: &PanelState<'_>,
+) -> Vec<UiAction> {
     let mut out = Vec::new();
     ui.horizontal(|ui| {
         ui.label(RichText::new("QOOB3D").strong().size(17.0).color(theme::ACCENT));
@@ -249,7 +253,7 @@ fn settings_menu(ui: &mut egui::Ui, settings: &mut Settings) {
     ui.label(RichText::new(tr("settings-printers-hint")).color(theme::TEXT_MUTED).small());
 }
 
-pub fn browser(ui: &mut egui::Ui, s: &PanelState<'_>, title: &str) -> Vec<UiAction> {
+pub(crate) fn browser(ui: &mut egui::Ui, s: &PanelState<'_>, title: &str) -> Vec<UiAction> {
     let mut out = Vec::new();
     ui.add_space(4.0);
     ui.label(theme::caption(&tr("browser")));
@@ -339,7 +343,7 @@ pub fn browser(ui: &mut egui::Ui, s: &PanelState<'_>, title: &str) -> Vec<UiActi
     out
 }
 
-pub fn timeline(ui: &mut egui::Ui, s: &PanelState<'_>) -> Vec<UiAction> {
+pub(crate) fn timeline(ui: &mut egui::Ui, s: &PanelState<'_>) -> Vec<UiAction> {
     let mut out = Vec::new();
     ui.horizontal_centered(|ui| {
         for (icon, key) in [
@@ -386,7 +390,7 @@ pub fn timeline(ui: &mut egui::Ui, s: &PanelState<'_>) -> Vec<UiAction> {
 }
 
 /// Sketch palette (SK-UI-04), floating at the right edge of the viewport.
-pub fn sketch_palette(
+pub(crate) fn sketch_palette(
     ctx: &egui::Context,
     viewport: egui::Rect,
     settings: &mut Settings,

@@ -2,8 +2,8 @@
 
 Vendored copy of the `opencascade` crate 0.3.0 from
 [opencascade-rs](https://github.com/bschwind/opencascade-rs) (commit `32758df`),
-licensed under LGPL-2.1 (see `LICENSE`). `opencascade-sys` is used unmodified
-from crates.io.
+licensed under LGPL-2.1 (see `LICENSE`). `opencascade-sys` is the QOOB3D fork
+in `../opencascade-sys` (patched in via `[patch.crates-io]`, ADR-0047).
 
 Why a fork: QOOB3D needs the raw OCCT handles to run its own exception-safe
 cxx wrappers (tessellation with face ids and edges, later sketch/extrude/boolean

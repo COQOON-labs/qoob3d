@@ -147,7 +147,7 @@ fn finish_sketch(h: &mut H) {
 
 fn ok(h: &mut H) {
     h.run_steps(2);
-    let complete = h.state().command().is_some_and(|c| c.is_complete());
+    let complete = h.state().command().is_some_and(qoob3d_app::commands::Command::is_complete);
     assert!(complete, "dialog incomplete before OK: {:?}", h.state().command().map(|c| &c.feature));
     button(h, "OK");
     assert!(matches!(h.state().mode(), Mode::Model), "dialog closed");
@@ -168,7 +168,7 @@ fn assert_volume(h: &H, expected: f64, rel: f64) {
 }
 
 fn last_curve_points(h: &H, sketch: FeatureId) -> Vec<EntityId> {
-    let s = h.state().project().doc().sketch(sketch).unwrap().clone();
+    let s = h.state().project().doc().sketch(sketch).expect("sketch exists").clone();
     s.points.iter().map(|p| p.id).collect()
 }
 
@@ -311,7 +311,7 @@ fn pyramid_from_square_offset_plane_point_and_loft() {
     assert_volume(&h, 30.0 * 30.0 * 25.0 / 3.0, 1e-6);
 }
 
-/// Zahnrad: Spur Gear with 24 teeth, defaults otherwise.
+/// Spur Gear with 24 teeth, defaults otherwise.
 #[test]
 fn spur_gear_from_dialog() {
     let mut h = harness();
@@ -325,7 +325,7 @@ fn spur_gear_from_dialog() {
     assert_volume(&h, area * g.thickness, 0.01);
 }
 
-/// Spirale: Coil as helix, then edited (timeline double-click) into a flat
+/// Coil as helix, then edited (timeline double-click) into a flat
 /// spiral – the body follows the parameters.
 #[test]
 fn coil_then_edited_into_a_flat_spiral() {

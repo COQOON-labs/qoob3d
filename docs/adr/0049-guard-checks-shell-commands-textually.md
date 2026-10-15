@@ -1,0 +1,269 @@
+---
+id: ADR-0049
+title: The guard checks shell commands as text at three anchors; heredoc bodies are data only in exact message forms
+status: accepted
+date: 2026-10-14
+crates: [xtask]
+tags: [quality, ai, security]
+supersedes: []
+superseded_by: null
+---
+
+## Context
+
+ADR-0043 decision 4 says "paths are normalised (`.` and `..` collapsed) before any check". The
+guard does this for the paths of Edit/Write calls. A shell command has no single path: the
+guard matches its text at the three anchors of ADR-0043 decision 3 and never collapses
+`name/..` in it. The sentence read as if `rm -rf missing/../xtask` were caught; it is not.
+
+Bare harness directory names (`rm -rf xtask`) count as harness paths in shell commands. That made
+commit messages and notes written through a heredoc (`git commit -F - <<'EOF'` with the subject
+`xtask: …`) count as harness writes. A heredoc body is data for `cat` or `git`, but code for
+`bash <<EOF` or `cat <<EOF | python3`.
+
+## Decision
+
+1. **Collapsing applies to Edit/Write paths only.** Shell commands are checked as text: a
+   harness fragment counts at the start of a token, after a `./` that starts a token, or right
+   after the repository root (ADR-0043 decision 3). A detour through `..` in a shell command
+   (`rm -rf missing/../xtask`) is a known gap, like the `cd xtask && …` indirection.
+2. **Comments are not removed; heredoc bodies of the safe shape are data:** a bare harness
+   directory name in such a body is no path. A path with its slash (`xtask/…`) still counts
+   everywhere. Comments are checked like any other words, also `#harness`: every rule for
+   where the shell starts a comment was bypassable, because the guard's scanner and the
+   shell disagreed on it (`${x:- #}` is one word, zsh starts no comment in `(#i)XA`,
+   `x(|#)` or the glob group `x(a| #)`, and an odd quote across lines shifts the quote
+   state). Wherever a `#` may start a comment, the guard takes the reading that checks
+   more: the quote-aware tokenizer looks for writers (sed `w`/`e`, a script file or
+   expanded script, in-place editors, inline code) both with such comments skipped (a `#`
+   starting a word at a line start or after whitespace or `;|&()<>`, outside quotes) and
+   with them as words, and either finding counts; and a `#` anywhere on a heredoc's logical
+   line (`git commit -F - #<<EOF` makes the "body" run) keeps the body as shell text. A
+   heredoc body is data only when its logical line (backslash-newlines joined)
+   has a single heredoc and nothing after `<<MARKER` (also `<<-`, `<<'M'`, `<<"M"`) but at
+   most one output redirection to a file (`> path`, `>> path`). Anything else after the marker
+   (a pipe, `;`, `&&`, `&`, a subshell or brace group, `>(…)`, a second redirection,
+   another word, also a comment) keeps the body as shell text, so `cat <<EOF | tee /tmp/x`
+   is checked too.
+3. **Only the exact message forms make a body data**, where the body ends up in a message
+   or a file and never runs (programs also by path):
+   - `git commit` / `git tag` reading it with `-F -` (`--file=-`, `--file -`), or as
+     `-m "$(cat <<'EOF' …)"` / `--message="$(cat <<…)"`. No global option before the
+     subcommand (`git -C …`, `git -c …`); options after it (`--amend`, `-a`) are fine. A
+     `-F <file>` other than `-` keeps the body.
+   - `gh pr create|edit`, `gh issue create|edit` with `--body-file -` or
+     `--body "$(cat <<'EOF' …)"`.
+   - `cat` writing one regular file: `cat > path <<EOF`, `cat <<EOF > path`,
+     `cat >> path`. `cat` and exactly one redirection `>` or `>>` without a descriptor
+     number (not `1>`, `2>`, `>|`), before or after the marker, and no other word. The
+     target is literal (no `$`, `*`, `?`, `[`, `{` or backtick, which the shell expands:
+     `/de?/stdout`, `$TTY`; `~` is fine) and has no `dev` or `proc` path component,
+     compared ignoring case (`/dev/stdout`, `//dev/tty`, `/./dev/stdout`,
+     `../../dev/stdout`, `/DEV/stdout`, `/proc/self/fd/1`); `/tmp/devnotes` or
+     `/tmp/proc.md` are files. `tee` is no message form: it copies the body to stdout as
+     well.
+
+   Only that command's words precede the marker, counted from the start of the logical line
+   or, for the `$(cat <<EOF` forms, the `git`/`gh` command before the `$(`. No `;`, `&`, `|`,
+   `(`, `)`, `{`, `}` besides that `$(`, no other program in front (`env cat`, `X=1 git`,
+   `cd /tmp && cat`). Every other heredoc (`bash <<EOF`, `{ bash; } <<EOF`,
+   `while read …; done <<EOF`, `git rm --pathspec-from-file=- <<EOF`, `gh api … <<EOF`,
+   `cat <<EOF` without a file) keeps its body as shell text, which is then checked like
+   inline code with the cargo exceptions (`cargo xtask …`, `-p xtask`) as elsewhere. This
+   allowlist replaces a list of interpreters, which could never be complete, and a list of
+   reader programs, whose other subcommands read a heredoc as paths, config or code.
+
+   **The message form stands alone:** the whole Bash command is the message-form command.
+   Nothing but blank lines comes before the heredoc's logical line (backslash-newline joins
+   lines) and after the terminator line; a comment line is not blank. For the
+   `"$(cat <<'EOF'` forms the closing line `)"` may follow, optionally with further plain
+   arguments on that line (closed quotes; no `;`, `&`, `|`, `<`, `>`, `(`, `)`, backtick,
+   `$` or backslash). Otherwise the body is shell text. A command before the heredoc can
+   route its output into a shell (`exec > >(bash)`, a fifo read by `bash`, a symlink to
+   `/dev/stdout`), a command after it can run the file it wrote (`bash /tmp/s`); the rule
+   also denies harmless neighbours (`git add -A` newline `git commit -F -`), which is the
+   price of not modelling them.
+
+   **An unquoted marker expands the body:** bash and zsh run `$(…)` and `${…}` in the body
+   of `<<EOF` before git, gh or cat reads it. Under an unquoted marker (the marker word has
+   no `'`, `"` or `\`) the body is data only if it contains no `$(` and no `${`; an escaped
+   `\$(` counts too. Quoted markers (`<<'EOF'`, `<<"EOF"`, `<<\EOF`, `<<E'O'F`,
+   `<<-'EOF'`) keep the body literal. `$NAME` and `$5` run nothing and stay data;
+   backticks and `$((` fail closed (decision 4). A body under an unquoted marker with a
+   line ending in a backslash is never data: bash and zsh join it with the next line before
+   expanding (`$\` newline `(` is a substitution) and before comparing it with the
+   terminator (`EO\` newline `F` ends the body, the lines after it run).
+
+   **Early terminators inside `$(…)`:** bash (and sh) end a heredoc inside an open `$(` at a
+   line such as `EOF)`, `EOF )`, `EOFX)`, bash 3.2 also after leading blanks; zsh does not.
+   So inside `$(…)` the body is data only if no body line before the terminator starts,
+   after optional blanks and tabs, with the marker word (fail closed). Outside `$(…)` no
+   shell does this and nothing changes.
+4. **Fail closed:** heredoc bodies are removed only when the guard models every construct
+   of the command. A command that contains anywhere a backtick, ANSI-C
+   quoting `$'`, a redirection with `&` (`|&`, `>&`, `&>`, `<&`, so also `2>&1` and `>&2`), or
+   arithmetic `((` (also `$((`, whose `<<` is a shift and whose `$(…)` runs) keeps its prose:
+   every word is checked, as if there were no heredocs. The same holds when any heredoc
+   keeps its body as shell text or has no terminator: the quote tracking cannot follow a
+   body (`it's`), so no other body is removed. A heredoc
+   inside a compound command (`{` newline `cat <<EOF` … `}` `| bash`) never stands alone
+   (decision 3), so its body is shell text. Rare spellings are denied rather than parsed;
+   the word rules (`xtask:`, the cargo exceptions) still apply.
+5. **sed scripts that write or run are writers**, like `sed -i`. `sed` and `gsed`, also by
+   path, count as writing when a script contains the command `w file`/`W file` (with any
+   address, inside `{…}`, after `;` or a newline), the `w file` flag of `s` (also after
+   other flags, any delimiter), or GNU's command `e` or `e` flag of `s`, which runs a shell
+   command. A script is the first non-option argument before any `-e`/`-f` (BSD sed's
+   script) and the `-e`/`--expression` arguments joined by newlines. The command is split
+   into words quote-aware (quotes, backslashes, `${…}`, redirections, `$(…)` and backticks
+   also inside double quotes; a comment's words are words too), and the script is read
+   with the grammar of BSD and GNU sed: a `w`/`e` in a regex, replacement, `a`/`i`/`c`
+   text, `y` list or label is none. The regex is read twice, with and without BSD's
+   bracket expressions (in BSD sed `s/[/]/x/` has the regex `[/]`), and either reading
+   counts. A syntax error ends the scan, because sed then runs nothing.
+
+   **A script the guard cannot read counts as writing:** a script file (`-f`, `--file`,
+   `--file=`, also in a group like `-nf`), a script word the shell expands (a `$` outside
+   single quotes, a backtick, `$'…'`; `'$p'` is literal), and xargs' and find's
+   placeholder `{}` as the script. Only the script words count: a `$` in a file argument
+   (`sed -n 1p "$f"`) makes no writer. Every `sed`/`gsed` that a naive split of the raw
+   text, ignoring quotes, puts in command position (after a line start, `;`, `|`, `&`, `(`,
+   `$(`, a backtick, `{`, `then`, `do`, `else`) must be found by one of the tokenizer's
+   readings, or the command counts as writing (`x=$(# it's` newline `sed …` hid it).
+6. **In-place editors and inline code count inside substitutions.** The programs of the
+   in-place and inline-code tables (`sed -i`, `perl -pi`, `ruby -e`, `bash -c` …) are also
+   recognised as the first word inside `$(…)`, backticks and `(…)` subshells, using the
+   same quote-aware split into simple commands as decision 5. `echo $(sed -n 1p f)` only
+   reads and passes. The other writer checks (decision 7, the writer words) run over these
+   simple commands too, so `(git clean -fdx xtask)` and `x=$(find xtask -delete)` count.
+7. **Deletions count as writers without a writer word:** `unlink`, `rmdir`, `shred` (also
+   by path), `rm` as the last word or before `;`, `|`, `&`, `)` (`… | xargs rm`), `find`
+   (also by path) with an action primary (`-delete`, `-exec`/`-execdir`, `-ok`/`-okdir`,
+   `-fprint…`, `-fls`), and the git subcommands that rewrite the work tree or index:
+   `clean`, `stash`, `reset`, `checkout`, `restore`, `apply`, `switch`, `rebase`, `merge`,
+   `pull`, `cherry-pick`, `revert`, `am`, `read-tree`, `checkout-index`, `update-index`,
+   `sparse-checkout`, `submodule`, `worktree`, also after git's global options
+   (`git -C . clean`). A harness path in a global option counts like any other
+   (`git -C xtask switch main`). False alarms like `ls harness | grep rm` are accepted.
+8. **A harness path in a shell command needs a pure read (an allowlist).** A command that
+   names a harness path (the anchors and bare directories with the exceptions above, the
+   bodies of safe message forms removed) passes in a locked session only if every simple
+   command of both readings only reads: the read-only programs (`cat`, `grep`, `ls`, `rg`,
+   `find` without actions …), `sed` without in-place editing and with a readable script
+   that writes nothing, `git log|diff|show|status|blame|ls-files|grep|rev-parse|cat-file`
+   without a global option and without `--output`/`-o`/`--ext-diff`/`--textconv`, cat-file's
+   `--filters` and grep's `-O`/`--open-files-in-pager` (also bundled and abbreviated; grep's
+   `-o` is `--only-matching`, a read), `file` without `-C`/`--compile`, `echo`,
+   `printf`, `cd`, `shellcheck`, `true`, `:`, the compound keywords
+   `if`/`then`/`else`/`elif`/`fi`/`{`/`}`, and assignments on their own; no redirection
+   but `/dev/null` and `2>&1`. Whether there is a redirection decides the quote-aware
+   tokenizer in both comment readings, so a quoted `>` or `<` (`grep "-> bool"`) is none;
+   a command with a construct it does not model is read as text (fail closed). The checks
+   of the hook environment and `.git` (ADR-0043) use the same allowlist. A program after
+   an assignment (`GIT_EXTERNAL_DIFF=x git diff`) or given by an expansion is no read.
+   Where the shell may run or change more than the tokenizer sees, a command is no pure
+   read either (fail closed): a heredoc outside the removed body of a safe message form
+   (the tokenizer cannot follow a body, `echo it's` hides the commands after it),
+   arithmetic `((` (its assignments, `$((IFS=1))`), zsh's parameter flags `${(…)}`
+   (`${(e)x}` evaluates), `${…@…}` (bash's `@P` prompt expansion runs `$(…)`), `printf
+   -v`, and an assignment on its own to a name with an upper-case letter (`PATH`, `IFS`)
+   or to zsh's tied arrays (`path`, `fpath` …), and an unquoted `(` glued to a word, a zsh
+   glob qualifier or group that can run code (`*(e:'…':)`, `x(#qe:…:)`; `$(` and a
+   subshell after a blank are none). Anything else is denied (`ed`, `vim -es`,
+   `git archive -o`, `cmake -E`, `unzip`, `php -r` were missed by a list of writers). This
+   replaces the writer list of decisions 5 to 7: the sed rules of decision 5 now decide
+   whether a sed only reads; the programs of decisions 6 and 7 are simply no reads.
+   Roles and fixtures follow the same allowlist: a shell command that is no pure read
+   follows the Edit/Write rules for the repository paths named by its simple commands that
+   do not only read (with a file redirection or a lost sed, every word counts). A fixture
+   path is denied (ADR-0030, also unlocked, before the role check), and a test or code path
+   goes through the role check (ADR-0039), which binds the role of a context without an
+   agent type. A read binds nothing, and neither do `git add`, `git commit` and `git push`,
+   which change no file content, so the main context stages tests and code separately. In a
+   cargo command only words with a `/` count as paths (`-p xtask` names a package). The
+   fixture directory and every ancestor of it (`crates/qoob3d-core/tests`, `crates`, the
+   repository root `.`) count as fixture paths, for shell commands and Edit/Write, since
+   removing, moving or restoring them touches every fixture. A path with a glob or brace
+   (`*?[{`) is cut at the first of them: it is a fixture path if that literal prefix is a
+   prefix of the fixture directory or lies inside it (`tests/*`, `tests/fix*`, `crates/*/…`,
+   `fixture{s,}`, compared ignoring case). A named directory goes through the role check:
+   below `tests` or `models` it is a test; every other source-tree directory holds both
+   (`crates`, a crate root, `xtask`, and `crates/<crate>/src` with its modules, which hold
+   unit tests in `tests.rs`) and conflicts with every role (a context without an agent
+   type is denied rather than bound to both). So does a source-tree path with a glob or
+   brace in any component, unless a literal `tests` directory (or `models`) comes before
+   it. Only unquoted `*?[{` make a pattern. Assignments on their own stay in the path
+   lists of a command that is no pure read (`d=…/fixtures; rm -rf $d`). With a file
+   redirection, a heredoc, a zsh glob qualifier or a lost sed, every word of the command
+   counts as a possible path, split at blanks; the
+   tokenizer skips heredoc bodies (to their terminator) and takes their words literally.
+
+## Consequences
+
+- Commit messages, PR bodies and notes through a heredoc no longer trip the guard.
+- `bash <<EOF`, `cat <<EOF | sh`, `{ bash; } <<EOF`, `while read … done <<EOF` and friends
+  cannot hide a harness write in the body.
+- The heuristic stays a heuristic: a body read through an indirection the guard does not
+  see is not checked. Examples are a script written first and run by a later Bash call
+  (`cat > /tmp/x.sh <<EOF` …, then `bash /tmp/x.sh`), a symlink or fifo prepared by an
+  earlier Bash call (`cat > /tmp/p <<EOF` whose target is read by a process started
+  before), and a commit message run as code afterwards. The `$(cat <<EOF` heredocs of the
+  message forms stay data, because the commit and PR body forms
+  `git commit -m "$(cat <<'EOF' …)"` and `gh pr create --body "$(cat <<'EOF' …)"` must pass;
+  an unknown command in front of the `$(` (`rm -rf $(cat <<EOF`) keeps the body. CI
+  and CODEOWNERS remain the wall (ADR-0037).
+- A commit message or note that names a harness directory is denied when the same command
+  uses an unmodelled construct (`2>&1`, backticks, `$((…))`), pipes the heredoc on
+  (`cat <<EOF | tee /tmp/x`), puts anything in front of or after the command
+  (`cd /tmp && cat`, `git add -A` on the line before) or uses another form
+  (`git -C repo commit -F -`, `tee path <<EOF`, `cat <<EOF` to the terminal or a device).
+  Agents write the note with `cat > file <<EOF`, `git commit -F - <<'EOF'` or split the
+  command into separate Bash calls.
+- sed with a script file or an expanded script is denied next to a harness path even when
+  the script only reads; agents write the script literally in the command.
+- Rare false alarms: a writing command that names a harness directory only in a comment
+  (`echo done > /tmp/x # harness`) is denied. Agents drop the comment or split the command.
+- In a locked session `git add <harness path>`, `cargo add --path xtask` and running a
+  harness script (`bash .githooks/pre-push`, `node xtask/tool.js`) are denied; `git add
+  -u`/`-A`, `git commit`, `git push` and the hooks git runs itself are not, because they
+  name no harness path.
+- Shell commands that are no pure read bind and respect the agent role like Edit/Write
+  for the test or code paths they name (`git add`/`commit`/`push` excepted), and never touch
+  a fixture path, not even to add a new fixture (use Write).
+- Clarifies ADR-0043 decision 4 without changing it for Edit/Write.
+
+## Rejected alternatives
+
+- **Collapsing `..` in shell commands:** the guard does not know the working directory of
+  each word or which words are paths; collapsing text would invent paths and still miss `cd`.
+- **Checking every heredoc body:** denies ordinary commit messages and notes that name the
+  harness, which pushes agents towards workarounds.
+- **Removing comments where the shell starts one:** each refinement (word start, not
+  inside `${…}`, only after whitespace) was followed by another construct where the
+  scanner saw a comment and the shell did not (zsh glob groups `x(a| #)`). The cost of
+  checking comments is a rare false alarm.
+- **Parsing the rare constructs too** (backticks, `$'…'`, `|&`, pipelines continued after the
+  body over comment and blank lines): each one was a way to hide a harness write behind
+  "prose", and every parser addition is a new place for such a gap. Denying them costs little.
+
+## References
+
+- Code: `xtask/src/guard.rs` (`models_prose`, `without_prose`, `is_message_form`,
+  `stands_alone`, `expands`, `ends_early`, `writes_regular_file`, `only_redirects_to_file`,
+  `simple_commands`, `sed_command_writes`, `sed_script_writes`, `sed_scripts`,
+  `edits_in_place`, `harness_in_shell`, `pure_read`, `reads`, `git_reads`,
+  `check_shell_paths`, `stages`, `holds_fixtures`, `named_kinds`, `check_named_role`)
+- Sabotage cases: `harness/sabotage/guard-harness-shell-after-heredoc.case`,
+  `guard-harness-shell-interpreter-heredoc.case`, `guard-prose-heredoc-body-checked.case`,
+  `guard-harness-shell-fail-closed-prose.case`, `guard-harness-shell-backtick-comment.case`,
+  `guard-harness-shell-heredoc-{tee,cat-stderr,device,not-alone}.case`,
+  `guard-harness-shell-heredoc-{unquoted-substitution,cat-target-glob}.case`,
+  `guard-harness-shell-heredoc-{split-substitution,paren-terminator}.case`,
+  `guard-harness-shell-hash-in-glob-group.case`,
+  `guard-harness-shell-sed-{write,execute,expanded-script,script-file}.case`,
+  `guard-harness-shell-in-place-in-substitution.case`,
+  `guard-harness-shell-unlisted-writer.case`, `guard-implementer-shell-writes-test.case`,
+  `guard-test-author-shell-writes-code.case`, `guard-shell-writes-fixture.case`,
+  `guard-harness-shell-git-grep-pager.case`, `guard-shell-removes-fixture-dir.case`,
+  `guard-test-author-shell-replaces-code-dir.case`
+- Related: ADR-0030, ADR-0037, ADR-0039, ADR-0043

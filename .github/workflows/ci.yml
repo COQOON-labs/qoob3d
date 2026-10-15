@@ -1,0 +1,166 @@
+# The wall (ADR-0037): everything an agent could skip locally runs again here.
+# Required status checks on `main`: `policy`, `selftest (harness vs. sabotage)`,
+# `check (macOS)` and `mutants (changed code)` (docs/harness.md).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 5 * * 1" # Monday: detect drift in the harness (ADR-0042)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  policy:
+    name: policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: policy
+      - name: Determine revision range
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          case "$EVENT" in
+            pull_request) range="$PR_BASE..$PR_HEAD" ;;
+            push) if [ -z "$BEFORE" ] || [ "$BEFORE" = 0000000000000000000000000000000000000000 ]; then
+                    range="$GITHUB_SHA"; else range="$BEFORE..$GITHUB_SHA"; fi ;;
+            *) range="$GITHUB_SHA" ;;
+          esac
+          echo "RANGE=$range" >> "$GITHUB_ENV"
+      - name: Commit policy (ADR-0038, ADR-0039)
+        run: cargo xtask commits "$RANGE"
+      - name: Secret scan (gitleaks)
+        run: |
+          curl -sSfL -o gitleaks.tgz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tgz" | sha256sum -c -
+          tar -xzf gitleaks.tgz gitleaks
+          ./gitleaks git --no-banner --redact --log-opts="$RANGE" .
+      - name: Source rules, rule register, architecture, docs, translations
+        run: cargo xtask hygiene && cargo xtask rules && cargo xtask arch && cargo xtask docs && cargo xtask i18n
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-machete,cargo-deny
+      - name: Unused dependencies (cargo-machete)
+        run: cargo machete
+      - name: Supply chain (cargo-deny)
+        run: cargo deny --log-level error check
+      - name: Flag harness changes
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          changed=$(cargo xtask harness-changes "$PR_BASE" "$PR_HEAD")
+          if [ -n "$changed" ]; then
+            { echo "### ⚠️ Harness changed – owner review required (ADR-0037)"; echo; echo '```'; echo "$changed"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  selftest:
+    name: selftest (harness vs. sabotage)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: selftest
+      - name: Every sabotage in harness/sabotage/ must be rejected (ADR-0042)
+        run: cargo xtask selftest
+
+  check-macos:
+    name: check (macOS)
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: macos
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-deny
+      - name: cargo xtask check (definition of "done")
+        run: cargo xtask check
+
+  mutants:
+    name: mutants (changed code)
+    if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: mutants
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-mutants
+      - name: Mutation tests of the pure crates on the diff (ADR-0039)
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -n "$PR_BASE" ]; then
+            git diff "$PR_BASE" HEAD > pr.diff
+            cargo mutants --in-diff pr.diff -p qoob3d-core -p qoob3d-sketch --no-shuffle -j 4
+          else
+            # Weekly: everything, as a report only (baseline for a later threshold).
+            cargo mutants -p qoob3d-core -p qoob3d-sketch --no-shuffle -j 4 || true
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: mutants.out
+          path: mutants.out
+
+  linux:
+    # Linux is a target platform but not yet built anywhere (CLAUDE.md). Not
+    # required until it is green once; then add it to the required checks.
+    name: check (Linux, experimental)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: System packages (build, Vulkan via lavapipe, X11/Wayland)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ mesa-vulkan-drivers libvulkan1 xvfb \
+            libx11-dev libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libxi-dev libxcursor-dev libxrandr-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: linux
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-deny
+      - name: cargo xtask check
+        run: xvfb-run -a cargo xtask check

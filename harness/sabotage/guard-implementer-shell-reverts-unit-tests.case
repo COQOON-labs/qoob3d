@@ -1,0 +1,6 @@
+# The implementer reverts a whole `src` directory through the shell, which
+# also reverts the unit tests in `src/**/tests.rs`: a source directory holds
+# tests and code (ADR-0039; critic finding S1 on 3c91d7f)
+command: cargo xtask guard
+expect: This agent context already writes production code
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "git checkout HEAD~5 -- crates/qoob3d-sketch/src"}, "hook_event_name": "PreToolUse", "agent_type": "implementer", "agent_id": "a1"}

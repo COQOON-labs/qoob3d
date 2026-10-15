@@ -11,10 +11,10 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const STATUSES: &[&str] = &["vorgeschlagen", "akzeptiert", "ersetzt", "verworfen"];
+const STATUSES: &[&str] = &["proposed", "accepted", "superseded", "rejected"];
 const REQUIRED_KEYS: &[&str] =
     &["id", "title", "status", "date", "crates", "tags", "supersedes", "superseded_by"];
-const REQUIRED_SECTIONS: &[&str] = &["## Kontext", "## Entscheidung", "## Konsequenzen"];
+const REQUIRED_SECTIONS: &[&str] = &["## Context", "## Decision", "## Consequences"];
 const KNOWN_CRATES: &[&str] =
     &["qoob3d-core", "qoob3d-kernel", "qoob3d-render", "qoob3d-sketch", "qoob3d-app", "xtask"];
 const INDEX_START: &str = "<!-- adr-index:start";
@@ -37,7 +37,7 @@ impl Adr {
     }
 }
 
-pub fn check(root: &Path, fix: bool) -> Result<(), Vec<String>> {
+pub(crate) fn check(root: &Path, fix: bool) -> Result<(), Vec<String>> {
     let adr_dir = root.join("docs/adr");
     let mut problems = Vec::new();
     let adrs = load_adrs(&adr_dir, &mut problems);
@@ -56,7 +56,7 @@ pub fn check(root: &Path, fix: bool) -> Result<(), Vec<String>> {
 fn load_adrs(dir: &Path, problems: &mut Vec<String>) -> Vec<Adr> {
     let mut adrs = Vec::new();
     let Ok(entries) = fs::read_dir(dir) else {
-        problems.push(format!("{} fehlt", dir.display()));
+        problems.push(format!("{} is missing", dir.display()));
         return adrs;
     };
     let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
@@ -67,7 +67,7 @@ fn load_adrs(dir: &Path, problems: &mut Vec<String>) -> Vec<Adr> {
             continue;
         }
         let Some(number) = name.get(..4).and_then(|n| n.parse::<u32>().ok()) else {
-            problems.push(format!("{name}: Dateiname muss mit NNNN- beginnen"));
+            problems.push(format!("{name}: file name must start with NNNN-"));
             continue;
         };
         if number == 0 {
@@ -75,12 +75,12 @@ fn load_adrs(dir: &Path, problems: &mut Vec<String>) -> Vec<Adr> {
         }
         let text = fs::read_to_string(&path).unwrap_or_default();
         let Some(meta) = front_matter(&text) else {
-            problems.push(format!("{name}: YAML-Kopfblock (--- … ---) fehlt"));
+            problems.push(format!("{name}: YAML front matter (--- … ---) is missing"));
             continue;
         };
         for section in REQUIRED_SECTIONS {
             if !text.lines().any(|l| l.trim_end() == *section) {
-                problems.push(format!("{name}: Abschnitt `{section}` fehlt"));
+                problems.push(format!("{name}: section `{section}` is missing"));
             }
         }
         adrs.push(Adr { number, file: name, meta });
@@ -120,55 +120,55 @@ fn validate_adr(adr: &Adr, by_id: &BTreeMap<String, &Adr>, problems: &mut Vec<St
     let f = &adr.file;
     for key in REQUIRED_KEYS {
         if !adr.meta.contains_key(*key) {
-            problems.push(format!("{f}: Feld `{key}` fehlt im Kopfblock"));
+            problems.push(format!("{f}: field `{key}` is missing in the front matter"));
         }
     }
     if adr.get("id") != adr.id() {
         problems.push(format!(
-            "{f}: id `{}` passt nicht zum Dateinamen ({})",
+            "{f}: id `{}` does not match the file name ({})",
             adr.get("id"),
             adr.id()
         ));
     }
     if adr.get("title").len() < 10 {
-        problems.push(format!("{f}: title fehlt oder ist zu kurz"));
+        problems.push(format!("{f}: title is missing or too short"));
     }
     let status = adr.get("status");
     if !STATUSES.contains(&status) {
-        problems.push(format!("{f}: status `{status}` ungültig, erlaubt: {STATUSES:?}"));
+        problems.push(format!("{f}: status `{status}` is invalid, allowed: {STATUSES:?}"));
     }
     if !is_date(adr.get("date")) {
-        problems.push(format!("{f}: date `{}` ist kein YYYY-MM-DD", adr.get("date")));
+        problems.push(format!("{f}: date `{}` is not YYYY-MM-DD", adr.get("date")));
     }
     for krate in list(adr.get("crates")) {
         if !KNOWN_CRATES.contains(&krate.as_str()) {
-            problems.push(format!("{f}: unbekanntes Crate `{krate}`"));
+            problems.push(format!("{f}: unknown crate `{krate}`"));
         }
     }
 
     // Supersede links must be mutual.
     let superseded_by = adr.get("superseded_by");
     match (status, superseded_by) {
-        ("ersetzt", "null" | "") => {
-            problems.push(format!("{f}: status ersetzt, aber superseded_by ist leer"));
+        ("superseded", "null" | "") => {
+            problems.push(format!("{f}: status superseded, but superseded_by is empty"));
         }
         (_, "null" | "") => {}
         (_, other) => match by_id.get(other) {
-            None => problems.push(format!("{f}: superseded_by verweist auf unbekannte {other}")),
+            None => problems.push(format!("{f}: superseded_by refers to unknown {other}")),
             Some(newer) if !list(newer.get("supersedes")).contains(&adr.id()) => {
-                problems.push(format!("{f}: {other} führt {} nicht in `supersedes`", adr.id()))
+                problems.push(format!("{f}: {other} does not list {} in `supersedes`", adr.id()));
             }
-            Some(_) if status != "ersetzt" => {
-                problems.push(format!("{f}: hat superseded_by, status muss `ersetzt` sein"));
+            Some(_) if status != "superseded" => {
+                problems.push(format!("{f}: has superseded_by, status must be `superseded`"));
             }
             Some(_) => {}
         },
     }
     for old in list(adr.get("supersedes")) {
         match by_id.get(&old) {
-            None => problems.push(format!("{f}: supersedes verweist auf unbekannte {old}")),
+            None => problems.push(format!("{f}: supersedes refers to unknown {old}")),
             Some(o) if o.get("superseded_by") != adr.id() => {
-                problems.push(format!("{f}: {old} hat nicht superseded_by: {}", adr.id()));
+                problems.push(format!("{f}: {old} does not have superseded_by: {}", adr.id()));
             }
             Some(_) => {}
         }
@@ -184,9 +184,8 @@ fn is_date(s: &str) -> bool {
 }
 
 fn render_index(adrs: &[Adr]) -> String {
-    let mut out = String::from(
-        "| ADR | Titel | Status | Datum | Crates |\n| --- | --- | --- | --- | --- |\n",
-    );
+    let mut out =
+        String::from("| ADR | Title | Status | Date | Crates |\n| --- | --- | --- | --- | --- |\n");
     for a in adrs {
         let crates = list(a.get("crates")).join(", ");
         out.push_str(&format!(
@@ -204,11 +203,11 @@ fn render_index(adrs: &[Adr]) -> String {
 
 fn check_index(readme: &Path, adrs: &[Adr], fix: bool, problems: &mut Vec<String>) {
     let Ok(text) = fs::read_to_string(readme) else {
-        problems.push("docs/adr/README.md fehlt".into());
+        problems.push("docs/adr/README.md is missing".into());
         return;
     };
     let (Some(start), Some(end)) = (text.find(INDEX_START), text.find(INDEX_END)) else {
-        problems.push("docs/adr/README.md: Index-Marker fehlen".into());
+        problems.push("docs/adr/README.md: index markers are missing".into());
         return;
     };
     let start_line_end = start + text[start..].find('\n').unwrap_or(0) + 1;
@@ -220,11 +219,12 @@ fn check_index(readme: &Path, adrs: &[Adr], fix: bool, problems: &mut Vec<String
     if fix {
         let updated = format!("{}{}{}", &text[..start_line_end], expected, &text[end..]);
         match fs::write(readme, updated) {
-            Ok(()) => println!("docs: ADR-Index neu erzeugt"),
-            Err(e) => problems.push(format!("docs/adr/README.md schreiben: {e}")),
+            Ok(()) => println!("docs: ADR index regenerated"),
+            Err(e) => problems.push(format!("writing docs/adr/README.md: {e}")),
         }
     } else {
-        problems.push("docs/adr/README.md: ADR-Index veraltet → `cargo xtask docs --fix`".into());
+        problems
+            .push("docs/adr/README.md: ADR index is outdated → `cargo xtask docs --fix`".into());
     }
 }
 
@@ -244,14 +244,14 @@ fn check_references(root: &Path, by_id: &BTreeMap<String, &Adr>, problems: &mut 
                     continue;
                 }
                 let Some(adr) = by_id.get(&id) else {
-                    problems.push(format!("{rel}:{}: Verweis auf unbekannte {id}", line_no + 1));
+                    problems.push(format!("{rel}:{}: refers to unknown {id}", line_no + 1));
                     continue;
                 };
                 // Code and guides must point to the decision that is in force.
-                if !in_adr_dir && matches!(adr.get("status"), "ersetzt" | "verworfen") {
+                if !in_adr_dir && matches!(adr.get("status"), "superseded" | "rejected") {
                     let newer = adr.get("superseded_by");
                     problems.push(format!(
-                        "{rel}:{}: verweist auf {id} (Status {}), aktuell gültig: {newer}",
+                        "{rel}:{}: refers to {id} (status {}), in force: {newer}",
                         line_no + 1,
                         adr.get("status")
                     ));
@@ -298,7 +298,7 @@ fn check_crate_docs(root: &Path, problems: &mut Vec<String>) {
     for entry in entries.flatten() {
         if entry.path().is_dir() && !entry.path().join("CLAUDE.md").exists() {
             problems.push(format!(
-                "crates/{}/CLAUDE.md fehlt (ADR-0001)",
+                "crates/{}/CLAUDE.md is missing (ADR-0001)",
                 entry.file_name().to_string_lossy()
             ));
         }
@@ -306,28 +306,4 @@ fn check_crate_docs(root: &Path, problems: &mut Vec<String>) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn finds_adr_references() {
-        assert_eq!(adr_refs("see ADR-0036 and ADR-0012."), ["ADR-0036", "ADR-0012"]);
-        assert!(adr_refs("ADR-NNNN, ADR-12").is_empty());
-    }
-
-    #[test]
-    fn parses_front_matter_and_lists() {
-        let meta = front_matter("---\nid: ADR-0001\ncrates: [a, b]\n---\nbody").unwrap();
-        assert_eq!(meta["id"], "ADR-0001");
-        assert_eq!(list(&meta["crates"]), ["a", "b"]);
-        assert!(list("[]").is_empty());
-        assert!(front_matter("no front matter").is_none());
-    }
-
-    #[test]
-    fn validates_dates() {
-        assert!(is_date("2026-10-13"));
-        assert!(!is_date("2026-1-13"));
-        assert!(!is_date("YYYY-MM-DD"));
-    }
-}
+mod tests;

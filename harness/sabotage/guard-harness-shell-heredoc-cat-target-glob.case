@@ -1,0 +1,6 @@
+# Agent writes a cat heredoc to a glob the shell expands to /dev/stdout:
+# only a literal target (no `$*?[{` or backtick) makes the body data
+# (ADR-0037, ADR-0043, ADR-0049; implementer finding F2 on 445650c)
+command: cargo xtask guard
+expect: could modify the harness file `xtask
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "cat > /de?/stdout <<EOF\nrm -rf xtask\nEOF"}, "hook_event_name": "PreToolUse"}

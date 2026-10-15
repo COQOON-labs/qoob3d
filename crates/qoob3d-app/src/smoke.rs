@@ -33,7 +33,7 @@ pub struct Observation<'a> {
     pub mesh_bounds: Option<Aabb>,
     pub viewport_center: Pos2,
     pub viewport_aspect: f32,
-    /// Screen position of the ViewCube's "OBEN" face, if visible.
+    /// Screen position of the ViewCube's top face, if visible.
     pub viewcube_top: Option<Pos2>,
     pub home_button: Option<Pos2>,
     pub last_orbit_pivot: Option<Vec3>,
@@ -145,10 +145,10 @@ impl SmokeTest {
 
         let Some(index) = self.current else {
             if obs.mesh_bounds.is_some() && frame >= 3 {
-                println!("smoke: Modell geladen nach {frame} Frames");
+                println!("smoke: model loaded after {frame} frames");
                 self.begin_step(0, obs.camera);
             } else if frame > MAX_WAIT_FRAMES {
-                return self.finish(Err(format!("kein Kernel-Ergebnis nach {frame} Frames")));
+                return self.finish(Err(format!("no kernel result after {frame} frames")));
             }
             return Control::Continue;
         };
@@ -208,16 +208,14 @@ fn spawn_watchdog(frames: Arc<AtomicU64>) {
                     last = (now, Instant::now());
                 }
                 let reason = if last.1.elapsed() > STALL_TIMEOUT {
-                    Some(format!(
-                        "kein Frame-Fortschritt seit {STALL_TIMEOUT:?} (Hänger/Deadlock?)"
-                    ))
+                    Some(format!("no frame progress for {STALL_TIMEOUT:?} (hang/deadlock?)"))
                 } else if start.elapsed() > TOTAL_TIMEOUT {
-                    Some(format!("Gesamtlaufzeit über {TOTAL_TIMEOUT:?}"))
+                    Some(format!("total run time over {TOTAL_TIMEOUT:?}"))
                 } else {
                     None
                 };
                 if let Some(reason) = reason {
-                    eprintln!("smoke: FAIL  watchdog – {reason} (Frame {now})");
+                    eprintln!("smoke: FAIL  watchdog – {reason} (frame {now})");
                     std::process::exit(1);
                 }
             }
@@ -227,36 +225,35 @@ fn spawn_watchdog(frames: Arc<AtomicU64>) {
 
 // ----------------------------------------------------------------- script
 
+#[expect(clippy::too_many_lines, reason = "predates ADR-0040; split when next changed")]
 fn steps() -> Vec<Step> {
     vec![
         Step {
-            name: "Orbit um Cursor-Pivot (Shift + mittlere Maustaste)",
+            name: "Orbit around cursor pivot (Shift + middle mouse button)",
             frames: 7,
             inject: |f, at, raw| middle_drag(f, at.center, raw, Modifiers::SHIFT),
             check: |b, a, obs| {
                 expect_rotated(b, a, true)?;
-                expect_close(b.distance, a.distance, "Distanz")?;
+                expect_close(b.distance, a.distance, "distance")?;
                 // Fusion behaviour: the pivot is the model point under the
                 // cursor and stays fixed on screen while orbiting.
-                let pivot = obs.last_orbit_pivot.ok_or("kein Orbit-Pivot gesetzt")?;
-                let bounds = obs.mesh_bounds.ok_or("kein Modell")?;
+                let pivot = obs.last_orbit_pivot.ok_or("no orbit pivot set")?;
+                let bounds = obs.mesh_bounds.ok_or("no model")?;
                 if (0..3)
                     .any(|k| pivot[k] < bounds.min[k] - 0.01 || pivot[k] > bounds.max[k] + 0.01)
                 {
-                    return Err(format!("Pivot {pivot} liegt nicht auf dem Modell"));
+                    return Err(format!("pivot {pivot} is not on the model"));
                 }
-                let before = b.project(pivot, obs.viewport_aspect).ok_or("Pivot hinter Kamera")?;
-                let after = a.project(pivot, obs.viewport_aspect).ok_or("Pivot hinter Kamera")?;
+                let before =
+                    b.project(pivot, obs.viewport_aspect).ok_or("pivot behind the camera")?;
+                let after =
+                    a.project(pivot, obs.viewport_aspect).ok_or("pivot behind the camera")?;
                 let moved = (before.truncate() - after.truncate()).length();
-                if moved > 1e-3 {
-                    Err(format!("Pivot hat sich auf dem Bildschirm bewegt ({moved})"))
-                } else {
-                    Ok(())
-                }
+                if moved > 1e-3 { Err(format!("pivot moved on screen ({moved})")) } else { Ok(()) }
             },
         },
         Step {
-            name: "Pan (mittlere Maustaste)",
+            name: "Pan (middle mouse button)",
             frames: 7,
             inject: |f, at, raw| middle_drag(f, at.center, raw, Modifiers::NONE),
             check: |b, a, _| {
@@ -265,7 +262,7 @@ fn steps() -> Vec<Step> {
             },
         },
         Step {
-            name: "Zoom (Mausrad, 2 Raststufen)",
+            name: "Zoom (mouse wheel, 2 notches)",
             frames: 2,
             inject: |f, at, raw| {
                 if f == 0 {
@@ -273,10 +270,10 @@ fn steps() -> Vec<Step> {
                     raw.events.push(wheel(MouseWheelUnit::Line, vec2(0.0, 2.0), Modifiers::NONE));
                 }
             },
-            check: |b, a, _| expect_close(a.distance / b.distance, 0.88f32.powi(2), "Zoomfaktor"),
+            check: |b, a, _| expect_close(a.distance / b.distance, 0.88f32.powi(2), "zoom factor"),
         },
         Step {
-            name: "Zoom (Trackpad-Pinch)",
+            name: "Zoom (trackpad pinch)",
             frames: 2,
             inject: |f, at, raw| {
                 if f == 0 {
@@ -284,10 +281,10 @@ fn steps() -> Vec<Step> {
                     raw.events.push(Event::Zoom(1.25));
                 }
             },
-            check: |b, a, _| expect_close(a.distance / b.distance, 0.8, "Zoomfaktor"),
+            check: |b, a, _| expect_close(a.distance / b.distance, 0.8, "zoom factor"),
         },
         Step {
-            name: "Pan (Trackpad, zwei Finger)",
+            name: "Pan (trackpad, two fingers)",
             frames: 2,
             inject: |f, at, raw| {
                 if f == 0 {
@@ -305,7 +302,7 @@ fn steps() -> Vec<Step> {
             },
         },
         Step {
-            name: "Orbit (Trackpad, Shift + zwei Finger)",
+            name: "Orbit (trackpad, Shift + two fingers)",
             frames: 2,
             inject: |f, at, raw| {
                 if f == 0 {
@@ -323,7 +320,7 @@ fn steps() -> Vec<Step> {
             check: |b, a, _| expect_rotated(b, a, true),
         },
         Step {
-            name: "Einpassen (F6, animiert)",
+            name: "Fit (F6, animated)",
             frames: 4,
             inject: |f, at, raw| match f {
                 0 => {
@@ -335,15 +332,15 @@ fn steps() -> Vec<Step> {
             },
             check: |_, a, obs| {
                 expect_settled(obs)?;
-                let bounds = obs.mesh_bounds.ok_or("kein Modell")?;
+                let bounds = obs.mesh_bounds.ok_or("no model")?;
                 let mut expected = *a;
                 expected.fit(bounds, obs.viewport_aspect);
-                expect_close(a.distance, expected.distance, "Distanz")?;
-                expect_vec_close(expected.target.into(), a.target.into(), "Target")
+                expect_close(a.distance, expected.distance, "distance")?;
+                expect_vec_close(expected.target.into(), a.target.into(), "target")
             },
         },
         Step {
-            name: "ViewCube: OBEN anklicken",
+            name: "ViewCube: click TOP",
             frames: 4,
             inject: |f, at, raw| {
                 if let Some(p) = at.viewcube_top {
@@ -356,12 +353,12 @@ fn steps() -> Vec<Step> {
                 if down > 0.999 {
                     Ok(())
                 } else {
-                    Err(format!("Blickrichtung {} statt −Z", a.forward()))
+                    Err(format!("view direction {} instead of −Z", a.forward()))
                 }
             },
         },
         Step {
-            name: "Startansicht (Home)",
+            name: "Home view",
             frames: 4,
             inject: |f, at, raw| {
                 if let Some(p) = at.home {
@@ -375,7 +372,7 @@ fn steps() -> Vec<Step> {
                 if got.dot(want) > 0.999 {
                     Ok(())
                 } else {
-                    Err(format!("Blick von {got} statt {want}"))
+                    Err(format!("view from {got} instead of {want}"))
                 }
             },
         },
@@ -383,10 +380,11 @@ fn steps() -> Vec<Step> {
 }
 
 /// The sketch workflow on top of the navigation steps (SK-QA-05).
+#[expect(clippy::too_many_lines, reason = "predates ADR-0040; split when next changed")]
 fn sketch_steps() -> Vec<Step> {
     vec![
         Step {
-            name: "Skizze anlegen (S, Ebene XY anklicken)",
+            name: "Create sketch (S, click plane XY)",
             frames: 8,
             inject: |f, at, raw| match f {
                 0 => raw.events.push(key(Key::S, true)),
@@ -403,14 +401,14 @@ fn sketch_steps() -> Vec<Step> {
                     Ok(())
                 } else {
                     Err(format!(
-                        "Skizziermodus {} (Ebenenwahl {}), Features {}",
+                        "sketch mode {} (plane picking {}), features {}",
                         obs.sketching, obs.picking_plane, obs.features
                     ))
                 }
             },
         },
         Step {
-            name: "Rechteck zeichnen (R, zwei Klicks)",
+            name: "Draw rectangle (R, two clicks)",
             frames: 10,
             inject: |f, at, raw| match f {
                 0 => raw.events.push(key(Key::R, true)),
@@ -431,24 +429,24 @@ fn sketch_steps() -> Vec<Step> {
                 if obs.sketch_curves == 4 {
                     Ok(())
                 } else {
-                    Err(format!("{} Kurven statt 4", obs.sketch_curves))
+                    Err(format!("{} curves instead of 4", obs.sketch_curves))
                 }
             },
         },
         Step {
-            name: "Profil vom Kernel erkannt",
+            name: "Profile found by the kernel",
             frames: 2,
             inject: |_, _, _| {},
             check: |_, _, obs| {
                 if obs.sketch_profiles == 1 {
                     Ok(())
                 } else {
-                    Err(format!("{} Profile statt 1", obs.sketch_profiles))
+                    Err(format!("{} profiles instead of 1", obs.sketch_profiles))
                 }
             },
         },
         Step {
-            name: "Skizze beenden (Esc, Enter)",
+            name: "Finish sketch (Esc, Enter)",
             frames: 5,
             inject: |f, _, raw| match f {
                 0 => raw.events.push(key(Key::Escape, true)),
@@ -461,12 +459,12 @@ fn sketch_steps() -> Vec<Step> {
                 if !obs.sketching && obs.features == 1 {
                     Ok(())
                 } else {
-                    Err(format!("Skizziermodus {}, Features {}", obs.sketching, obs.features))
+                    Err(format!("sketch mode {}, features {}", obs.sketching, obs.features))
                 }
             },
         },
         Step {
-            name: "Extrudieren (E, Profil vorgewählt, Enter)",
+            name: "Extrude (E, profile preselected, Enter)",
             frames: 8,
             inject: |f, _, raw| match f {
                 0 => raw.events.push(key(Key::E, true)),
@@ -479,19 +477,19 @@ fn sketch_steps() -> Vec<Step> {
                 if !obs.commanding && obs.features == 2 {
                     Ok(())
                 } else {
-                    Err(format!("Dialog offen {}, Features {}", obs.commanding, obs.features))
+                    Err(format!("dialog open {}, features {}", obs.commanding, obs.features))
                 }
             },
         },
         Step {
-            name: "Körper vom Kernel berechnet",
+            name: "Body computed by the kernel",
             frames: 2,
             inject: |_, _, _| {},
             check: |_, _, obs| {
                 if obs.bodies == 1 {
                     Ok(())
                 } else {
-                    Err(format!("{} Körper statt 1", obs.bodies))
+                    Err(format!("{} bodies instead of 1", obs.bodies))
                 }
             },
         },
@@ -514,7 +512,7 @@ fn left_click(f: u32, p: Pos2, raw: &mut RawInput) {
 }
 
 fn expect_settled(obs: &Observation<'_>) -> Result<(), String> {
-    if obs.animating { Err("Kamera-Animation läuft noch".into()) } else { Ok(()) }
+    if obs.animating { Err("camera animation still running".into()) } else { Ok(()) }
 }
 
 /// Press middle button, move in four steps of (25, 10) pt, release.
@@ -549,8 +547,8 @@ fn expect_rotated(before: &Camera, after: &Camera, should: bool) -> Result<(), S
     let angle = before.rotation.angle_between(after.rotation);
     match (should, angle > 0.05, angle < 1e-4) {
         (true, true, _) | (false, _, true) => Ok(()),
-        (true, ..) => Err(format!("Kamera hat sich nicht gedreht ({angle:.5} rad)")),
-        (false, ..) => Err(format!("Kamera hat sich unerwartet gedreht ({angle:.5} rad)")),
+        (true, ..) => Err(format!("camera did not rotate ({angle:.5} rad)")),
+        (false, ..) => Err(format!("camera rotated unexpectedly ({angle:.5} rad)")),
     }
 }
 
@@ -559,7 +557,7 @@ fn expect_moved(before: &Camera, after: &Camera) -> Result<(), String> {
     if moved > 1e-3 * before.distance {
         Ok(())
     } else {
-        Err(format!("Target hat sich nicht bewegt ({moved:.6} mm)"))
+        Err(format!("target did not move ({moved:.6} mm)"))
     }
 }
 
@@ -567,11 +565,11 @@ fn expect_close(actual: f32, expected: f32, what: &str) -> Result<(), String> {
     if (actual - expected).abs() <= 1e-3 * expected.abs().max(1.0) {
         Ok(())
     } else {
-        Err(format!("{what}: erwartet {expected:.5}, ist {actual:.5}"))
+        Err(format!("{what}: expected {expected:.5}, got {actual:.5}"))
     }
 }
 
 fn expect_vec_close(expected: [f32; 3], actual: [f32; 3], what: &str) -> Result<(), String> {
     let d = (0..3).map(|i| (expected[i] - actual[i]).powi(2)).sum::<f32>().sqrt();
-    if d <= 1e-3 { Ok(()) } else { Err(format!("{what}: erwartet {expected:?}, ist {actual:?}")) }
+    if d <= 1e-3 { Ok(()) } else { Err(format!("{what}: expected {expected:?}, got {actual:?}")) }
 }

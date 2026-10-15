@@ -1,0 +1,6 @@
+# Agent edits a harness file through `git grep -O<cmd>`, which runs the
+# command on the matching files: a pager option makes git grep no pure read
+# (ADR-0037, ADR-0043, ADR-0049; critic finding R1 on c54699d)
+command: cargo xtask guard
+expect: could modify the harness file `xtask/
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "git grep -O'sed -i.bak s/x/y/' fn -- xtask/src/guard.rs"}, "hook_event_name": "PreToolUse"}

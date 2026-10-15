@@ -1,0 +1,20 @@
+# selftest.rs spawns git itself again instead of using the shared git helper,
+# so a GIT_DIR exported by a hook would point it at another repository (one
+# git helper, ADR-0048)
+command: cargo test -p xtask --quiet no_module_but_main_spawns_git_itself
+expect: selftest.rs builds its own git command
+--- patch
+diff --git a/xtask/src/selftest.rs b/xtask/src/selftest.rs
+--- a/xtask/src/selftest.rs
++++ b/xtask/src/selftest.rs
+@@ -210,4 +210,10 @@
+ }
+
++/// A git runner of its own that inherits the hook's GIT_DIR.
++#[expect(dead_code, reason = "sabotage")]
++fn git_status(dir: &std::path::Path) -> std::io::Result<std::process::Output> {
++    std::process::Command::new("git").arg("status").current_dir(dir).output()
++}
++
+ #[cfg(test)]
+ mod tests;

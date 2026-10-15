@@ -1,0 +1,4 @@
+# Agent edits a harness file in place with sed, the -i flag after another flag (ADR-0037)
+command: cargo xtask guard
+expect: could modify the harness file `xtask/`
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "sed -E -i '' s/a/b/ xtask/src/guard.rs"}, "hook_event_name": "PreToolUse"}

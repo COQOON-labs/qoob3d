@@ -1,0 +1,16 @@
+# A crate stops inheriting the workspace lints (ADR-0040)
+command: cargo xtask hygiene
+expect: `[lints] workspace = true` is missing
+--- patch
+diff --git a/crates/qoob3d-render/Cargo.toml b/crates/qoob3d-render/Cargo.toml
+--- a/crates/qoob3d-render/Cargo.toml
++++ b/crates/qoob3d-render/Cargo.toml
+@@ -15,8 +15,5 @@
+ thiserror.workspace = true
+ pollster = "0.4"
+ 
+-[lints]
+-workspace = true
+-
+ [dev-dependencies]
+ png = "0.18"

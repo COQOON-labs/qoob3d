@@ -1,0 +1,5 @@
+# Agent removes a whole harness directory named without a trailing slash
+# (ADR-0037, ADR-0043: a bare harness directory is a harness path)
+command: cargo xtask guard
+expect: could modify the harness file `xtask
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "rm -rf xtask"}, "hook_event_name": "PreToolUse"}

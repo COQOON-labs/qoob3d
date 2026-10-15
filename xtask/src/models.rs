@@ -16,7 +16,7 @@ use std::process::Command;
 use qoob3d_core::document::{CurveKind, FeatureKind, examples};
 use serde_json::Value;
 
-pub fn write(root: &Path) -> Result<(), Vec<String>> {
+pub(crate) fn write(root: &Path) -> Result<(), Vec<String>> {
     let dir = root.join("models");
     std::fs::create_dir_all(&dir).map_err(|e| vec![e.to_string()])?;
     for (name, doc) in examples::all() {
@@ -27,7 +27,7 @@ pub fn write(root: &Path) -> Result<(), Vec<String>> {
     Ok(())
 }
 
-pub fn check(root: &Path) -> Result<(), Vec<String>> {
+pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
     let dir = root.join("models");
     let mut problems = Vec::new();
     let mut kinds = BTreeSet::new();
@@ -43,7 +43,7 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
                 "{name}.qbd differs from examples::{name} – run `cargo xtask models --write`"
             )),
             Err(_) => {
-                problems.push(format!("{name}.qbd is missing – run `cargo xtask models --write`"))
+                problems.push(format!("{name}.qbd is missing – run `cargo xtask models --write`"));
             }
         }
         if !dir.join(format!("{name}.expect.json")).exists() {
@@ -78,7 +78,7 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
     }
 
     // 3. Build every model through the real binary.
-    let binary = root.join("target/debug/qoob3d");
+    let binary = crate::cargo_target(root).join("debug/qoob3d");
     let out_dir = root.join("target/models");
     if let Err(e) = std::fs::create_dir_all(&out_dir) {
         return Err(vec![e.to_string()]);
@@ -185,13 +185,13 @@ fn check_model(binary: &Path, dir: &Path, out: &Path, name: &str) -> Result<(), 
     }
     match run(&["--export", &stl.to_string_lossy()]) {
         Ok(o) if o.status.success() => {
-            let size = std::fs::metadata(&stl).map(|m| m.len()).unwrap_or(0);
+            let size = std::fs::metadata(&stl).map_or(0, |m| m.len());
             if size <= 84 || !(size - 84).is_multiple_of(50) {
                 problems.push(format!("STL has an invalid size ({size} bytes)"));
             }
         }
         Ok(o) => {
-            problems.push(format!("STL export failed: {}", String::from_utf8_lossy(&o.stderr)))
+            problems.push(format!("STL export failed: {}", String::from_utf8_lossy(&o.stderr)));
         }
         Err(e) => problems.extend(e),
     }
@@ -200,9 +200,10 @@ fn check_model(binary: &Path, dir: &Path, out: &Path, name: &str) -> Result<(), 
 
 /// Bambu Studio's CLI (`QOOB3D_BAMBU_STUDIO` or the default macOS location).
 fn bambu_studio() -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("QOOB3D_BAMBU_STUDIO").map(Into::into).unwrap_or_else(|| {
-        std::path::PathBuf::from("/Applications/BambuStudio.app/Contents/MacOS/BambuStudio")
-    });
+    let path = std::env::var_os("QOOB3D_BAMBU_STUDIO").map_or_else(
+        || std::path::PathBuf::from("/Applications/BambuStudio.app/Contents/MacOS/BambuStudio"),
+        Into::into,
+    );
     path.exists().then_some(path)
 }
 

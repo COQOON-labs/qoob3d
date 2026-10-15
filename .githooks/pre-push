@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Local brake before anything leaves the machine (ADR-0037). CI runs the same
+# checks again; this hook only saves a round trip. Installed by `cargo xtask setup`.
+#   1. commit policy for every pushed commit: no AI attribution (ADR-0038),
+#      tests and code in separate commits (ADR-0039), fixtures untouched
+#   2. secret scan of the pushed commits (gitleaks)
+#   3. a critic review of the pushed state, if it changes production code
+#      (ADR-0041); a human skips it with QOOB3D_SKIP_REVIEW=1
+#   4. the full definition of done for the tip of each pushed ref, in a
+#      temporary worktree of exactly that commit: `cargo xtask check-rev` (ADR-0048)
+set -euo pipefail
+export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+cd "$(git rev-parse --show-toplevel)"
+
+remote="$1"
+zero=0000000000000000000000000000000000000000
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue # branch deletion
+  if [ "$remote_sha" = "$zero" ]; then
+    range=("$local_sha" --not "--remotes=$remote")
+    log_opts="$local_sha --not --remotes=$remote"
+  else
+    range=("$remote_sha..$local_sha")
+    log_opts="$remote_sha..$local_sha"
+  fi
+  echo "pre-push: commit policy for $local_ref"
+  cargo xtask commits "${range[@]}"
+  if command -v gitleaks >/dev/null; then
+    gitleaks git --no-banner --redact --log-opts="$log_opts" .
+  else
+    echo "pre-push: gitleaks missing (brew install gitleaks) – secret scan runs only in CI" >&2
+  fi
+  if [ "${QOOB3D_SKIP_REVIEW:-}" = 1 ]; then
+    echo "pre-push: critic review skipped (QOOB3D_SKIP_REVIEW=1)" >&2
+  else
+    cargo xtask review "$local_sha" "${range[@]}"
+  fi
+  cargo xtask check-rev "$local_sha"
+done

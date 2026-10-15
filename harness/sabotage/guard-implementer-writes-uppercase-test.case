@@ -1,0 +1,6 @@
+# The implementer writes a unit test file spelled `tests.RS`, which macOS
+# treats as `tests.rs`: role separation ignores case (ADR-0039; critic
+# finding P2 on 0b27154)
+command: cargo xtask guard
+expect: This agent context already writes production code
+stdin: {"session_id": "selftest", "tool_name": "Write", "tool_input": {"file_path": "crates/qoob3d-core/src/foo/tests.RS", "content": "x"}, "hook_event_name": "PreToolUse", "agent_type": "implementer", "agent_id": "a1"}

@@ -1,0 +1,12 @@
+# A format fixture is modified (ADR-0030)
+command: cargo xtask commits HEAD^..HEAD
+expect: fixture crates/qoob3d-core/tests/fixtures/format_v1.qbd modified/deleted
+--- patch
+diff --git a/crates/qoob3d-core/tests/fixtures/format_v1.qbd b/crates/qoob3d-core/tests/fixtures/format_v1.qbd
+--- a/crates/qoob3d-core/tests/fixtures/format_v1.qbd
++++ b/crates/qoob3d-core/tests/fixtures/format_v1.qbd
+@@ -31,3 +31,4 @@
+     "next_feature_id": 2
+   }
+ }
++

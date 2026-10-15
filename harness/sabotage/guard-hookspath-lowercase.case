@@ -1,0 +1,4 @@
+# git config keys ignore case: core.hookspath switches the hooks off too (ADR-0037)
+command: cargo xtask guard
+expect: bypasses the quality gates
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "git config core.hookspath /dev/null"}, "hook_event_name": "PreToolUse"}

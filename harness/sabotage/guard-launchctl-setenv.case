@@ -1,0 +1,5 @@
+# Agent sets an environment variable for future sessions, even unlocked (ADR-0043)
+command: cargo xtask guard
+expect: `launchctl setenv` changes the environment of future sessions
+env: QOOB3D_HARNESS_UNLOCK=1
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "launchctl setenv FOO 1"}, "hook_event_name": "PreToolUse"}

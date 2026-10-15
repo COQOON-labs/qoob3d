@@ -33,7 +33,7 @@ const ALLOWED_LITERALS: &[&str] = &["QOOB3D", "🏠", "⏮", "⏴", "⏵", "⏭"
 /// Files that are developer-facing (CLI/test output), not UI.
 const NON_UI_FILES: &[&str] = &["cli.rs", "smoke.rs", "headless_render.rs", "main.rs", "i18n.rs"];
 
-pub fn check(root: &Path) -> Result<(), Vec<String>> {
+pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
     let mut problems = Vec::new();
     let locales = root.join(LOCALES);
     let base = keys(&locales.join("en/main.ftl"), &mut problems);
@@ -45,10 +45,10 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
         let code = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
         let other = keys(&dir.join("main.ftl"), &mut problems);
         for missing in base.difference(&other) {
-            problems.push(format!("{code}/main.ftl: Schlüssel `{missing}` fehlt"));
+            problems.push(format!("{code}/main.ftl: key `{missing}` is missing"));
         }
         for extra in other.difference(&base) {
-            problems.push(format!("{code}/main.ftl: Schlüssel `{extra}` gibt es in en nicht"));
+            problems.push(format!("{code}/main.ftl: key `{extra}` does not exist in en"));
         }
     }
 
@@ -64,8 +64,7 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
         let rel = file.strip_prefix(root).unwrap_or(&file).display().to_string();
         let key_only = index >= app_files;
         let ui_file = !key_only && !NON_UI_FILES.iter().any(|f| rel.ends_with(f));
-        let in_tests = text.find("#[cfg(test)]").unwrap_or(text.len());
-        for (no, line) in text[..in_tests].lines().enumerate() {
+        for (no, line) in text.lines().enumerate() {
             if line.trim_start().starts_with("//") {
                 continue;
             }
@@ -75,8 +74,7 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
             }
             for key in keys_here {
                 if !base.contains(&key) {
-                    problems
-                        .push(format!("{rel}:{}: Schlüssel `{key}` nicht in en/main.ftl", no + 1));
+                    problems.push(format!("{rel}:{}: key `{key}` is not in en/main.ftl", no + 1));
                 }
                 used.insert(key);
             }
@@ -86,7 +84,7 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
                         && !ALLOWED_LITERALS.contains(&lit.as_str())
                     {
                         problems.push(format!(
-                            "{rel}:{}: fester UI-Text {lit:?} – über tr(\"…\") übersetzen",
+                            "{rel}:{}: hard-coded UI text {lit:?} – translate via tr(\"…\")",
                             no + 1
                         ));
                     }
@@ -95,7 +93,7 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
         }
     }
     for unused in base.difference(&used) {
-        problems.push(format!("en/main.ftl: Schlüssel `{unused}` wird nirgends benutzt"));
+        problems.push(format!("en/main.ftl: key `{unused}` is not used anywhere"));
     }
 
     if problems.is_empty() { Ok(()) } else { Err(problems) }
@@ -104,7 +102,7 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
 /// Top-level Fluent message ids (`key = …`) of a file.
 fn keys(path: &Path, problems: &mut Vec<String>) -> BTreeSet<String> {
     let Ok(text) = fs::read_to_string(path) else {
-        problems.push(format!("{} fehlt", path.display()));
+        problems.push(format!("{} is missing", path.display()));
         return BTreeSet::new();
     };
     text.lines()
@@ -162,32 +160,11 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             collect_rs(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
+        } else if path.extension().is_some_and(|e| e == "rs") && !path.ends_with("tests.rs") {
             out.push(path);
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn finds_keys_and_literals() {
-        assert_eq!(literals_after(r#"ui.label(tr("nav-grid"))"#, KEY_CALLS), ["nav-grid"]);
-        assert_eq!(literals_after(r#"tr_args("a-b", &[])"#, KEY_CALLS), ["a-b"]);
-        assert!(literals_after(r#"text.push_str("  x")"#, KEY_CALLS).is_empty());
-        assert_eq!(literals_after(r#"ui.button("Fit")"#, WIDGET_CALLS), ["Fit"]);
-        assert_eq!(literals_after(r#"ui.checkbox(&mut x, "Grid")"#, WIDGET_CALLS), ["Grid"]);
-        assert!(literals_after(r#"ui.checkbox(&mut x, tr("g"))"#, WIDGET_CALLS).is_empty());
-    }
-
-    #[test]
-    fn recognises_indirect_keys() {
-        assert_eq!(all_literals(r#"planned(ui, "file-open", "M3")"#), ["file-open", "M3"]);
-        assert!(looks_like_key("file-open"));
-        assert!(
-            !looks_like_key("M3") && !looks_like_key("qoob3d-navbar") && !looks_like_key("doc")
-        );
-    }
-}
+mod tests;

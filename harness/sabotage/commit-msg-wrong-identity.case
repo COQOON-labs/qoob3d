@@ -1,0 +1,7 @@
+# The commit-msg hook stops a commit with another identity (ADR-0044)
+command: cargo xtask commits --message docs/design/theme.md
+expect: is not the project identity
+env: GIT_AUTHOR_NAME=Someone Else
+env: GIT_AUTHOR_EMAIL=someone@example.com
+env: GIT_COMMITTER_NAME=Benjamin Gröner
+env: GIT_COMMITTER_EMAIL=bgroener@coqoon.com

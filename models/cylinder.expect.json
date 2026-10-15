@@ -1,5 +1,5 @@
 {
-  "why": "Zylinder r=10, h=30: V = π·r²·h",
+  "why": "Cylinder r=10, h=30: V = π·r²·h",
   "bodies": 1,
   "volume_mm3": 9424.77796076938,
   "volume_rel_tol": 1e-06,

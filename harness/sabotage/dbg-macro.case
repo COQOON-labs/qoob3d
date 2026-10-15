@@ -1,0 +1,15 @@
+# `dbg!` left in production code (R-27)
+command: cargo clippy -p qoob3d-core --all-targets -- -D warnings
+expect: dbg!
+--- patch
+diff --git a/crates/qoob3d-core/src/profile.rs b/crates/qoob3d-core/src/profile.rs
+--- a/crates/qoob3d-core/src/profile.rs
++++ b/crates/qoob3d-core/src/profile.rs
+@@ -33,3 +33,7 @@
+
+ #[cfg(test)]
+ mod tests;
++
++pub fn leftover() -> u32 {
++    dbg!(42)
++}

@@ -1,0 +1,4 @@
+# Agent writes a harness file and hides the write behind a null redirection, which the guard ignores only for reads (ADR-0037)
+command: cargo xtask guard
+expect: could modify the harness file `xtask/`
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "echo x > xtask/src/guard.rs 2>/dev/null"}, "hook_event_name": "PreToolUse"}

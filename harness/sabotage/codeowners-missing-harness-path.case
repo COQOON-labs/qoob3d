@@ -1,0 +1,15 @@
+# A harness path loses its code owner (ADR-0044)
+command: cargo xtask hygiene
+expect: .github/CODEOWNERS has no owner line for harness path `xtask/`
+--- patch
+diff --git a/.github/CODEOWNERS b/.github/CODEOWNERS
+--- a/.github/CODEOWNERS
++++ b/.github/CODEOWNERS
+@@ -9,7 +9,6 @@
+ /.githooks/ @Ben-Gee
+ /.github/ @Ben-Gee
+ /.cargo/ @Ben-Gee
+-/xtask/ @Ben-Gee
+ /harness/ @Ben-Gee
+ /Cargo.toml @Ben-Gee
+ /clippy.toml @Ben-Gee

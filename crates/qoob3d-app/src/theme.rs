@@ -3,20 +3,20 @@
 use eframe::egui::{self, Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle, Theme};
 
 /// The single accent colour: selection, active tool, sketch, focus.
-pub const ACCENT: Color32 = Color32::from_rgb(0x3d, 0xe0, 0xb0);
-pub const PANEL_BG: Color32 = Color32::from_rgb(0x1d, 0x1f, 0x23);
-pub const PANEL_BG_DARK: Color32 = Color32::from_rgb(0x17, 0x19, 0x1c);
-pub const STROKE: Color32 = Color32::from_rgb(0x2c, 0x30, 0x36);
-pub const TEXT: Color32 = Color32::from_rgb(0xd4, 0xd7, 0xdc);
-pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x8a, 0x90, 0x99);
+pub(crate) const ACCENT: Color32 = Color32::from_rgb(0x3d, 0xe0, 0xb0);
+pub(crate) const PANEL_BG: Color32 = Color32::from_rgb(0x1d, 0x1f, 0x23);
+pub(crate) const PANEL_BG_DARK: Color32 = Color32::from_rgb(0x17, 0x19, 0x1c);
+pub(crate) const STROKE: Color32 = Color32::from_rgb(0x2c, 0x30, 0x36);
+pub(crate) const TEXT: Color32 = Color32::from_rgb(0xd4, 0xd7, 0xdc);
+pub(crate) const TEXT_MUTED: Color32 = Color32::from_rgb(0x8a, 0x90, 0x99);
 /// Construction geometry in sketches: muted amber, dashed (ADR-0027).
-pub const CONSTRUCTION: Color32 = Color32::from_rgb(0xc0, 0x8a, 0x3a);
+pub(crate) const CONSTRUCTION: Color32 = Color32::from_rgb(0xc0, 0x8a, 0x3a);
 /// Errors and open contour ends.
-pub const ERROR: Color32 = Color32::from_rgb(0xe5, 0x53, 0x4b);
+pub(crate) const ERROR: Color32 = Color32::from_rgb(0xe5, 0x53, 0x4b);
 /// Translucent background of overlays inside the viewport.
-pub const OVERLAY_BG: Color32 = Color32::from_rgba_premultiplied(0x1d, 0x1f, 0x23, 0xe6);
+pub(crate) const OVERLAY_BG: Color32 = Color32::from_rgba_premultiplied(0x1d, 0x1f, 0x23, 0xe6);
 
-pub fn apply(ctx: &egui::Context) {
+pub(crate) fn apply(ctx: &egui::Context) {
     ctx.set_theme(egui::ThemePreference::Dark);
     ctx.style_mut_of(Theme::Dark, |style| {
         let v = &mut style.visuals;
@@ -46,7 +46,7 @@ pub fn apply(ctx: &egui::Context) {
         }
 
         // CAD UI: labels are not selectable text, so the cursor stays an
-        // arrow (cursor policy, docs/design/bedienung.md).
+        // arrow (cursor policy, docs/design/controls.md).
         style.interaction.selectable_labels = false;
 
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
@@ -58,6 +58,6 @@ pub fn apply(ctx: &egui::Context) {
 }
 
 /// Small, letter-spaced section caption (Fusion style "SKIZZE", "BROWSER").
-pub fn caption(text: &str) -> egui::RichText {
+pub(crate) fn caption(text: &str) -> egui::RichText {
     egui::RichText::new(text).small().color(TEXT_MUTED)
 }

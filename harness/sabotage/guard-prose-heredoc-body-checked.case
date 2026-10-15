@@ -1,0 +1,21 @@
+# The guard no longer skips heredoc bodies, so a commit message with the
+# subject `xtask: …` or a note naming the harness is denied as a harness write
+# (ADR-0037; critic K-15 on bd0fade: heredoc bodies, comments and prose are no
+# paths)
+command: cargo test -p xtask --quiet harness_words_in_heredocs_comments_and_prose_pass
+expect: harness_words_in_heredocs_comments_and_prose_pass
+--- patch
+diff --git a/xtask/src/guard.rs b/xtask/src/guard.rs
+--- a/xtask/src/guard.rs
++++ b/xtask/src/guard.rs
+@@ -260,9 +260,8 @@
+                 let len = rest.len() - rest.trim_start_matches('<').len();
+                 end = i + len;
+                 if len == 2
+-                    && let Some((len, marker)) = heredoc(rest)
++                    && let Some((len, _)) = heredoc(rest)
+                 {
+-                    markers.push(marker);
+                     end = i + len;
+                 }
+             }

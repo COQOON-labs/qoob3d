@@ -1,0 +1,5 @@
+# Agent edits a format fixture in place through the shell (ADR-0030; critic
+# finding on 06bc870: fixtures hold for shell writes too)
+command: cargo xtask guard
+expect: is a format fixture and immutable
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "sed -i.bak s/1/2/ crates/qoob3d-core/tests/fixtures/format_v1.qbd"}, "hook_event_name": "PreToolUse"}

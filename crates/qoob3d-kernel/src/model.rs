@@ -59,6 +59,19 @@ pub struct RebuildResult {
     pub bodies: Vec<BodyResult>,
     /// Features that failed, with the reason (shown red in the timeline).
     pub errors: Vec<(FeatureId, String)>,
+    pub stats: RebuildStats,
+}
+
+/// What a rebuild had to compute instead of taking it from the hash-chain cache
+/// of ADR-0012 (ADR-0046).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RebuildStats {
+    /// Sketches and solid features evaluated in this rebuild (not taken from the cache).
+    pub computed_features: usize,
+    /// Sketches and solid features taken from the cache.
+    pub cached_features: usize,
+    /// Bodies whose analysis (view mesh, volume, validity) was computed in this rebuild.
+    pub analyzed_bodies: usize,
 }
 
 /// A body for export: name and a finer mesh.
@@ -88,11 +101,20 @@ fn shape(r: Result<UniquePtr<ffi::TopoDS_Shape>, cxx::Exception>) -> Result<Shap
     Ok(Shape(s))
 }
 
+/// View mesh, volume and validity of a body state, computed once and kept with
+/// the body (ADR-0046).
+#[derive(Clone)]
+struct Analysis {
+    mesh: Arc<ShapeMesh>,
+    volume_mm3: f64,
+    valid: bool,
+}
+
 struct Body {
     id: BodyId,
     number: u32,
     shape: Rc<Shape>,
-    mesh: Rc<OnceCell<Result<Arc<ShapeMesh>, KernelError>>>,
+    analysis: Rc<OnceCell<Result<Analysis, KernelError>>>,
 }
 
 impl Clone for Body {
@@ -101,14 +123,14 @@ impl Clone for Body {
             id: self.id,
             number: self.number,
             shape: self.shape.clone(),
-            mesh: self.mesh.clone(),
+            analysis: self.analysis.clone(),
         }
     }
 }
 
 impl Body {
     fn new(id: BodyId, number: u32, shape: Shape) -> Self {
-        Self { id, number, shape: Rc::new(shape), mesh: Rc::new(OnceCell::new()) }
+        Self { id, number, shape: Rc::new(shape), analysis: Rc::new(OnceCell::new()) }
     }
 }
 
@@ -140,19 +162,29 @@ fn hash_of(seed: u64, value: &impl serde::Serialize) -> u64 {
 
 impl Model {
     pub(crate) fn rebuild(&mut self, doc: &Document) -> RebuildResult {
-        let (state, sketches, errors) = self.run(doc);
-        let bodies = state
+        let (state, mut result, used) = self.run(doc);
+        // Keep this and the previous rebuild (cheap undo/redo), drop the rest.
+        // Only here: exports must not change what is retained (ADR-0046).
+        let keep: HashSet<u64> = used.union(&self.previous_keys).copied().collect();
+        self.steps.retain(|k, _| keep.contains(k));
+        self.profiles.retain(|k, _| keep.contains(k));
+        self.previous_keys = used;
+        let analyzed = &mut result.stats.analyzed_bodies;
+        result.bodies = state
             .bodies
             .iter()
             .filter_map(|b| {
-                let mesh = b
-                    .mesh
-                    .get_or_init(|| {
-                        tessellate_raw(b.shape.get(), VIEW_TESSELLATION_TOLERANCE_MM).map(Arc::new)
+                let analysis = b.analysis.get_or_init(|| {
+                    *analyzed += 1;
+                    let shape = b.shape.get();
+                    Ok(Analysis {
+                        mesh: Arc::new(tessellate_raw(shape, VIEW_TESSELLATION_TOLERANCE_MM)?),
+                        volume_mm3: occ(ffi::qoob3d_volume(shape)).unwrap_or(f64::NAN),
+                        valid: occ(ffi::qoob3d_is_valid(shape)).unwrap_or(false),
                     })
-                    .clone();
-                let mesh = match mesh {
-                    Ok(m) => m,
+                });
+                let analysis = match analysis {
+                    Ok(a) => a.clone(),
                     Err(err) => {
                         tracing::error!(%err, "body tessellation failed");
                         return None;
@@ -161,13 +193,13 @@ impl Model {
                 Some(BodyResult {
                     id: b.id,
                     number: b.number,
-                    mesh,
-                    volume_mm3: occ(ffi::qoob3d_volume(b.shape.get())).unwrap_or(f64::NAN),
-                    valid: occ(ffi::qoob3d_is_valid(b.shape.get())).unwrap_or(false),
+                    mesh: analysis.mesh,
+                    volume_mm3: analysis.volume_mm3,
+                    valid: analysis.valid,
                 })
             })
             .collect();
-        RebuildResult { sketches, bodies, errors }
+        result
     }
 
     pub(crate) fn export(
@@ -186,11 +218,12 @@ impl Model {
             .collect()
     }
 
-    #[allow(clippy::type_complexity)] // internal tuple, one caller pattern
-    fn run(&mut self, doc: &Document) -> (Rc<State>, Vec<SketchResult>, Vec<(FeatureId, String)>) {
+    /// Runs the features; the result has no bodies yet (see [`Self::rebuild`]).
+    /// Also returns the cache keys used.
+    fn run(&mut self, doc: &Document) -> (Rc<State>, RebuildResult, HashSet<u64>) {
         let mut state = Rc::new(State { bodies: Vec::new(), next_number: 1 });
-        let mut sketches = Vec::new();
-        let mut errors = Vec::new();
+        let mut result = RebuildResult::default();
+        let (mut evaluated, mut computed) = (0, 0);
         let mut used = HashSet::new();
         let mut chain = 0u64;
         for f in &doc.features {
@@ -200,36 +233,43 @@ impl Model {
             }
             match &f.kind {
                 FeatureKind::Sketch(s) => {
+                    evaluated += 1;
                     let key = hash_of(0, s);
                     used.insert(key);
-                    let profiles =
-                        self.profiles.entry(key).or_insert_with(|| sketch_profiles(s)).clone();
+                    let profiles = self
+                        .profiles
+                        .entry(key)
+                        .or_insert_with(|| {
+                            computed += 1;
+                            sketch_profiles(s)
+                        })
+                        .clone();
                     if let Err(err) = &profiles {
-                        errors.push((f.id, err.to_string()));
+                        result.errors.push((f.id, err.to_string()));
                     }
-                    sketches.push(SketchResult { feature: f.id, profiles });
+                    result.sketches.push(SketchResult { feature: f.id, profiles });
                 }
                 FeatureKind::Plane(_) => {}
                 _ => {
+                    evaluated += 1;
                     used.insert(chain);
-                    let step =
-                        self.steps.entry(chain).or_insert_with(|| match apply(doc, f, &state) {
+                    let step = self.steps.entry(chain).or_insert_with(|| {
+                        computed += 1;
+                        match apply(doc, f, &state) {
                             Ok(next) => Step { state: Rc::new(next), error: None },
                             Err(err) => Step { state: state.clone(), error: Some(err) },
-                        });
+                        }
+                    });
                     state = step.state.clone();
                     if let Some(err) = &step.error {
-                        errors.push((f.id, err.clone()));
+                        result.errors.push((f.id, err.clone()));
                     }
                 }
             }
         }
-        // Keep this and the previous rebuild (cheap undo/redo), drop the rest.
-        let keep: HashSet<u64> = used.union(&self.previous_keys).copied().collect();
-        self.steps.retain(|k, _| keep.contains(k));
-        self.profiles.retain(|k, _| keep.contains(k));
-        self.previous_keys = used;
-        (state, sketches, errors)
+        result.stats.computed_features = computed;
+        result.stats.cached_features = evaluated - computed;
+        (state, result, used)
     }
 }
 
