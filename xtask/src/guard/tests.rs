@@ -4538,3 +4538,53 @@ fn split_terminators_under_quoted_markers_stay_data() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// A kept heredoc body removes no prose (critic finding H1 on 6c7c6da, a
+// regression against bd0fade; decided by the user 2026-10-15): when a heredoc
+// body is kept as shell text, the guard walked through it with quote and
+// comment tracking, so an odd `'` or `"` in the body shifted the quote state
+// and a later real command was dropped as a comment. Fail closed: if any
+// heredoc in the command keeps its body, or a heredoc has no terminator, the
+// guard removes no prose at all (no comments, no other heredoc bodies) and
+// checks the whole command text.
+// ---------------------------------------------------------------------------
+
+/// Commands with a kept or unterminated heredoc whose body has an odd quote,
+/// followed by a real command after a quoted `#`, with the directory the
+/// denial must name. Must be denied in a locked session.
+const KEPT_HEREDOC_BODIES_WITH_ODD_QUOTES: &[(&str, &str)] = &[
+    // The finding's examples (H1 on 6c7c6da, user decision 2026-10-15).
+    ("cat <<EOF\nit's\nEOF\necho ' #' ; rm -rf xtask", "xtask"),
+    ("cat <<EOF\nsay \"hi\nEOF\necho \" #\" ; rm -rf xtask", "xtask"),
+    ("cat <<EOF | wc -l\nit's\nEOF\necho ' #' ; rm -rf harness", "harness"),
+    ("cat <<A <<B\nit's\nA\nB\necho ' #' ; mv xtask /tmp/x", "xtask"),
+    ("cat > /tmp/n <<EOF\nit's\nEOF\necho ' #' ; rm -rf .github", ".github"),
+    ("cat <<EOF\nit's\necho ' #' ; rm -rf xtask", "xtask"),
+    // Derived: a quoted marker on a form that is no message (`cat` without a
+    // file), `<<-`, an interpreter-fed body, a safe form before a kept one,
+    // and a comment after a kept heredoc, which is no longer removed.
+    ("cat <<'EOF'\nit's\nEOF\necho ' #' ; rm -rf xtask", "xtask"),
+    ("cat <<-EOF\n\tit's\n\tEOF\necho ' #' ; rm -rf .claude", ".claude"),
+    ("bash <<EOF\necho it's\nEOF\necho ' #' ; rm -rf xtask", "xtask"),
+    ("cat > /tmp/a <<'EOF'\nnotes\nEOF\ncat <<EOF\nit's\nEOF\necho ' #' ; rm -rf xtask", "xtask"),
+    ("cat <<EOF\nnotes\nEOF\necho done # harness", "harness"),
+];
+
+// ADR-0037/ADR-0043/ADR-0049 (critic finding H1 on 6c7c6da): a kept or
+// unterminated heredoc makes the guard check the whole command text. Locked
+// denied naming the directory, unlocked allowed; spec root and a temp repo.
+// The must-pass side is every existing table: message forms standing alone
+// and comments in commands without a kept heredoc keep passing.
+#[test]
+fn kept_heredoc_bodies_remove_no_prose() {
+    let root = repo("kept_heredoc_odd_quotes");
+    let unlocked = session(true, &unused_home());
+    for (command, dir) in KEPT_HEREDOC_BODIES_WITH_ODD_QUOTES {
+        let needle = format!("{MSG_HARNESS_SHELL}{dir}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
