@@ -1,0 +1,7 @@
+# Agent deletes the fixtures through a zsh glob qualifier on a listing: an
+# unquoted `(` right after a word character can run code, so the command is
+# no pure read and its words are checked (ADR-0030; critic finding U1 on
+# 3e613cc)
+command: cargo xtask guard
+expect: is a format fixture and immutable
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "setopt bareglobqual; ls crates/qoob3d-core/tests/fixtures/*(e:'rm -f $REPLY':)"}, "hook_event_name": "PreToolUse"}

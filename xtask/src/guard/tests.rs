@@ -6248,3 +6248,117 @@ fn globbed_source_paths_hold_tests_and_code() {
     }
     fs::remove_dir_all(&root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// zsh glob qualifiers and assignments (critic findings U1 and U2 on 3e613cc,
+// blocker and major; user decision 2026-10-15, B):
+// - U1: an unquoted `(` directly after a word character (a zsh glob
+//   qualifier or glob group: `*(e:'…':)`, `*.rs(e:…:)`, `x(#qe:…:)`) can
+//   run code, so the command is no pure read and all its words count as
+//   paths for the fixture and role checks. `$(` and a quoted `f(x)` are no
+//   qualifier.
+// - U2: the words of assignment-only commands (`d=…; rm -rf $d`) stay in the
+//   path lists when the command is no pure read.
+// ---------------------------------------------------------------------------
+
+const QUALIFIER_ON_FIXTURES: &str =
+    "setopt bareglobqual; ls crates/qoob3d-core/tests/fixtures/*(e:'rm -f $REPLY':)";
+
+// ADR-0030/ADR-0039 (critic finding U1 on 3e613cc): a zsh glob qualifier
+// makes a listing no pure read; its words go through the fixture and role
+// checks.
+#[test]
+fn glob_qualifiers_are_no_pure_reads() {
+    let root = repo("glob_qualifiers");
+    let s = locked();
+    for (id, kind) in
+        [(None, None), (Some("i1"), Some("implementer")), (Some("t1"), Some("test-author"))]
+    {
+        for command in [
+            // The finding's examples.
+            QUALIFIER_ON_FIXTURES,
+            "ls crates/qoob3d-core/tests/fixtures/*(e:'rm -f $REPLY':)",
+            // Derived: the `#q` qualifier form, a qualifier after a name.
+            "ls crates/qoob3d-core/tests/fixtures/x(#qe:'rm -f $REPLY':)",
+            "ls crates/qoob3d-core/tests/fixtures/v1.qbd(e:'rm -f $REPLY':)",
+        ] {
+            assert_denied(
+                pre_tool_use(&root, &s, &bash_as(command, id, kind)),
+                &[MSG_FIXTURE],
+                &format!("{kind:?}: {command}"),
+            );
+        }
+        // The finding's passes: no glued paren, `$(`, a quoted `f(x)`.
+        for command in [
+            "ls crates/qoob3d-core/src",
+            "echo $(ls crates)",
+            "grep -n \"fn f(x)\" crates/qoob3d-core/src/lib.rs",
+        ] {
+            assert_eq!(
+                pre_tool_use(&root, &s, &bash_as(command, id, kind)),
+                Ok(()),
+                "{kind:?}: {command}"
+            );
+        }
+    }
+    let author = bash_as(
+        "setopt bareglobqual; ls crates/qoob3d-core/src/*.rs(e:'perl -pi -e s/a/b/ $REPLY':)",
+        Some("t1"),
+        Some("test-author"),
+    );
+    assert_denied(pre_tool_use(&root, &s, &author), &[MSG_ROLE_TESTS], "test-author qualifier");
+    // Derived: a qualifier on a harness directory, locked (denied already
+    // before U1, a regression guard).
+    let harness = "setopt bareglobqual; ls harness/*(e:'rm -f $REPLY':)";
+    assert_denied(spec_shell(false, harness), &[&format!("{MSG_HARNESS_SHELL}harness")], harness);
+    assert_denied(
+        check_shell(&root, &locked(), harness),
+        &[&format!("{MSG_HARNESS_SHELL}harness")],
+        harness,
+    );
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0030/ADR-0039 (critic finding U2 on 3e613cc): assignments stay in the
+// path lists of a command that is no pure read.
+#[test]
+fn assignments_count_as_paths() {
+    let root = repo("assignment_paths");
+    let s = locked();
+    for (id, kind) in
+        [(None, None), (Some("i1"), Some("implementer")), (Some("t1"), Some("test-author"))]
+    {
+        for command in [
+            // The finding's examples.
+            "d=crates/qoob3d-core/tests/fixtures; rm -rf $d",
+            "p=crates/qoob3d-core/tests; rm -rf $p/fixtures",
+            // Derived: braces around the variable, an `export` (denied
+            // already before U2, a regression guard).
+            "d=crates/qoob3d-core/tests/fixtures; rm -rf ${d}/v1.qbd",
+            "export d=crates/qoob3d-core/tests/fixtures; rm -rf \"$d\"",
+        ] {
+            assert_denied(
+                pre_tool_use(&root, &s, &bash_as(command, id, kind)),
+                &[MSG_FIXTURE],
+                &format!("{kind:?}: {command}"),
+            );
+        }
+    }
+    let implementer =
+        bash_as("t=crates/qoob3d-core/tests/x.rs; cp /tmp/y $t", Some("i1"), Some("implementer"));
+    assert_denied(pre_tool_use(&root, &s, &implementer), &[MSG_ROLE_CODE], "implementer");
+    // Derived: the test author and a code path.
+    let author =
+        bash_as("c=crates/qoob3d-core/src/mesh.rs; cp /tmp/y $c", Some("t1"), Some("test-author"));
+    assert_denied(pre_tool_use(&root, &s, &author), &[MSG_ROLE_TESTS], "test-author");
+    // The finding's passes: a pure-read assignment, a write outside the repo.
+    for command in ["x=$(sed -n 1p Cargo.toml)", "d=/tmp/out; cargo test > $d"] {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(
+            pre_tool_use(&root, &s, &bash_as(command, Some("m8"), None)),
+            Ok(()),
+            "{command}"
+        );
+    }
+    fs::remove_dir_all(&root).unwrap();
+}

@@ -1,0 +1,6 @@
+# Agent names the fixture directory only in an assignment and removes it
+# through the variable: assignments stay in the path lists of a command that
+# is no pure read (ADR-0030; critic finding U2 on 3e613cc)
+command: cargo xtask guard
+expect: is a format fixture and immutable
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "d=crates/qoob3d-core/tests/fixtures; rm -rf $d"}, "hook_event_name": "PreToolUse"}
