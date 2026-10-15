@@ -1,6 +1,6 @@
 ---
 id: ADR-0049
-title: The guard checks shell commands as text at three anchors; heredoc bodies are data unless an interpreter reads them
+title: The guard checks shell commands as text at three anchors; heredoc bodies are data only in exact message forms
 status: accepted
 date: 2026-10-14
 crates: [xtask]

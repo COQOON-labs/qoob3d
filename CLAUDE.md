@@ -31,6 +31,7 @@ cargo xtask check --fast                    # without smoke + deny (runs automat
 cargo xtask setup                           # once: activate Git hooks from .githooks/ (ADR-0037)
 cargo xtask selftest                        # harness must reject every sabotage in harness/sabotage/
 cargo xtask commits main..HEAD              # commit policy: identity, no AI attribution, tests/code separate
+cargo xtask check-rev <rev>                 # full check of a commit in a temporary worktree (pre-push, ADR-0048)
 cargo xtask docs [--fix]                    # docs lint; --fix regenerates the ADR index
 cargo xtask i18n                            # translations complete, no hard-coded UI texts
 cargo xtask printers <orca>/resources/profiles  # regenerate the printer database (ADR-0021)

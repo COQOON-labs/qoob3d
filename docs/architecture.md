@@ -118,5 +118,5 @@ flowchart TD
 | CLI (`--render`, `--smoke-test`) | `crates/qoob3d-app/src/{cli,headless_render,smoke}.rs` |
 | UI tests, screenshots | `crates/qoob3d-app/tests/ui.rs` |
 | Checks, docs lint, architecture rules, screenshots | `xtask/src/` |
-| AI harness: guard, commit policy, hygiene, rule register, critic protocol, self-test | `xtask/src/{guard,commits,hygiene,rules,review,selftest,paths}.rs`, `harness/`, `.claude/`, `.githooks/`, `.github/workflows/` – overview `docs/harness.md` |
+| AI harness: guard, commit policy, hygiene, rule register, critic protocol, self-test | `xtask/src/{guard,commits,hygiene,rules,review,selftest,paths,worktree}.rs`, `harness/`, `.claude/`, `.githooks/`, `.github/workflows/` – overview `docs/harness.md` |
 | Unit tests of a module | `<module>/tests.rs` next to `<module>.rs` (ADR-0039) |
