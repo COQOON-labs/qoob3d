@@ -174,11 +174,13 @@ fn fixtures_may_only_be_added() {
     assert_eq!(check_files(&files(&[("M", fixture)]), excused).len(), 1);
 }
 
-// ADR-0039: `git diff-tree --name-status` lines become (status, path) pairs,
-// a rename contributes both paths.
+// ADR-0039: the NUL-separated listing of `git diff-tree --name-status -z`
+// becomes (status, path) pairs, a rename contributes both paths, a path may
+// hold a tab or newline (since the critic finding on 06bc870 the parser reads
+// only the `-z` form).
 #[test]
 fn parses_name_status() {
-    let listing = "M\tcrates/a.rs\nA\tdocs/b.md\nD\tc.rs\nR100\told.rs\tnew.rs\n";
+    let listing = "M\0crates/a.rs\0A\0docs/b.md\0D\0c.rs\0R100\0old.rs\0new.rs\0";
     assert_eq!(
         parse_name_status(listing),
         files(&[
@@ -188,6 +190,10 @@ fn parses_name_status() {
             ("R100", "old.rs"),
             ("R100", "new.rs")
         ])
+    );
+    assert_eq!(
+        parse_name_status("M\0crates/a\tb.rs\0A\0docs/x\ny.md\0"),
+        files(&[("M", "crates/a\tb.rs"), ("A", "docs/x\ny.md")])
     );
     assert!(parse_name_status("").is_empty());
 }
@@ -206,7 +212,7 @@ fn fixtures_are_matched_ignoring_case() {
 // ADR-0030/ADR-0039: renaming a fixture away is caught via both parsed paths.
 #[test]
 fn renamed_fixture_is_rejected() {
-    let listing = "R100\tcrates/qoob3d-core/tests/fixtures/v1.qbd\tdocs/v1.qbd\n";
+    let listing = "R100\0crates/qoob3d-core/tests/fixtures/v1.qbd\0docs/v1.qbd\0";
     assert_eq!(check_files(&parse_name_status(listing), "Move").len(), 1);
 }
 

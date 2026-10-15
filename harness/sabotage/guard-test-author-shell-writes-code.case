@@ -1,0 +1,5 @@
+# The test author changes production code through the shell (ADR-0039;
+# critic finding on 06bc870: roles hold for shell writes too)
+command: cargo xtask guard
+expect: This agent context already writes tests
+stdin: {"session_id": "selftest", "tool_name": "Bash", "tool_input": {"command": "perl -pi -e s/x/y/ crates/qoob3d-core/src/mesh.rs"}, "hook_event_name": "PreToolUse", "agent_type": "test-author", "agent_id": "a1"}

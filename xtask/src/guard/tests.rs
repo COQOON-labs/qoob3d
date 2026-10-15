@@ -170,12 +170,19 @@ const HARMLESS: &[&str] = &[
     // on 7ce6580): the `i` in `s/i/j/` is the script, not a flag. A ruby
     // script file is no inline code; `ruby -e … xtask/src/guard.rs` moved to
     // INLINE_CODE_WRITES (inline-code interpreters are potential writers).
+    // ruby, awk and gawk on harness files are no pure reads since Q2; they
+    // read `docs/x.md` here, their harness variants are in
+    // DENIED_SINCE_PURE_READS.
     "sed -n 1,5p xtask/src/guard.rs",
     "sed -e s/i/j/ xtask/src/guard.rs",
     "sed -E 's/x/y/' Cargo.toml",
-    "ruby prog.rb xtask/src/guard.rs",
-    "awk '{print}' Cargo.toml",
-    "gawk -f prog.awk Cargo.toml",
+    "ruby prog.rb docs/x.md",
+    "awk '{print}' docs/x.md",
+    "gawk -f prog.awk docs/x.md",
+    // Hooks run by git itself are unaffected by Q2 (user decision
+    // 2026-10-15).
+    "git push origin HEAD",
+    "git commit -m \"fix\"",
 ];
 
 // ADR-0037/ADR-0043 (spec §1.3): commands that bypass a gate or name the
@@ -1893,16 +1900,21 @@ fn r5_dd_and_perl_in_place_write_harness_files() {
 fn r5_add_commands_and_perl_without_in_place_pass() {
     let root = repo("r5_pass");
     for command in [
-        // The spec's examples.
-        "git add xtask/src/main.rs",
+        // The spec's examples. `git add <harness path>` and `cargo add
+        // --path xtask` are no pure reads since Q2 and moved to
+        // DENIED_SINCE_PURE_READS; `dd` inside other words is checked next to
+        // non-harness paths and with `git add -u`/`-A`.
         "cargo add serde",
-        // `dd` inside other words, next to harness paths.
-        "git add -p Cargo.toml .github/workflows/ci.yml",
-        "cargo add --path xtask serde",
+        "git add docs/x.md",
+        "git add -p docs/x.md crates/qoob3d-core/Cargo.toml",
+        "cargo add --path crates/qoob3d-core serde",
+        "git add -u",
+        "git add -A",
         // `perl` that only reads. Was `perl -ne print Cargo.toml`, which is
         // inline code (`-e` in the flag group) and now a potential writer
-        // (INLINE_CODE_WRITES); a script file keeps the R5 intent.
-        "perl -n prog.pl Cargo.toml",
+        // (INLINE_CODE_WRITES); a script file keeps the R5 intent (on
+        // `docs/x.md` since Q2).
+        "perl -n prog.pl docs/x.md",
     ] {
         assert_eq!(spec_shell(false, command), Ok(()), "{command}");
         assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command}");
@@ -2087,12 +2099,14 @@ fn s3_perl_by_path_with_in_place_flag_writes_harness_files() {
 fn s3_perl_module_and_include_flags_are_not_in_place() {
     let root = repo("s3_perl_pass");
     for command in [
-        // The spec's examples, with a script file instead of `-e`.
-        "perl -Mstrict -n prog.pl Cargo.toml",
-        "perl -Ilib -n prog.pl Cargo.toml",
+        // The spec's examples, with a script file instead of `-e`, on
+        // `docs/x.md` since Q2 (the harness variants moved to
+        // DENIED_SINCE_PURE_READS).
+        "perl -Mstrict -n prog.pl docs/x.md",
+        "perl -Ilib -n prog.pl docs/x.md",
         // By path, a module name with `i`, a directory with `i`.
-        "/usr/bin/perl -Mwarnings -n prog.pl Cargo.toml",
-        "perl -I/tmp/lib -Mstrict -n prog.pl xtask/src/main.rs",
+        "/usr/bin/perl -Mwarnings -n prog.pl docs/x.md",
+        "perl -I/tmp/lib -Mstrict -n prog.pl docs/x.md",
     ] {
         assert_eq!(spec_shell(false, command), Ok(()), "{command}");
         assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command}");
@@ -2145,12 +2159,13 @@ fn s4_commands_without_a_write_trigger_pass() {
         // The spec's examples.
         "cargo install cargo-deny",
         "tar czf /tmp/x.tgz --exclude=target .",
-        // Harness paths with a non-writing use of the new programs.
-        "tar czf /tmp/x.tgz --exclude=target xtask/",
-        "tar tzf /tmp/x.tgz xtask/src/main.rs",
-        "curl -sS https://example.com/x | grep -c Cargo.toml",
-        "git config --get user.name && cat Cargo.toml",
-        "brew reinstall cmake && cat Cargo.toml",
+        // A non-writing use of the new programs, on non-harness paths since
+        // Q2 (the harness variants moved to DENIED_SINCE_PURE_READS).
+        "tar czf /tmp/x.tgz --exclude=target docs/",
+        "tar tzf /tmp/x.tgz docs/x.md",
+        "curl -sS https://example.com/x | grep -c docs/x.md",
+        "git config --get user.name && cat docs/x.md",
+        "brew reinstall cmake && cat docs/x.md",
     ] {
         assert_eq!(spec_shell(false, command), Ok(()), "{command}");
         assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command}");
@@ -2511,13 +2526,15 @@ fn k10_sed_ruby_and_awk_without_in_place_pass() {
         "grep -i sed Cargo.toml",
         // Were `ruby … -e 'puts 1' <harness file>`: inline code is now a
         // potential writer (INLINE_CODE_WRITES); a script file keeps the
-        // intent that `-r<lib>`/`-I<dir>` are no in-place flags.
-        "ruby -rdigest prog.rb Cargo.toml",
-        "ruby -Ilib prog.rb xtask/src/main.rs",
-        "/usr/bin/ruby prog.rb Cargo.toml",
-        "awk -F: '{print $1}' Cargo.toml",
-        "awk -v i=1 '{print i}' clippy.toml",
-        "gawk -e 'BEGIN { n = 0 }' -f prog.awk xtask/src/main.rs",
+        // intent that `-r<lib>`/`-I<dir>` are no in-place flags. On
+        // `docs/x.md` since Q2 (the harness variants moved to
+        // DENIED_SINCE_PURE_READS).
+        "ruby -rdigest prog.rb docs/x.md",
+        "ruby -Ilib prog.rb docs/x.md",
+        "/usr/bin/ruby prog.rb docs/x.md",
+        "awk -F: '{print $1}' docs/x.md",
+        "awk -v i=1 '{print i}' docs/x.md",
+        "gawk -e 'BEGIN { n = 0 }' -f prog.awk docs/x.md",
     ] {
         assert_eq!(spec_shell(false, command), Ok(()), "{command}");
         assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command}");
@@ -2615,18 +2632,23 @@ const INLINE_CODE_HARMLESS: &[&str] = &[
     "python3 -c 'print(1)'",
     "deno eval 'console.log(1)'",
     "perl -e 'print 1' /tmp/notes.txt",
-    "sh .githooks/pre-push",
-    "bash -n .githooks/pre-push",
-    "bash -e .githooks/pre-push",
-    "zsh -x xtask/run.sh",
-    "node xtask/tool.js",
-    "node -c .github/scripts/check.js",
-    "node --check .github/scripts/check.js",
-    "ruby -c harness/tool.rb",
-    "ruby -w prog.rb Cargo.toml",
-    "perl -c xtask/tool.pl",
-    "perl -I/usr/share/perl5 -n prog.pl Cargo.toml",
-    "deno run .github/scripts/x.ts",
+    // Script files outside the harness: their flags (`-n`, `-e`, `-x`, `-c`,
+    // `--check`, `-w`, `-I`) are no inline code. The harness script variants
+    // that stood here moved to DENIED_SINCE_PURE_READS (Q2: running a
+    // harness script can write anything).
+    "sh /tmp/hooks/pre-push",
+    "bash -n /tmp/hooks/pre-push",
+    "bash -e /tmp/hooks/pre-push",
+    "zsh -x /tmp/run.sh",
+    "node /tmp/tool.js",
+    "node -c /tmp/check.js",
+    "node --check /tmp/check.js",
+    "ruby -c /tmp/tool.rb",
+    "ruby -w prog.rb docs/x.md",
+    "perl -c /tmp/tool.pl",
+    "perl -I/usr/share/perl5 -n prog.pl docs/x.md",
+    "deno run /tmp/x.ts",
+    // shellcheck only reads, also harness files (Q2 read list).
     "shellcheck -s bash .githooks/pre-push",
     "grep -c node Cargo.toml",
 ];
@@ -3080,9 +3102,11 @@ fn long_option_abbreviations_match_alike_for_every_program() {
     }
     for command in [
         "sed -- s/a/b/ Cargo.toml",
-        "node -- xtask/tool.js",
+        // Non-harness paths since Q2 (`node -- xtask/tool.js` and `tar --
+        // Cargo.toml` moved to DENIED_SINCE_PURE_READS).
+        "node -- /tmp/tool.js",
         "curl -- https://example.com/Cargo.toml",
-        "tar -- Cargo.toml",
+        "tar -- docs/x.md",
     ] {
         assert_eq!(spec_shell(false, command), Ok(()), "{command}");
         assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command}");
@@ -4738,7 +4762,9 @@ const COMMENTS_THAT_NEED_NO_REMOVAL: &[&str] = &[
     // The task's examples (user decision 2026-10-15).
     "cargo test > /tmp/log # check",
     "ls # harness",
-    "cargo xtask check # harness",
+    // Was `cargo xtask check # harness`: since Q2 cargo next to a harness
+    // word is no pure read (user decision 2026-10-15).
+    "cargo xtask check # check",
     // Moved from COMMENTS_AFTER_WHITESPACE (still must-pass).
     "# note\necho done",
     // Derived: git without a write, a writing command with a harmless
@@ -5237,6 +5263,334 @@ fn roles_classify_paths_ignoring_case() {
             &format!("test-author on {code}"),
         );
         assert_eq!(pre_tool_use(&root, &s, &implementer(code)), Ok(()), "implementer on {code}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// An allowlist of pure reads for harness paths (critic finding on 06bc870,
+// lowered to minor: the writer denylist misses ed, ex, vim -es, git
+// log/diff --output, git archive -o, cmake -E, unzip, php -r; user decision
+// 2026-10-15, Q2): a shell command that names a harness path (as before:
+// the three anchors, bare directories, with the exceptions `cargo xtask`,
+// `-p/--package xtask`, `xtask:`/`harness,` prose and the bodies of the safe
+// message forms) is allowed in a locked session only if every simple command
+// in it is a pure read: the READ_ONLY programs and `reads_only` cases, `sed`
+// without in-place editing and with a readable, non-writing script, `git`
+// without a global option running `log`, `diff`, `show`, `status`, `blame`,
+// `ls-files`, `grep`, `rev-parse` or `cat-file` without `--output`/`-o`/
+// `--ext-diff`/`--textconv`, `echo`, `printf` and `cd`. Redirections count
+// as before: only `/dev/null` and `2>&1` are harmless. Anything else naming
+// a harness path is denied, on the writer list or not.
+// ---------------------------------------------------------------------------
+
+/// Commands naming a harness path that are no pure read, with the fragment
+/// the denial must name. Must be denied in a locked session.
+const HARNESS_PATHS_WITHOUT_A_PURE_READ: &[(&str, &str)] = &[
+    // The finding's examples (user decision 2026-10-15, Q2).
+    ("printf ',d\\nw\\n' | ed -s xtask/src/guard.rs", "xtask/"),
+    ("ex -sc \"%d|x\" xtask/src/guard.rs", "xtask/"),
+    ("vim -es -c \"%d\" -c wq harness/rules.md", "harness/"),
+    ("git log -1 --format=%B --output=xtask/src/guard.rs", "xtask/"),
+    ("git -C xtask diff --output=src/guard.rs", "xtask"),
+    ("git archive -o xtask/src/guard.rs HEAD", "xtask/"),
+    ("cmake -E remove_directory xtask", "xtask"),
+    ("cmake -E copy /tmp/x xtask/src/guard.rs", "xtask/"),
+    ("unzip -o a.zip -d xtask", "xtask"),
+    ("php -r 'file_put_contents(\"xtask/src/guard.rs\",\"\")'", "xtask/"),
+    // Derived (named by the task). `srm`, the awk redirection and `cd … &&
+    // rm` were denied already before Q2 (the words `rm ` and `>`; regression
+    // guards).
+    ("trash xtask/src/guard.rs", "xtask/"),
+    ("srm harness/rules.md", "harness/"),
+    ("awk '{print}' xtask/src/guard.rs > /tmp/x", "xtask/"),
+    ("cd xtask && rm -rf src", "xtask"),
+    // Derived: a global option before a read subcommand, the forbidden git
+    // options, a pure read piped into a non-read and a redirection to a file
+    // (these two denied already before Q2, regression guards).
+    ("git -C xtask log", "xtask"),
+    ("git diff --ext-diff -- xtask/src/guard.rs", "xtask/"),
+    ("git log --textconv -p -- harness/rules.md", "harness/"),
+    ("git log --output=/tmp/x -- harness", "harness"),
+    ("cat harness/rules.md | tee /tmp/x", "harness/"),
+    ("grep -rn foo xtask/src > /tmp/hits", "xtask/"),
+];
+
+/// Pure reads of harness paths, and commands that name no harness path.
+/// Must pass in a locked session.
+const PURE_READS_OF_HARNESS_PATHS: &[&str] = &[
+    // The finding's examples (user decision 2026-10-15, Q2).
+    "sed -n 1,10p xtask/src/guard.rs",
+    "grep -rn foo xtask/src",
+    "rg foo harness",
+    "cat harness/rules.md | head",
+    "git log -- harness",
+    "git diff -- xtask/src/guard.rs",
+    "git show HEAD:xtask/src/guard.rs | head",
+    "git status -- xtask",
+    "ls .claude",
+    "wc -l xtask/src/*.rs",
+    "find xtask -name '*.rs'",
+    "cargo xtask check > /tmp/log",
+    "cargo test -p xtask 2>&1 | tee /tmp/log",
+    "cd xtask && ls",
+    "echo xtask",
+    // Derived: the other git read subcommands, printf, a null redirection.
+    "git blame xtask/src/guard.rs",
+    "git ls-files xtask",
+    "git grep foo -- harness",
+    "git cat-file -p HEAD:Cargo.toml",
+    "printf '%s\\n' harness",
+    "cat .claude/settings.json > /dev/null",
+];
+
+// ADR-0037/ADR-0043 (user decision 2026-10-15, Q2): a command naming a
+// harness path passes only as a pure read. Locked denied naming the fragment,
+// unlocked allowed; spec root and a temp repo.
+#[test]
+fn harness_paths_need_a_pure_read() {
+    let root = repo("harness_paths_pure_read");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in HARNESS_PATHS_WITHOUT_A_PURE_READ {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0037 (user decision 2026-10-15, Q2): pure reads of harness paths pass.
+// Locked, spec root and a temp repo.
+#[test]
+fn pure_reads_of_harness_paths_pass() {
+    let root = repo("pure_reads_of_harness_paths");
+    for command in PURE_READS_OF_HARNESS_PATHS {
+        assert_eq!(spec_shell(false, command), Ok(()), "{command:?}");
+        assert_eq!(check_shell(&root, &locked(), command), Ok(()), "{command:?}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Roles and fixtures for shell writes (critic finding on 06bc870, major; user
+// decision 2026-10-15, Q1): a shell command that is no pure read and names
+// source-tree paths gets the role rule of Edit/Write. Each named path is
+// classified with `paths::kind`; the command is denied if a path conflicts
+// with the agent type (implementer: no test paths, test author: no code
+// paths) or with the bound role of the context (the ledger; the command
+// binds like Edit/Write). A named fixture path is denied with the ADR-0030
+// message, for every agent and also in an unlocked session.
+// ---------------------------------------------------------------------------
+
+/// The hook input of a Bash call by the context `agent_id` (None: the main
+/// context) of type `agent_type`.
+fn bash_as(command: &str, agent_id: Option<&str>, agent_type: Option<&str>) -> Value {
+    let mut input = bash(command);
+    if let Some(id) = agent_id {
+        input["agent_id"] = json!(id);
+    }
+    if let Some(kind) = agent_type {
+        input["agent_type"] = json!(kind);
+    }
+    input
+}
+
+const MSG_ROLE_CODE: &str = "This agent context already writes production code";
+const MSG_ROLE_TESTS: &str = "This agent context already writes tests";
+const MSG_FIXTURE: &str = "is a format fixture and immutable (ADR-0030)";
+
+// ADR-0039 (user decision 2026-10-15, Q1): role agents may not write the
+// other kind of file through the shell; reads pass. Locked and unlocked (the
+// unlock lifts only harness paths).
+#[test]
+fn shell_writes_respect_agent_roles() {
+    let root = repo("shell_roles");
+    let implementer = |c: &str| bash_as(c, Some("i1"), Some("implementer"));
+    let author = |c: &str| bash_as(c, Some("t1"), Some("test-author"));
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &unused_home());
+        for command in [
+            // The finding's examples.
+            "sed -i.bak s/assert/dbg/ crates/qoob3d-core/src/mesh/tests.rs",
+            "cp /tmp/x crates/qoob3d-core/tests/features.rs",
+            // Derived: rm, a git rewrite, a redirection.
+            "rm crates/qoob3d-app/tests/modeling.rs",
+            "git stash -- crates/qoob3d-core/src/mesh/tests.rs",
+            "echo x > crates/qoob3d-core/tests/expr.rs",
+        ] {
+            assert_denied(
+                pre_tool_use(&root, &s, &implementer(command)),
+                &[MSG_ROLE_CODE, "`test-author`"],
+                &format!("implementer: {command} (unlocked: {unlocked})"),
+            );
+        }
+        for command in [
+            // The finding's example.
+            "perl -pi -e s/x/y/ crates/qoob3d-core/src/mesh.rs",
+            // Derived: a redirection, a git rewrite of the C++ header.
+            "echo x > crates/qoob3d-core/src/lib.rs",
+            "git checkout -- crates/qoob3d-kernel/cpp/qoob3d_occt.hxx",
+        ] {
+            assert_denied(
+                pre_tool_use(&root, &s, &author(command)),
+                &[MSG_ROLE_TESTS, "`implementer`"],
+                &format!("test-author: {command} (unlocked: {unlocked})"),
+            );
+        }
+        // The finding's reads, and each role writing its own kind.
+        for (input, what) in [
+            (implementer("grep -n assert crates/qoob3d-core/src/mesh/tests.rs"), "grep"),
+            (implementer("sed -n 1,20p crates/qoob3d-core/tests/features.rs"), "sed -n"),
+            (author("cat crates/qoob3d-core/src/mesh.rs | head"), "cat | head"),
+            (implementer("cargo test -p qoob3d-core 2>&1 | tail"), "cargo test"),
+            (implementer("sed -i.bak s/a/b/ crates/qoob3d-core/src/mesh.rs"), "own code"),
+            (author("sed -i.bak s/a/b/ crates/qoob3d-core/tests/features.rs"), "own test"),
+        ] {
+            assert_eq!(pre_tool_use(&root, &s, &input), Ok(()), "{what} (unlocked: {unlocked})");
+        }
+    });
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0039 (user decision 2026-10-15, Q1): a context without an agent type
+// is bound by its first write, through the shell as through Edit/Write; a
+// pure read binds nothing. A command naming a test and a code path binds the
+// first and conflicts with the second.
+#[test]
+fn shell_writes_bind_the_role_of_other_contexts() {
+    let root = repo("shell_role_binding");
+    let s = locked();
+    let edit = |id: &str, rel: &str| write("Edit", &abs(&root, rel), "s", Some(id), None);
+
+    let code_write = bash_as("sed -i.bak s/a/b/ crates/qoob3d-core/src/mesh.rs", Some("m1"), None);
+    assert_eq!(pre_tool_use(&root, &s, &code_write), Ok(()));
+    assert_denied(pre_tool_use(&root, &s, &edit("m1", TEST)), &[MSG_ROLE_CODE], "m1 test edit");
+
+    assert_eq!(pre_tool_use(&root, &s, &edit("m2", TEST)), Ok(()));
+    let perl = bash_as("perl -pi -e s/x/y/ crates/qoob3d-core/src/mesh.rs", Some("m2"), None);
+    assert_denied(pre_tool_use(&root, &s, &perl), &[MSG_ROLE_TESTS], "m2 shell code write");
+
+    let read = bash_as("cat crates/qoob3d-core/src/mesh.rs", Some("m3"), None);
+    assert_eq!(pre_tool_use(&root, &s, &read), Ok(()));
+    assert_eq!(pre_tool_use(&root, &s, &edit("m3", TEST)), Ok(()), "a read binds nothing");
+
+    let both =
+        bash_as("cp crates/qoob3d-core/tests/a.rs crates/qoob3d-core/src/a.rs", Some("m4"), None);
+    assert_denied(pre_tool_use(&root, &s, &both), &[MSG_ROLE_TESTS], "m4 test and code");
+    fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0030 (user decision 2026-10-15, Q1): a shell command that is no pure
+// read and names a fixture path is denied for every agent, also unlocked;
+// reads of fixtures pass.
+#[test]
+fn shell_writes_never_touch_fixtures() {
+    let root = repo("shell_fixtures");
+    both_sessions(|unlocked| {
+        let s = session(unlocked, &unused_home());
+        for (id, kind) in
+            [(None, None), (Some("i1"), Some("implementer")), (Some("t1"), Some("test-author"))]
+        {
+            for command in [
+                // The finding's example.
+                "sed -i.bak s/1/2/ crates/qoob3d-core/tests/fixtures/format_v1.qbd",
+                // Derived: the existing fixture of the temp repo, an append.
+                "rm crates/qoob3d-core/tests/fixtures/v1.qbd",
+                "echo x >> crates/qoob3d-core/tests/fixtures/format_v2.qbd",
+            ] {
+                assert_denied(
+                    pre_tool_use(&root, &s, &bash_as(command, id, kind)),
+                    &[MSG_FIXTURE],
+                    &format!("{kind:?}: {command} (unlocked: {unlocked})"),
+                );
+            }
+            for command in [
+                "cat crates/qoob3d-core/tests/fixtures/format_v1.qbd",
+                "head -c 100 crates/qoob3d-core/tests/fixtures/v1.qbd",
+            ] {
+                assert_eq!(
+                    pre_tool_use(&root, &s, &bash_as(command, id, kind)),
+                    Ok(()),
+                    "{kind:?}: {command} (unlocked: {unlocked})"
+                );
+            }
+        }
+    });
+    fs::remove_dir_all(&root).unwrap();
+}
+
+/// Former must-pass entries that name a harness path in a command that is no
+/// pure read, so Q2 denies them (user decision 2026-10-15), with the fragment
+/// the denial must name. Each test they came from keeps its purpose with a
+/// non-harness path. Must be denied in a locked session.
+const DENIED_SINCE_PURE_READS: &[(&str, &str)] = &[
+    // From HARMLESS: interpreters and awk on harness files.
+    ("ruby prog.rb xtask/src/guard.rs", "xtask/"),
+    ("awk '{print}' Cargo.toml", "Cargo.toml"),
+    ("gawk -f prog.awk Cargo.toml", "Cargo.toml"),
+    // From INLINE_CODE_HARMLESS: running a harness script can write
+    // anything; git runs its hooks itself, `git push` is unaffected
+    // (HARMLESS keeps `git push origin HEAD` and `git commit -m "fix"`).
+    ("bash .claude/hooks/guard.sh", ".claude/"),
+    ("sh .githooks/pre-push", ".githooks"),
+    ("bash -n .githooks/pre-push", ".githooks"),
+    ("bash -e .githooks/pre-push", ".githooks"),
+    ("zsh -x xtask/run.sh", "xtask/"),
+    ("node xtask/tool.js", "xtask/"),
+    ("node -c .github/scripts/check.js", ".github/"),
+    ("node --check .github/scripts/check.js", ".github/"),
+    ("ruby -c harness/tool.rb", "harness/"),
+    ("perl -c xtask/tool.pl", "xtask/"),
+    ("deno run .github/scripts/x.ts", ".github/"),
+    // From INLINE_CODE_HARMLESS: script interpreters on harness files.
+    ("ruby -w prog.rb Cargo.toml", "Cargo.toml"),
+    ("perl -I/usr/share/perl5 -n prog.pl Cargo.toml", "Cargo.toml"),
+    // From r5_add_commands_and_perl_without_in_place_pass: `git add` of a
+    // harness path (approved by the user), `cargo add --path xtask` (it
+    // rewrites Cargo.toml), perl on a harness file.
+    ("git add xtask/src/main.rs", "xtask/"),
+    ("git add -p Cargo.toml .github/workflows/ci.yml", ".github/"),
+    ("cargo add --path xtask serde", "xtask"),
+    ("perl -n prog.pl Cargo.toml", "Cargo.toml"),
+    // From s3_perl_module_and_include_flags_are_not_in_place.
+    ("perl -Mstrict -n prog.pl Cargo.toml", "Cargo.toml"),
+    ("perl -Ilib -n prog.pl Cargo.toml", "Cargo.toml"),
+    ("/usr/bin/perl -Mwarnings -n prog.pl Cargo.toml", "Cargo.toml"),
+    ("perl -I/tmp/lib -Mstrict -n prog.pl xtask/src/main.rs", "xtask/"),
+    // From s4_commands_without_a_write_trigger_pass: tar, a non-read before
+    // a pipe or `&&`.
+    ("tar czf /tmp/x.tgz --exclude=target xtask/", "xtask/"),
+    ("tar tzf /tmp/x.tgz xtask/src/main.rs", "xtask/"),
+    ("curl -sS https://example.com/x | grep -c Cargo.toml", "Cargo.toml"),
+    ("git config --get user.name && cat Cargo.toml", "Cargo.toml"),
+    ("brew reinstall cmake && cat Cargo.toml", "Cargo.toml"),
+    // From k10_sed_ruby_and_awk_without_in_place_pass.
+    ("ruby -rdigest prog.rb Cargo.toml", "Cargo.toml"),
+    ("ruby -Ilib prog.rb xtask/src/main.rs", "xtask/"),
+    ("/usr/bin/ruby prog.rb Cargo.toml", "Cargo.toml"),
+    ("awk -F: '{print $1}' Cargo.toml", "Cargo.toml"),
+    ("awk -v i=1 '{print i}' clippy.toml", "clippy.toml"),
+    ("gawk -e 'BEGIN { n = 0 }' -f prog.awk xtask/src/main.rs", "xtask/"),
+    // From long_option_abbreviations_match_alike_for_every_program.
+    ("node -- xtask/tool.js", "xtask/"),
+    ("tar -- Cargo.toml", "Cargo.toml"),
+    // From COMMENTS_THAT_NEED_NO_REMOVAL (the entry now reads `# check`).
+    ("cargo xtask check # harness", "harness"),
+];
+
+// ADR-0037/ADR-0043 (user decision 2026-10-15, Q2): the former must-pass
+// entries that are no pure read are denied. Locked denied naming the
+// fragment, unlocked allowed; spec root and a temp repo.
+#[test]
+fn former_must_pass_entries_without_a_pure_read_are_denied() {
+    let root = repo("denied_since_pure_reads");
+    let unlocked = session(true, &unused_home());
+    for (command, fragment) in DENIED_SINCE_PURE_READS {
+        let needle = format!("{MSG_HARNESS_SHELL}{fragment}");
+        assert_denied(spec_shell(false, command), &[&needle], &format!("{command:?}"));
+        assert_denied(check_shell(&root, &locked(), command), &[&needle], &format!("{command:?}"));
+        assert_eq!(check_shell(&root, &unlocked, command), Ok(()), "{command:?} (unlocked)");
     }
     fs::remove_dir_all(&root).unwrap();
 }
