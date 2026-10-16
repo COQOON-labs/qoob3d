@@ -7,8 +7,8 @@ expect: stopping_rule_needs_a_third_model
 diff --git a/xtask/src/review.rs b/xtask/src/review.rs
 --- a/xtask/src/review.rs
 +++ b/xtask/src/review.rs
-@@ -298,5 +298,5 @@
-     problems.extend(rotation_problem(record, records));
+@@ -431,5 +431,5 @@
+     problems.extend(found_by_problems(findings, reviews));
 -    if plan.tier == Tier::High {
 +    if plan.tier == Tier::None {
          problems.extend(stopping_problem(reviews, findings));

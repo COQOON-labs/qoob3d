@@ -6,9 +6,9 @@ expect: plan_escape_window
 diff --git a/xtask/src/review.rs b/xtask/src/review.rs
 --- a/xtask/src/review.rs
 +++ b/xtask/src/review.rs
-@@ -210,4 +210,4 @@
+@@ -316,4 +316,4 @@
          };
 -        if (0..ESCAPE_WINDOW_DAYS).contains(&(tip - day)) {
 +        if (0..=ESCAPE_WINDOW_DAYS).contains(&(tip - day)) {
-             places.extend(place.split('`').skip(1).step_by(2));
+             places.extend(cells[where_column].split('`').skip(1).step_by(2));
          }

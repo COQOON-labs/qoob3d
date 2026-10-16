@@ -1,0 +1,14 @@
+# The record's tier must equal the plan's again instead of being at least
+# the plan's: a more thorough `high` review of a standard range is rejected
+# (ADR-0052 fix round 1, F2.1)
+command: cargo test -p xtask --quiet high_record_for_a_standard_plan_follows_the_plan
+expect: high_record_for_a_standard_plan_follows_the_plan
+--- patch
+diff --git a/xtask/src/review.rs b/xtask/src/review.rs
+--- a/xtask/src/review.rs
++++ b/xtask/src/review.rs
+@@ -404,3 +404,3 @@
+     let tier = Tier::ALL.into_iter().find(|t| record["tier"] == t.name());
+-    if tier.is_none_or(|tier| tier < plan.tier) {
++    if tier.is_none_or(|tier| tier != plan.tier) {
+         problems.push(format!(

@@ -1,0 +1,15 @@
+# The pre-push hook passes the review gate only the newly pushed commits
+# again instead of the whole branch against `<remote>/main`: a large branch
+# pushed in slices of at most 400 lines each stays `standard` (ADR-0052 fix
+# round 1, F2.2)
+command: cargo test -p xtask --quiet pre_push_reviews_the_whole_branch_against_the_remote_main
+expect: pre_push_reviews_the_whole_branch_against_the_remote_main
+--- patch
+diff --git a/.githooks/pre-push b/.githooks/pre-push
+--- a/.githooks/pre-push
++++ b/.githooks/pre-push
+@@ -42,3 +42,3 @@
+   else
+-    cargo xtask review "$local_sha" "${review_range[@]}"
++    cargo xtask review "$local_sha" "${range[@]}"
+   fi

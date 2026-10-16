@@ -7,8 +7,8 @@ expect: rotation_needs_a_new_general_model
 diff --git a/xtask/src/review.rs b/xtask/src/review.rs
 --- a/xtask/src/review.rs
 +++ b/xtask/src/review.rs
-@@ -405,4 +405,4 @@
-     let rotated = general(reviews(record))
+@@ -580,4 +580,4 @@
+     let rotated = whole_diff_general(reviews_of(record))
          .filter_map(|r| r["model"].as_str())
 -        .any(|model| !used.contains(model));
 +        .any(|model| !model.is_empty());
