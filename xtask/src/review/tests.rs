@@ -8,9 +8,10 @@ const PREV: &str = "1111111111111111111111111111111111111111";
 const PANELS: &str = "crates/qoob3d-app/src/panels.rs";
 /// The tip date every pure plan in these tests is computed for.
 const TIP_DATE: &str = "2026-10-16";
-const MODEL_A: &str = "claude-opus-5-5";
-const MODEL_B: &str = "claude-sonnet-5";
-const MODEL_C: &str = "fable-1";
+// The known models are the Agent tool's names (ADR-0052 fix round 2).
+const MODEL_A: &str = "opus";
+const MODEL_B: &str = "sonnet";
+const MODEL_C: &str = "fable";
 
 // ---------------------------------------------------------------------------
 // Builders: escape log, plans and version-2 records (ADR-0052 spec §1, §2).
@@ -581,7 +582,9 @@ fn escape_tier(date: &str, place: &str, tip: &str) -> (Tier, Vec<Trigger>) {
 // 2026-04-20 → 2026-10-16 = 10 (Apr) + 31 + 30 + 31 + 31 + 30 + 16 = 179;
 // 2026-04-19 is 180 and 2026-04-18 181 days before. The window is
 // 0 ≤ tip − row ≤ 179 days (coordinator decision 2026-10-16), so 180 is out.
-// A row dated after the tip is not "up to the tip". 2028 is a leap year:
+// Fix round 2 (S1): rows dated after the tip count too (tip − row ≤ 179
+// days, negative differences included): a branch tip committed before a row
+// landed on main still sees it. 2028 is a leap year:
 // 2027-09-04 → 2028-03-01 = 26 + 31 + 30 + 31 + 31 + 29 + 1 = 179,
 // 2027-09-03 is 180 and 2027-09-02 181 days before.
 #[test]
@@ -591,6 +594,8 @@ fn plan_escape_window() {
         ("2026-04-20", "2026-10-16"),
         ("2026-10-16", "2026-10-16"),
         ("2026-10-15", "2026-10-16"),
+        ("2026-10-17", "2026-10-16"),
+        ("2027-06-01", "2026-10-16"),
         ("2027-09-04", "2028-03-01"),
     ] {
         assert_eq!(
@@ -603,7 +608,6 @@ fn plan_escape_window() {
         ("2026-04-19", "2026-10-16"),
         ("2026-04-18", "2026-10-16"),
         ("2025-10-16", "2026-10-16"),
-        ("2026-10-17", "2026-10-16"),
         ("2027-09-03", "2028-03-01"),
         ("2027-09-02", "2028-03-01"),
     ] {
@@ -631,6 +635,71 @@ fn plan_escape_where_matching() {
         "`docs/`",
     ] {
         assert_eq!(escape_tier("2026-10-01", place, TIP_DATE).0, Tier::Standard, "{place}");
+    }
+}
+
+// ADR-0052 fix round 2 (Where matching pinned): escape paths match like
+// harness paths (`paths::listed`): an entry ending in `-` is a prefix too,
+// and case is ignored.
+#[test]
+fn plan_escape_where_matches_like_harness_paths() {
+    for place in ["`crates/qoob3d-`", "`Crates/Qoob3D-App/src/PANELS.RS`", "`CRATES/qoob3d-app/`"] {
+        assert_eq!(escape_tier("2026-10-01", place, TIP_DATE).0, Tier::High, "{place}");
+    }
+    assert_eq!(escape_tier("2026-10-01", "`crates/qoob3d-z-`", TIP_DATE).0, Tier::Standard);
+}
+
+// ADR-0052 fix round 2 (separator by position): only the line right after
+// the header is the separator; a data row whose Date looks like a separator
+// is a plan error.
+#[test]
+fn plan_escape_separator_lookalike_row_fails_closed() {
+    for date in ["-", "---", ":-:"] {
+        let log = escapes(&[escape_row(date, "`docs/`")]);
+        let result = plan(&[(PANELS, 10)], &log, TIP_DATE);
+        assert!(result.is_err(), "{date:?}: {result:?}");
+    }
+}
+
+// ADR-0052 fix round 2: a data row without a backticked path in `Where` is a
+// plan error naming the row, whatever its date (an old row too).
+#[test]
+fn plan_escape_row_without_backticked_where_fails_closed() {
+    for (marker, date) in [("no-backticks-old", "2020-01-01"), ("no-backticks-new", "2026-10-01")] {
+        let row = format!("| {date} | CI | {marker} | crates/qoob3d-app/src/ | c | x | k | open |");
+        let result = plan(&[(PANELS, 10)], &escapes(&[row]), TIP_DATE);
+        let Err(errors) = result else { panic!("{marker}: passed: {result:?}") };
+        assert_problem(&errors, marker, marker);
+    }
+    let empty = "| 2020-01-01 | CI | empty-where |  | c | x | k | open |".to_owned();
+    let result = plan(&[(PANELS, 10)], &escapes(&[empty]), TIP_DATE);
+    let Err(errors) = result else { panic!("empty Where passed: {result:?}") };
+    assert_problem(&errors, "empty-where", "empty Where");
+}
+
+// ADR-0052 fix round 2: the repository's own escape log parses without a
+// plan error (it is read at every push).
+#[test]
+fn repository_escape_log_parses() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let log = std::fs::read_to_string(root.join("docs/escapes.md")).unwrap();
+    let result = plan(&[(PANELS, 10)], &log, TIP_DATE);
+    assert!(result.is_ok(), "{result:?}");
+}
+
+// ADR-0052 fix round 2: `--plan` prints `code lines: N`, the summed added +
+// deleted lines of `Code` files the size trigger uses (tests and docs do
+// not count).
+#[test]
+fn plan_text_shows_the_code_line_count() {
+    for (changes, n) in [
+        (vec![(PANELS, 10)], 10),
+        (vec![(PANELS, 200), (PANELS, 201)], 401),
+        (vec![(PANELS, 7), ("crates/qoob3d-app/tests/modeling.rs", 900), ("docs/x.md", 5)], 7),
+        (vec![("xtask/src/main.rs", 3), ("crates/qoob3d-kernel/src/occt.rs", 4)], 7),
+    ] {
+        let text = plan_of(&changes).to_string();
+        assert!(text.lines().any(|l| l.trim() == format!("code lines: {n}")), "{n}:\n{text}");
     }
 }
 
@@ -871,6 +940,14 @@ fn every_review_is_complete() {
         (json!({"id": "", "model": MODEL_B, "lens": "tests", "round": 1}), "id"),
         (json!({"id": "r2", "lens": "tests", "round": 1}), "model"),
         (json!({"id": "r2", "model": "", "lens": "tests", "round": 1}), "model"),
+        // Fix round 2: only the Agent tool's models opus, fable, sonnet.
+        (
+            json!({"id": "r2", "model": "claude-opus-5-5", "lens": "tests", "round": 1}),
+            "claude-opus-5-5",
+        ),
+        (json!({"id": "r2", "model": "Opus", "lens": "tests", "round": 1}), "Opus"),
+        (json!({"id": "r2", "model": "haiku", "lens": "tests", "round": 1}), "haiku"),
+        (json!({"id": "r2", "model": 5, "lens": "tests", "round": 1}), "model"),
         (json!({"id": "r2", "model": MODEL_B, "round": 1}), "lens"),
         (json!({"id": "r2", "model": MODEL_B, "lens": "style", "round": 1}), "style"),
         (json!({"id": "r2", "model": MODEL_B, "lens": "General", "round": 1}), "General"),
@@ -1246,13 +1323,18 @@ fn previous_record_is_validated() {
 // must not be read.
 #[test]
 fn previous_tree_must_be_an_object_id() {
-    let dir = records_with_previous("previous-id", &previous_record("standard", &[MODEL_A]));
-    // A complete previous record one level up whose `tree` is the path: only
-    // the id check keeps `../<TREE>` from passing.
-    let outside = dir.parent().unwrap().join(format!("{TREE}.json"));
+    // Everything stays in this test's own directory (no shared temp path,
+    // fix round 2): the records live in `<test dir>/records`, and a complete
+    // previous record one level up, in the test directory, has the path as
+    // its `tree`: only the id check keeps `../<TREE>` from passing.
+    let base = records_with_previous("previous-id", "");
+    let dir = base.join("records");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{PREV}.json")), previous_record("standard", &[MODEL_A]))
+        .unwrap();
     let mut escaped = record("standard", vec![review("p1", MODEL_A, "general")], vec![]);
     escaped["tree"] = json!(format!("../{TREE}"));
-    std::fs::write(&outside, escaped.to_string()).unwrap();
+    std::fs::write(base.join(format!("{TREE}.json")), escaped.to_string()).unwrap();
     let fresh =
         || after_previous(record("standard", vec![review("r1", MODEL_B, "general")], vec![]));
     for id in [
@@ -1269,8 +1351,7 @@ fn previous_tree_must_be_an_object_id() {
             problems_in(&dir, &with(fresh(), "previous_tree", id.clone()), &standard_plan());
         assert!(found.len() == 1 && found[0].contains("previous_tree"), "{id}: {found:?}");
     }
-    std::fs::remove_file(&outside).unwrap();
-    std::fs::remove_dir_all(&dir).unwrap();
+    std::fs::remove_dir_all(&base).unwrap();
 }
 
 // ADR-0052 fix round 1: a 64-character id (SHA-256 repositories) is valid.
@@ -1682,11 +1763,15 @@ fn plan_range_without_escape_log_at_the_tip_is_an_empty_log() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
-/// Stores `record` as the critic record of `HEAD`'s tree in `root`.
-fn store_record(root: &Path, record: &Value) {
+/// Stores `record` as the critic record of `HEAD`'s tree in `root`, with
+/// `head` = the `HEAD` commit and `base` = `base`, the boundary of the range
+/// (fix round 2: the record names the reviewed range).
+fn store_record(root: &Path, record: &Value, base: &str) {
     let tree = git_in(root, &["rev-parse", "HEAD^{tree}"]);
     let mut record = record.clone();
     record["tree"] = json!(tree);
+    record["head"] = json!(git_in(root, &["rev-parse", "HEAD"]));
+    record["base"] = json!(base);
     write_file(root, &format!("{RECORD_DIR}/{tree}.json"), &record.to_string());
 }
 
@@ -1702,13 +1787,13 @@ fn check_requires_a_record_for_the_plan_of_the_range() {
     let Err(found) = check(&root, "HEAD", &range) else { panic!("passed without a record") };
     assert_problem(&found, "no critic review", "no record");
 
-    store_record(&root, &standard_record(vec![]));
+    store_record(&root, &standard_record(vec![]), &base);
     let Err(found) = check(&root, "HEAD", &range) else { panic!("standard record passed") };
     assert_problem(&found, "tier", "standard record for a harness range");
 
     let mut reviews = high_reviews();
     reviews.push(review("r4", MODEL_B, "security"));
-    store_record(&root, &record("high", reviews, vec![]));
+    store_record(&root, &record("high", reviews, vec![]), &base);
     assert_eq!(check(&root, "HEAD", &range), Ok(()));
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -1721,10 +1806,10 @@ fn check_standard_range_with_v2_and_v1_records() {
     write_file(&root, PANELS, "fn g() {}\n");
     commit_all(&root, "Small");
     let range = [format!("{base}..HEAD")];
-    store_record(&root, &standard_record(vec![]));
+    store_record(&root, &standard_record(vec![]), &base);
     assert_eq!(check(&root, "HEAD", &range), Ok(()));
 
-    store_record(&root, &json!({"findings": []}));
+    store_record(&root, &json!({"findings": []}), &base);
     let Err(found) = check(&root, "HEAD", &range) else { panic!("v1 record passed") };
     assert_problem(&found, "/critic-review", "v1 record");
     assert_problem(&found, "ADR-0052", "v1 record");
@@ -1739,7 +1824,7 @@ fn check_fails_closed_on_an_unparsable_escape_date() {
     write_file(&root, "docs/escapes.md", &escapes(&[escape_row("16.10.2026", "`docs/`")]));
     write_file(&root, PANELS, "fn g() {}\n");
     commit_all(&root, "Tip");
-    store_record(&root, &standard_record(vec![]));
+    store_record(&root, &standard_record(vec![]), &base);
     let Err(found) = check(&root, "HEAD", &[format!("{base}..HEAD")]) else {
         panic!("unparsable escape date passed");
     };
@@ -1756,6 +1841,149 @@ fn check_range_without_code_needs_no_record() {
     commit_all(&root, "Docs");
     assert_eq!(check(&root, "HEAD", &[format!("{base}..HEAD")]), Ok(()));
     assert_eq!(range_plan(&root, &base).tier, Tier::None);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0052 fix round 2 (record range consistency), pure part: `head` must be
+// the tip commit and `base` one of the boundary commits; each missing or
+// different value is one problem naming both values. Without a boundary
+// (root commit) `base` may be absent or null.
+#[test]
+fn record_names_the_reviewed_range() {
+    let (tip, b1, b2, other) = ("c".repeat(40), "d".repeat(40), "e".repeat(40), "f".repeat(40));
+    let at =
+        |base: Value, head: Value| with(with(standard_record(vec![]), "base", base), "head", head);
+    let one = vec![b1.clone()];
+    let two = vec![b1.clone(), b2.clone()];
+    assert_eq!(range_problems(&at(json!(b1), json!(tip)), &tip, &one), Vec::<String>::new());
+    assert_eq!(range_problems(&at(json!(b2), json!(tip)), &tip, &two), Vec::<String>::new());
+    for record in [at(json!(b1), json!(null)), without(at(json!(b1), json!(tip)), "head")] {
+        let found = range_problems(&record, &tip, &one);
+        assert!(found.len() == 1 && found[0].contains(&tip), "missing head: {found:?}");
+    }
+    let found = range_problems(&at(json!(b1), json!(other)), &tip, &one);
+    assert!(found.len() == 1 && found[0].contains(&tip) && found[0].contains(&other), "{found:?}");
+    let found = range_problems(&at(json!(other), json!(tip)), &tip, &one);
+    assert!(found.len() == 1 && found[0].contains(&b1) && found[0].contains(&other), "{found:?}");
+    for record in [at(json!(null), json!(tip)), without(at(json!(b1), json!(tip)), "base")] {
+        let found = range_problems(&record, &tip, &one);
+        assert!(found.len() == 1 && found[0].contains(&b1), "missing base: {found:?}");
+    }
+    for record in [at(json!(null), json!(tip)), without(at(json!(null), json!(tip)), "base")] {
+        assert_eq!(range_problems(&record, &tip, &[]), Vec::<String>::new(), "{record}");
+    }
+}
+
+// ADR-0052 fix round 2: the gate checks the record's range on a real range:
+// a record of another head or base is rejected naming both values.
+#[test]
+fn check_rejects_a_record_of_another_range() {
+    let (root, base) = repo_with_base("check-range", &[(PANELS, "fn f() {}\n")]);
+    write_file(&root, PANELS, "fn g() {}\n");
+    let tip = commit_all(&root, "Small");
+    let range = [format!("{base}..HEAD")];
+    let other = "f".repeat(40);
+    store_record(&root, &standard_record(vec![]), &other);
+    let Err(found) = check(&root, "HEAD", &range) else { panic!("other base passed") };
+    assert_problem(&found, &other, "other base");
+    assert_problem(&found, &base, "other base");
+
+    store_record(&root, &standard_record(vec![]), &base);
+    let tree = git_in(&root, &["rev-parse", "HEAD^{tree}"]);
+    let file = root.join(RECORD_DIR).join(format!("{tree}.json"));
+    let stored: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    std::fs::write(&file, with(stored, "head", json!(base)).to_string()).unwrap();
+    let Err(found) = check(&root, "HEAD", &range) else { panic!("other head passed") };
+    assert_problem(&found, &tip, "other head");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0052 fix round 2: a range without a boundary (all commits from the
+// root) passes with `base: null`.
+#[test]
+fn check_root_range_without_base() {
+    let root = repo_with_commit("check-root", PANELS);
+    let tree = git_in(&root, &["rev-parse", "HEAD^{tree}"]);
+    let head = git_in(&root, &["rev-parse", "HEAD"]);
+    let mut record = with(standard_record(vec![]), "base", json!(null));
+    record["tree"] = json!(tree);
+    record["head"] = json!(head);
+    write_file(&root, &format!("{RECORD_DIR}/{tree}.json"), &record.to_string());
+    assert_eq!(check(&root, "HEAD", &["HEAD".to_owned()]), Ok(()));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// A branch `feat` forked at the base commit and changing `PANELS`; after the
+/// fork, `main` gets a commit whose escape log has a row naming `PANELS`.
+fn repo_with_row_on_main(test: &str) -> std::path::PathBuf {
+    let (root, _) = repo_with_base(test, &[(PANELS, "fn f() {}\n")]);
+    git_in(&root, &["checkout", "-q", "-b", "feat"]);
+    write_file(&root, PANELS, "fn g() {}\n");
+    commit_all(&root, "Branch");
+    git_in(&root, &["checkout", "-q", "main"]);
+    let row = escape_row("2025-02-01", &format!("`{PANELS}`"));
+    write_file(&root, "docs/escapes.md", &escapes(&[row]));
+    commit_all(&root, "Escape row on main");
+    git_in(&root, &["checkout", "-q", "feat"]);
+    root
+}
+
+// ADR-0052 fix round 2 S1: the escape rows at the excluded refs count too
+// (arguments after `--not`, `^ref`, the left side of `a..b`): a branch that
+// forked before the row landed on main sees it.
+#[test]
+fn plan_range_reads_escape_rows_at_excluded_refs() {
+    let root = repo_with_row_on_main("plan-excluded");
+    for range in [&["feat", "--not", "main"][..], &["main..feat"][..], &["^main", "feat"][..]] {
+        let plan = plan_range(&root, "feat", &strings(range)).unwrap();
+        assert_eq!(triggers(&plan), [Trigger::Escape], "{range:?}");
+    }
+    // The hook's fallback form with a ref glob plans without an error.
+    let main = git_in(&root, &["rev-parse", "main"]);
+    git_in(&root, &["update-ref", "refs/remotes/origin/main", &main]);
+    let plan = plan_range(&root, "feat", &strings(&["feat", "--not", "--remotes=origin"]));
+    assert!(plan.is_ok(), "{plan:?}");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0052 fix round 2 (tests): a range that deletes `docs/escapes.md` while
+// the boundary's log has a matching row keeps the escape trigger, in both
+// range forms.
+#[test]
+fn plan_range_that_deletes_the_escape_log_keeps_the_trigger() {
+    let log = escapes(&[escape_row("2025-02-01", &format!("`{PANELS}`"))]);
+    let (root, base) =
+        repo_with_base("plan-delete-log", &[(PANELS, "fn f() {}\n"), ("docs/escapes.md", &log)]);
+    git_in(&root, &["rm", "-q", "docs/escapes.md"]);
+    write_file(&root, PANELS, "fn g() {}\n");
+    commit_all(&root, "Delete the escape log");
+    for range in [vec![format!("{base}..HEAD")], vec!["HEAD".into(), "--not".into(), base.clone()]]
+    {
+        let plan = plan_range(&root, "HEAD", &range).unwrap();
+        assert_eq!(triggers(&plan), [Trigger::Escape], "{range:?}");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0052 fix round 2 (each log with its own header): the boundary's log
+// has its columns in another order; its rows are read with its own header.
+#[test]
+fn plan_range_reads_each_log_with_its_own_header() {
+    let reordered = format!(
+        "# Escape log\n\n\
+         | Where | Date | Found by | What escaped | Missed by | Class | Check for the class | Status |\n\
+         | --- | --- | --- | --- | --- | --- | --- | --- |\n\
+         | `{PANELS}` | 2025-02-01 | CI | x | critic | c | k | open |\n"
+    );
+    let (root, base) = repo_with_base(
+        "plan-own-header",
+        &[(PANELS, "fn f() {}\n"), ("docs/escapes.md", &reordered)],
+    );
+    write_file(&root, "docs/escapes.md", &escapes(&[]));
+    write_file(&root, PANELS, "fn g() {}\n");
+    commit_all(&root, "Standard header, no rows");
+    let plan = plan_range(&root, "HEAD", &[format!("{base}..HEAD")]);
+    assert!(plan.as_ref().is_ok_and(|p| triggers(p) == [Trigger::Escape]), "{plan:?}");
     std::fs::remove_dir_all(&root).unwrap();
 }
 

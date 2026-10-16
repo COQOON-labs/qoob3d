@@ -232,6 +232,11 @@ const ZERO: &str = "0000000000000000000000000000000000000000";
 /// stdin line `refs/heads/feat <local> refs/heads/feat <remote_sha>`;
 /// returns the logged `cargo …` and `gitleaks …` calls.
 fn run_pre_push(repo: &Path, remote: &str, local: &str, remote_sha: &str) -> Vec<String> {
+    pre_push(repo, remote, local, remote_sha).0
+}
+
+/// [`run_pre_push`], also returning the hook's stderr.
+fn pre_push(repo: &Path, remote: &str, local: &str, remote_sha: &str) -> (Vec<String>, String) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let hook = root.join(".githooks/pre-push");
     let log = repo.join("stub.log");
@@ -250,13 +255,17 @@ exec bash "$0" "$@""#;
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
         .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
     let line = format!("refs/heads/feat {local} refs/heads/feat {remote_sha}\n");
     std::io::Write::write_all(&mut child.stdin.take().unwrap(), line.as_bytes()).unwrap();
-    let status = child.wait().unwrap();
-    assert!(status.success(), "pre-push failed");
-    fs::read_to_string(&log).unwrap_or_default().lines().map(str::to_owned).collect()
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "pre-push failed: {stderr}");
+    let calls = fs::read_to_string(&log).unwrap_or_default().lines().map(str::to_owned).collect();
+    (calls, stderr)
 }
 
 /// The commits the rev-list arguments after `prefix` in the logged call
@@ -331,5 +340,21 @@ fn pre_push_uses_the_main_of_the_pushed_remote() {
     fs::remove_file(repo.join("stub.log")).unwrap();
     let calls = run_pre_push(&repo, "upstream", &b2, &b1);
     assert_eq!(selected(&repo, &calls, &review), set(&[&b1, &b2]), "upstream/main: {calls:?}");
+    fs::remove_dir_all(&repo).unwrap();
+}
+
+// ADR-0052 fix round 2 (fallback visible): without `<remote>/main` the hook
+// warns on stderr naming the missing ref; with it, there is no such warning.
+#[test]
+fn pre_push_warns_when_it_falls_back() {
+    let (repo, m0, b1, b2) = pushed_branch("pre-push-warning");
+    git(&repo, &["update-ref", "refs/remotes/upstream/feat", &b1]);
+    let (_, stderr) = pre_push(&repo, "upstream", &b2, &b1);
+    assert!(stderr.contains("refs/remotes/upstream/main"), "no fallback warning: {stderr}");
+
+    git(&repo, &["update-ref", "refs/remotes/upstream/main", &m0]);
+    fs::remove_file(repo.join("stub.log")).unwrap();
+    let (_, stderr) = pre_push(&repo, "upstream", &b2, &b1);
+    assert!(!stderr.contains("refs/remotes/upstream/main"), "warning without fallback: {stderr}");
     fs::remove_dir_all(&repo).unwrap();
 }
