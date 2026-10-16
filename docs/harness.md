@@ -41,7 +41,7 @@ flowchart LR
 | Test quality (mutation tests) | – | `mutants` |
 | Harness works (sabotage corpus) | `cargo xtask selftest` | `selftest`, Mondays |
 | Harness files, roles, bypasses, self-unlock | guard | CODEOWNERS review |
-| Critic review: depth by risk, model rotation, stopping rule (ADR-0052) | pre-push (`xtask review`) | Copilot review on the PR (record stays local) |
+| Critic review: depth by risk, model rotation, stopping rule (ADR-0052) | pre-push (`xtask review`) | – (record stays local; Copilot review on the PR is planned, see below) |
 
 ## Roles (Claude Code subagents)
 
@@ -76,6 +76,8 @@ cargo xtask selftest              # check the harness against all sabotage cases
 3. Recommended: a separate GitHub identity for the agent (bot account or app) with
    write access to branches, without merge and admin rights. Only then is the wall
    complete.
+4. "Automatically request Copilot code review" in the ruleset: an outside reviewer on every
+   PR (ADR-0052 decision 7). Not active yet.
 
 ## Limits (honestly)
 

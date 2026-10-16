@@ -27,7 +27,9 @@ OCCT boundary or the file format, where a miss is expensive.
 
 1. **Review plan from the diff.** `cargo xtask review --plan <tip> <range>` derives a tier
    deterministically and prints the reasons:
-   - `none`: no production code (unchanged from ADR-0041).
+   - `none`: neither production code nor a harness path changed. (ADR-0041 skipped every
+     range without production code; a change to hooks, CI or the checklist now needs a
+     review too.)
    - `standard`: production code without a high-risk trigger. One general critic, one
      verifier per `blocker`/`major` finding.
    - `high`: any of: a harness path (ADR-0037); the OCCT boundary (C++ sources, cxx bridges,
@@ -36,15 +38,20 @@ OCCT boundary or the file format, where a miss is expensive.
      escaped finding in the last 180 days (decision 5). Two general critics on different
      models, plus lens critics: always tests (K-13), and per trigger harness bypasses and
      security (K-10) or robustness at the boundary (K-09, K-10).
-   The path lists live in xtask next to `paths::HARNESS`.
+   The path lists live in xtask next to `paths::HARNESS`. The pre-push hook plans the whole
+   branch against the remote's `main`, not only the newly pushed commits, so a large change
+   cannot be split into small pushes. Escape rows are read at the tip and at the range's
+   boundary commits, so a range cannot drop a row that applies to it.
 2. **Diverse reviewers.** Critics run with fresh context, in parallel, on models from the
-   available set (Opus, Fable, Sonnet). Every round after a fix uses, for the general review
-   of the whole diff, a model that did not do the general review of the previous round.
-3. **Record, version 2.** `target/critic/<tree>.json` additionally names the `tier`, the
-   `previous_tree` (if any), the reviews (`id`, `model`, `lens`, `round`) and for every
-   finding `found_by` (review ids, duplicates merged). `cargo xtask review` checks that the
-   record covers the plan of the pushed range, the model rotation and the stopping rule. The
-   record stays local and forgeable (ADR-0041); every PR description carries its summary.
+   available set (Opus, Fable, Sonnet). Every round after a fix uses, for a general review
+   of the whole diff, a model outside the previous round's whole-diff pair (the two samples
+   of decision 4; a third stopping-rule critic and file-group critics do not count).
+3. **Record, version 2.** `target/critic/<tree>.json` additionally names the `tier` (at
+   least the plan's), the `previous_tree` (if any), the reviews (`id`, `model`, `lens`,
+   `round`, and `scope: files` for a file-group critic) and for every finding `found_by`
+   (review ids, duplicates merged). `cargo xtask review` checks that the record covers the
+   plan of the pushed range, the model rotation and the stopping rule. The record stays local
+   and forgeable (ADR-0041); every PR description carries its summary.
 4. **Stopping rule (capture–recapture).** In tier `high`, the two general critics are two
    samples of the same defect population. With n₁ and n₂ non-refuted `blocker`/`major`
    findings and m found by both, the Chapman estimate of all such defects is
@@ -62,8 +69,10 @@ OCCT boundary or the file format, where a miss is expensive.
    on real past states, each with its expected finding. The skill `critic-calibrate` runs
    the critic configurations of the plan over the seeds and reports recall per model and
    lens. It runs after every change to the checklist, the agents or the model set, and at
-   least monthly. The results choose models and lenses in the plan.
-7. **An outside reviewer.** Copilot code review runs on every PR (GitHub ruleset). Its
+   least monthly. The results choose models and lenses in the plan. (Follow-up; until it
+   exists the thresholds are uncalibrated starting values, open item in CLAUDE.md.)
+7. **An outside reviewer.** Copilot code review runs on every PR (GitHub ruleset; open item
+   until the ruleset has it). Its
    `blocker`/`major`-grade comments go to a verifier like critic findings; the ones our
    critics missed go into the escape log.
 8. **Deterministic hints first.** The critic only runs after `cargo xtask check` is green. It

@@ -169,6 +169,11 @@ Crate-specific pitfalls are in the respective `crates/<crate>/CLAUDE.md`.
 - **Set up the GitHub wall** (ADR-0037, `docs/harness.md`): ruleset for `main` with
   required checks, CODEOWNERS, separate identity for agents without merge rights. Until then,
   CI is only as strong as the rights the agent pushes with.
+- **Rest of ADR-0052:** Copilot code review in the ruleset (decision 7); critic calibration
+  with seeded defects (`harness/critic-seeds/`, skill `critic-calibrate`, decision 6) – until
+  then the thresholds of the review plan and the stopping rule are uncalibrated; deterministic
+  follow-ups: diff coverage in CI, mutation score threshold and more crates, property-based
+  and metamorphic geometry tests, fuzzing of the file formats.
 - **Harness expansion:** deterministic checks for accessibility (AccessKit names,
   contrast, target sizes) and usability (interaction budgets of the core flows), fuzzing of the
   file formats, threshold for the mutation score after the first baseline.

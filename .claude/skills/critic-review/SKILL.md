@@ -19,8 +19,9 @@ Unverified and `fixed` findings still block (a fix changes the tree and needs a 
    required reviews. Tier `none` needs no record.
 3. **Models and round.** Models are the Agent tool's `model` values: `opus`, `fable`, `sonnet`.
    If this review follows a fix of findings from an earlier record of this branch, set
-   `previous_tree` to that record's tree, use `round` = its round + 1, and give the general
-   review a model that no general review of the previous record used. Otherwise
+   `previous_tree` to that record's tree, use `round` = its highest round + 1 for every
+   review, and give a whole-diff general review a model outside the previous record's
+   whole-diff pair (its first two general reviews on different models). Otherwise
    `previous_tree` is `null` and `round` is 1.
 4. **Critics, all in one message so they run in parallel.** Subagent `critic` per required
    review, with the range `base..head`, the lens and the plan's reasons, nothing else. Do not
@@ -29,7 +30,8 @@ Unverified and `fixed` findings still block (a fix changes the tree and needs a 
    - `high`: two `general` critics on two different models, plus one critic per required
      lens (`tests`; `security` for harness changes; `robustness` at the OCCT boundary or the
      file format). A diff over 800 changed lines additionally gets one `general` critic per
-     file group; record them like the others.
+     file group; record those with `"scope": "files"`. They do not count as whole-diff
+     reviews for the two models, the stopping rule or the rotation.
 5. **Merge the findings.** Give every review an id (`r1`, `r2`, …). Findings that name the same
    defect become one finding whose `found_by` lists every review that reported it.
 6. **Verification:** for every finding with `blocker` or `major`, run one `verifier` subagent
