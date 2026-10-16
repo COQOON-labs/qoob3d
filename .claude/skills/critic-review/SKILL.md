@@ -29,7 +29,7 @@ Unverified and `fixed` findings still block (a fix changes the tree and needs a 
    - `standard`: one `general` critic.
    - `high`: two `general` critics on two different models, plus one critic per required
      lens (`tests`; `security` for harness changes; `robustness` at the OCCT boundary or the
-     file format). A diff over 800 changed lines additionally gets one `general` critic per
+     file format). A diff over 800 `code lines` (as the plan prints them) additionally gets one `general` critic per
      file group; record those with `"scope": "files"`. They do not count as whole-diff
      reviews for the two models, the stopping rule or the rotation.
 5. **Merge the findings.** Give every review an id (`r1`, `r2`, …). Findings that name the same

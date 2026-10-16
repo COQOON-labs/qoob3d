@@ -5,6 +5,10 @@ escape; rows are never deleted, only the status changes. The harness audit (ADR-
 this log: a class with two escapes gets a deterministic check, or else a checklist item or a
 critic lens. Every row also becomes a critic calibration seed.
 
+`Where` lists the affected paths in backticks; a path ending in `/` covers its directory. The
+review plan (`cargo xtask review --plan`) raises a range that changes such a path within 180
+days of the row's date to tier `high`; a malformed row stops the plan (fail closed).
+
 Status: `open` (class not covered yet), `covered` (a check for the class exists, named in
 the row), `accepted` (gap accepted by the user, with the decision).
 
