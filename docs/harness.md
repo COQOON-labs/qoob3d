@@ -43,6 +43,13 @@ flowchart LR
 | Harness files, roles, bypasses, self-unlock | guard | CODEOWNERS review |
 | Critic review | pre-push (`xtask review`) | – (record stays local) |
 
+The git hooks share their setup in `.githooks/lib.sh`: they build xtask, on macOS remove the
+quarantine attribute that GUI clients such as Sourcetree set, so Gatekeeper starts it, and run
+the binary directly (`cargo xtask` would re-link and re-quarantine it). Commits and merges
+therefore work from Sourcetree. `pre-push` first checks with a probe file whether the client
+quarantines new files and then stops before building anything: the full check builds and runs
+fresh binaries that cannot be cleared in time, so pushes go from a terminal (ADR-0051).
+
 ## Roles (Claude Code subagents)
 
 | Agent | May | Purpose |
