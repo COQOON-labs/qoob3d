@@ -175,7 +175,7 @@ fn validate_adr(adr: &Adr, by_id: &BTreeMap<String, &Adr>, problems: &mut Vec<St
     }
 }
 
-fn is_date(s: &str) -> bool {
+pub(crate) fn is_date(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() == 10
         && b[4] == b'-'

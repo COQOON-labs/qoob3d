@@ -1,0 +1,15 @@
+# Rotation forbids every whole-diff general model of the previous record
+# again, including the third stopping-rule review: after a round with three
+# models no honest next record can pass (ADR-0052 fix round 1, F1)
+command: cargo test -p xtask --quiet rotation_ignores_the_previous_third_review
+expect: rotation_ignores_the_previous_third_review
+--- patch
+diff --git a/xtask/src/review.rs b/xtask/src/review.rs
+--- a/xtask/src/review.rs
++++ b/xtask/src/review.rs
+@@ -577,4 +577,4 @@
+ fn rotation_problem(record: &Value, previous: &Value) -> Option<String> {
+     let used: BTreeSet<&str> =
+-        samples(reviews_of(previous)).iter().filter_map(|r| r["model"].as_str()).collect();
++        whole_diff_general(reviews_of(previous)).filter_map(|r| r["model"].as_str()).collect();
+     let rotated = whole_diff_general(reviews_of(record))

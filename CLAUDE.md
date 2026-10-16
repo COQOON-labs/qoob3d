@@ -31,6 +31,7 @@ cargo xtask check --fast                    # without smoke + deny (runs automat
 cargo xtask setup                           # once: activate Git hooks from .githooks/ (ADR-0037)
 cargo xtask selftest                        # harness must reject every sabotage in harness/sabotage/
 cargo xtask commits main..HEAD              # commit policy: identity, no AI attribution, tests/code separate
+cargo xtask review --plan HEAD HEAD --not origin/main  # review tier, reasons, required critics (ADR-0052)
 cargo xtask check-rev <rev>                 # full check of a commit in a temporary worktree (pre-push, ADR-0048)
 cargo xtask docs [--fix]                    # docs lint; --fix regenerates the ADR index
 cargo xtask i18n                            # translations complete, no hard-coded UI texts
@@ -51,7 +52,7 @@ needed (rustup is installed keg-only via Homebrew).
 
 1. **Done means: `cargo xtask check` is green.** Report nothing as finished before that.
    Additionally check visual changes with `cargo xtask screenshot` and look at the PNGs.
-   Before the push: critic review (`/critic-review`, ADR-0041).
+   Before the push: critic review (`/critic-review`, ADR-0041, ADR-0052).
 2. **Document decisions:** Every new architecture or design decision gets an ADR
    (copy `docs/adr/0000-template.md`, then `cargo xtask docs --fix`), in the same commit as the
    code. Do not rewrite accepted ADRs; supersede them with a new one.
@@ -168,6 +169,14 @@ Crate-specific pitfalls are in the respective `crates/<crate>/CLAUDE.md`.
 - **Set up the GitHub wall** (ADR-0037, `docs/harness.md`): ruleset for `main` with
   required checks, CODEOWNERS, separate identity for agents without merge rights. Until then,
   CI is only as strong as the rights the agent pushes with.
+- **Rest of ADR-0052:** Copilot code review in the ruleset (decision 7); critic calibration
+  with seeded defects (`harness/critic-seeds/`, skill `critic-calibrate`, decision 6) – until
+  then the thresholds of the review plan and the stopping rule are uncalibrated. Calibration
+  note: in round 5 of PR #5 both general reviews found no major (R̂ = 0) while the `tests` lens
+  and a file-group critic found two confirmed majors; the stopping rule counts only the two
+  general reviews and should be re-evaluated with the seeded calibration. Deterministic
+  follow-ups: diff coverage in CI, mutation score threshold and more crates, property-based
+  and metamorphic geometry tests, fuzzing of the file formats.
 - **Harness expansion:** deterministic checks for accessibility (AccessKit names,
   contrast, target sizes) and usability (interaction budgets of the core flows), fuzzing of the
   file formats, threshold for the mutation score after the first baseline.

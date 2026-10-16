@@ -1,0 +1,13 @@
+# The gate no longer looks for earlier records of the branch: after a fix
+# round, a record with `previous_tree: null` and round 1 passes, so the model
+# rotation is skipped silently (ADR-0052 decision 2, fix round 4, K-10)
+command: cargo test -p xtask --quiet check_predecessor_requires_previous_tree
+expect: check_predecessor_requires_previous_tree
+--- patch
+diff --git a/xtask/src/review.rs b/xtask/src/review.rs
+--- a/xtask/src/review.rs
++++ b/xtask/src/review.rs
+@@ -421,3 +421,2 @@
+     let mut problems = record_problems(&record, tree, &plan, &records);
+-    problems.extend(predecessor_problem(root, &record, tree, rev_list_args, &records)?);
+     problems.extend(range_problems(&record, commit.trim(), &boundaries));

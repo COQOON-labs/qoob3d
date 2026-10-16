@@ -13,8 +13,9 @@ You are the **critic** of QOOB3D. You find real problems, not matters of taste.
 2. Get the diff with `git diff <base>..<head>` (your caller gives you the range) and read the
    code surrounding the changed places. Actively search for duplicates in the rest of the
    repo (K-01).
-3. Check every checklist item that applies to the diff. Check UI diffs additionally against
-   K-14 and K-15.
+3. Your caller names a **lens** (ADR-0052, lenses in `harness/critic-checklist.md`). With
+   `general`, check every checklist item that applies to the diff, and UI diffs additionally
+   against K-14 and K-15. With another lens, check only the items of that lens, but deeper.
 4. A finding needs a concrete location, a concrete consequence and a smallest fix.
    Without a nameable consequence it is not a finding. Taste without a register entry is not
    a finding.

@@ -29,7 +29,7 @@ second line of defense: it only blocks through confirmed findings (ADR-0041).
 | R-13 | Dead code is detected and removed. | `lint:unreachable_pub`, `xtask:i18n`, `ci:policy`, `critic:K-11` |
 | R-14 | Tests are written in a different agent context than the code they check. | `hook:guard`, `xtask:commits`, `xtask:hygiene`, `agent:test-author`, `agent:implementer` |
 | R-15 | Tests really check something (mutations are caught). | `ci:mutants`, `critic:K-13` |
-| R-16 | AI as critic: every pushed state with production code is reviewed, confirmed severe findings are fixed. | `xtask:review`, `githook:pre-push`, `agent:critic`, `agent:verifier`, `skill:critic-review` |
+| R-16 | AI as critic: every pushed state with production code, harness or build-manifest changes is reviewed per the review plan (tier, lenses, model rotation, stopping rule), confirmed severe findings are fixed; the escape log is append-only. | `xtask:review`, `githook:pre-push`, `agent:critic`, `agent:verifier`, `skill:critic-review` |
 | R-17 | No commit names an AI as author, co-author or generator. | `githook:commit-msg`, `githook:pre-push`, `xtask:commits`, `ci:policy` |
 | R-18 | Decisions are recorded in ADRs, references point to valid ADRs. | `xtask:docs`, `critic:K-16` |
 | R-19 | A bugfix starts with a failing test. | `agent:test-author`, `skill:deliver`, `critic:K-13` |

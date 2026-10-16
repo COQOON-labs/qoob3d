@@ -1,0 +1,15 @@
+# A range that changes only harness files (hook, workflow, checklist) is
+# planned `none` again and pushes without a critic review (ADR-0052 fix
+# round 1)
+command: cargo test -p xtask --quiet plan_harness_only_range_is_high
+expect: plan_harness_only_range_is_high
+--- patch
+diff --git a/xtask/src/review.rs b/xtask/src/review.rs
+--- a/xtask/src/review.rs
++++ b/xtask/src/review.rs
+@@ -210,4 +210,4 @@
+     let harness = first(paths::is_harness);
+-    if code.is_empty() && harness.is_none() && first(is_build_input).is_none() {
++    if code.is_empty() && first(is_build_input).is_none() {
+         return Ok(Plan { tier: Tier::None, reasons: Vec::new(), code_lines });
+     }

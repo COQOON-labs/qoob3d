@@ -1,0 +1,14 @@
+# The plan still names the `security` lens for a harness range, but the gate
+# no longer checks that the record has it (ADR-0052 decision 1, decision 3)
+command: cargo test -p xtask --quiet high_needs_the_lenses_of_its_triggers
+expect: high_needs_the_lenses_of_its_triggers
+--- patch
+diff --git a/xtask/src/review.rs b/xtask/src/review.rs
+--- a/xtask/src/review.rs
++++ b/xtask/src/review.rs
+@@ -721,4 +721,4 @@
+     // A lens covers the plan only if it reviewed the whole diff (ADR-0052).
+-    for lens in plan.lenses() {
++    for lens in plan.lenses().into_iter().filter(|lens| *lens != Lens::Security) {
+         if !whole_diff(reviews).any(|r| r["lens"] == lens.name()) {
+             problems.push(format!("tier high needs a review with lens `{}`", lens.name()));

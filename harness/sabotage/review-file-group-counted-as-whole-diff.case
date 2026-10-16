@@ -1,0 +1,14 @@
+# File-group reviews (`"scope": "files"`) count as whole-diff general
+# reviews again: a critic of one file group stands in for the second model
+# of tier high or the general review of tier standard (ADR-0052 fix round 1, F3)
+command: cargo test -p xtask --quiet file_group_reviews_do_not_count_as_whole_diff
+expect: file_group_reviews_do_not_count_as_whole_diff
+--- patch
+diff --git a/xtask/src/review.rs b/xtask/src/review.rs
+--- a/xtask/src/review.rs
++++ b/xtask/src/review.rs
+@@ -646,3 +646,3 @@
+ fn whole_diff(reviews: &[Value]) -> impl Iterator<Item = &Value> {
+-    reviews.iter().filter(|r| r.get("scope").is_none_or(|scope| scope == "diff"))
++    reviews.iter()
+ }

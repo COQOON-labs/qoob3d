@@ -4,8 +4,11 @@
 #   1. commit policy for every pushed commit: no AI attribution (ADR-0038),
 #      tests and code in separate commits (ADR-0039), fixtures untouched
 #   2. secret scan of the pushed commits (gitleaks)
-#   3. a critic review of the pushed state, if it changes production code
-#      (ADR-0041); a human skips it with QOOB3D_SKIP_REVIEW=1
+#   3. a critic review of the pushed state, if the branch changes production
+#      code or the harness (ADR-0041); the plan covers the whole branch
+#      against <remote>/main where that ref exists, so splitting a branch into
+#      small pushes does not lower its tier (ADR-0052); a human skips it with
+#      QOOB3D_SKIP_REVIEW=1
 #   4. the full definition of done for the tip of each pushed ref, in a
 #      temporary worktree of exactly that commit: `xtask check-rev` (ADR-0048)
 # A client that quarantines new files (Sourcetree) cannot run the check: cargo
@@ -32,6 +35,12 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     range=("$remote_sha..$local_sha")
     log_opts="$remote_sha..$local_sha"
   fi
+  review_range=("${range[@]}")
+  if git rev-parse --verify --quiet "refs/remotes/$remote/main" >/dev/null; then
+    review_range=("$local_sha" --not "refs/remotes/$remote/main")
+  else
+    echo "pre-push: refs/remotes/$remote/main missing – the review plans only the pushed commits" >&2
+  fi
   echo "pre-push: commit policy for $local_ref"
   "$xtask_binary" commits "${range[@]}"
   if command -v gitleaks >/dev/null; then
@@ -42,7 +51,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   if [ "${QOOB3D_SKIP_REVIEW:-}" = 1 ]; then
     echo "pre-push: critic review skipped (QOOB3D_SKIP_REVIEW=1)" >&2
   else
-    "$xtask_binary" review "$local_sha" "${range[@]}"
+    "$xtask_binary" review "$local_sha" "${review_range[@]}"
   fi
   "$xtask_binary" check-rev "$local_sha"
 done

@@ -1,0 +1,15 @@
+# The gate still reads the previous record but accepts any general model:
+# the round after a fix may reuse the model of the previous general review
+# (ADR-0052 decision 2)
+command: cargo test -p xtask --quiet rotation_needs_a_new_general_model
+expect: rotation_needs_a_new_general_model
+--- patch
+diff --git a/xtask/src/review.rs b/xtask/src/review.rs
+--- a/xtask/src/review.rs
++++ b/xtask/src/review.rs
+@@ -580,4 +580,4 @@
+     let rotated = whole_diff_general(reviews_of(record))
+         .filter_map(|r| r["model"].as_str())
+-        .any(|model| !used.contains(model));
++        .any(|model| !model.is_empty());
+     (!rotated).then(|| {

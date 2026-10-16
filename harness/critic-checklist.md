@@ -33,6 +33,18 @@ Severities:
 | K-16 | **Decisions and docs:** A new architecture or design decision gets an ADR. CLAUDE.md, `docs/architecture.md` and the requirements are updated. |
 | K-17 | **Performance:** No unnecessary allocations or copies in the frame loop, no kernel work in the UI thread, no quadratic effort over meshes or features without reason. |
 
+## Lenses (ADR-0052)
+
+The review plan (`cargo xtask review --plan`) names the lenses a diff needs. A lens critic
+checks only its items, but deeper than a general review.
+
+| Lens | Items | Focus |
+| --- | --- | --- |
+| `general` | all | the whole diff, including cross-cutting defects |
+| `tests` | K-13, K-11 | do the tests pin the specified behaviour; would a wrong implementation pass; dead or weakened tests |
+| `security` | K-10, K-09 | harness diffs: ways around guard, hooks, gates and roles; fail-open paths; untrusted input |
+| `robustness` | K-09, K-10, K-05 | OCCT boundary and file formats: exceptions, invalid geometry, NaN/∞, limits, migrations of old files |
+
 ## Output format
 
 One JSON object, no prose around it:

@@ -1,0 +1,14 @@
+# The gate accepts any `base` in the record instead of a boundary commit of
+# the pushed range: a record of another range passes (ADR-0052 fix round 2,
+# record range consistency)
+command: cargo test -p xtask --quiet record_names_the_reviewed_range
+expect: record_names_the_reviewed_range
+--- patch
+diff --git a/xtask/src/review.rs b/xtask/src/review.rs
+--- a/xtask/src/review.rs
++++ b/xtask/src/review.rs
+@@ -437,3 +437,3 @@
+     } else {
+-        base.as_str().is_some_and(|base| boundaries.iter().any(|b| b == base))
++        base.as_str().is_some_and(|base| !base.is_empty())
+     };

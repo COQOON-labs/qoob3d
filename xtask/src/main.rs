@@ -13,7 +13,8 @@
 //! cargo xtask commits <revs>   commit policy for a revision range (ADR-0038, ADR-0039, ADR-0044)
 //! cargo xtask commits --message <file>  same for one message (commit-msg hook)
 //! cargo xtask setup            install the git hooks (ADR-0037)
-//! cargo xtask review <tip> <revs>  critic record for pushed code (ADR-0041)
+//! cargo xtask review <tip> <revs>  critic record for pushed code (ADR-0041, ADR-0052)
+//! cargo xtask review --plan <tip> <revs>  the review plan of a pushed range (ADR-0052)
 //! cargo xtask rules            every rule in harness/rules.md has existing checks (ADR-0040)
 //! cargo xtask selftest         the harness rejects every sabotage in harness/sabotage/ (ADR-0042)
 //! cargo xtask guard            Claude Code PreToolUse hook: JSON on stdin, exit 2 = deny (ADR-0043)
@@ -71,12 +72,21 @@ fn main() -> ExitCode {
         }
         Some("rules") => report("rules", rules::check(&root)),
         Some("selftest") => report("selftest", selftest::run(&root)),
-        Some("review") => match &args[1..] {
-            [tip, revs @ ..] if !revs.is_empty() => {
+        Some("review") => match review::parse_args(&args[1..]) {
+            Some(review::Invocation::Plan { tip, revs }) => {
+                match review::plan_range(&root, tip, revs) {
+                    Ok(plan) => {
+                        print!("{plan}");
+                        true
+                    }
+                    Err(problems) => report("review --plan", Err(problems)),
+                }
+            }
+            Some(review::Invocation::Gate { tip, revs }) => {
                 report("review", review::check(&root, tip, revs))
             }
-            _ => {
-                eprintln!("usage: cargo xtask review <tip> <rev-list args>");
+            None => {
+                eprintln!("usage: cargo xtask review [--plan] <tip> <rev-list args>");
                 false
             }
         },
@@ -92,7 +102,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask <check [--fast] | check-rev <rev> | arch | docs [--fix] | i18n | hygiene | rules | selftest | commits <revs> | review <tip> <revs> | guard | harness-changes <base> <head> | setup | models [--write] | screenshot [dir]>"
+                "usage: cargo xtask <check [--fast] | check-rev <rev> | arch | docs [--fix] | i18n | hygiene | rules | selftest | commits <revs> | review [--plan] <tip> <revs> | guard | harness-changes <base> <head> | setup | models [--write] | screenshot [dir]>"
             );
             return ExitCode::from(2);
         }

@@ -7,7 +7,7 @@ expect: does not call the quarantine check
 diff --git a/.githooks/pre-push b/.githooks/pre-push
 --- a/.githooks/pre-push
 +++ b/.githooks/pre-push
-@@ -16,3 +16,3 @@
+@@ -19,3 +19,3 @@
 
 -if quarantining_client; then
 +if false; then

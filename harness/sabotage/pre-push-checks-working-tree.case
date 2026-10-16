@@ -5,7 +5,7 @@ expect: pre_push_checks_the_tip_of_each_pushed_ref_not_the_working_tree
 diff --git a/.githooks/pre-push b/.githooks/pre-push
 --- a/.githooks/pre-push
 +++ b/.githooks/pre-push
-@@ -46,2 +46,2 @@
+@@ -56,2 +56,2 @@
 -  "$xtask_binary" check-rev "$local_sha"
 +  "$xtask_binary" check
  done

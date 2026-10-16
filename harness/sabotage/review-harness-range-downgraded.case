@@ -1,0 +1,14 @@
+# The review plan still reports the harness trigger but no longer makes a
+# range high for it: a harness change gets a single general review instead of
+# two models plus a security lens (ADR-0052 decision 1)
+command: cargo test -p xtask --quiet plan_harness_trigger
+expect: plan_harness_trigger
+--- patch
+diff --git a/xtask/src/review.rs b/xtask/src/review.rs
+--- a/xtask/src/review.rs
++++ b/xtask/src/review.rs
+@@ -221,3 +221,3 @@
+     .collect();
+-    let tier = if reasons.is_empty() { Tier::Standard } else { Tier::High };
++    let tier = if reasons.iter().all(|r| r.trigger == Trigger::Harness) { Tier::Standard } else { Tier::High };
+     Ok(Plan { tier, reasons, code_lines })

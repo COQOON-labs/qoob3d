@@ -1,20 +1,23 @@
-# `cargo xtask review` reads `git log --name-only` without `-z` again: git
+# `cargo xtask review` reads `git log --numstat` without `-z` again: git
 # quotes a non-ASCII, tab, `"` or `\` path, the quoted name is no code path,
-# and a code change passes without a critic record (ADR-0041; critic finding
-# N3 on 0600f48)
+# and a code change passes without a critic record (ADR-0041, ADR-0052;
+# critic finding N3 on 0600f48)
 command: cargo test -p xtask --quiet quoted_code_paths_need_a_critic_record
 expect: quoted_code_paths_need_a_critic_record
 --- patch
 diff --git a/xtask/src/review.rs b/xtask/src/review.rs
 --- a/xtask/src/review.rs
 +++ b/xtask/src/review.rs
-@@ -21,7 +21,7 @@
-     // `-z`: paths unquoted, as they are (git quotes non-ASCII, tab, `"`, `\`).
--    let mut args = vec!["log", "--format=", "--name-only", "-z"];
-+    let mut args = vec!["log", "--format=", "--name-only"];
-     args.extend(rev_list_args.iter().map(String::as_str));
-     let changed = git(root, &args).map_err(|e| vec![e])?;
--    if !changed.split('\0').any(|f| paths::kind(f) == Kind::Code) {
-+    if !changed.lines().any(|f| paths::kind(f) == Kind::Code) {
-         return Ok(());
-     }
+@@ -250,11 +250,10 @@
+     let numstat = with_revs(&[
+         "log",
+         "--format=",
+         "--numstat",
+         "--no-renames",
+-        "-z",
+         "--diff-merges=remerge",
+     ])?;
+     let changes: Vec<(&str, usize)> = numstat
+-        .split('\0')
++        .lines()
+         .filter_map(|entry| {

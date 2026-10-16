@@ -210,6 +210,36 @@ fn non_harness_paths() {
     }
 }
 
+// ADR-0052 fix round 1 ("one path matcher"): `listed` and `is_harness`
+// share one implementation: entries ending in `/` or `-` are prefixes, others
+// match exactly, case ignored. So `listed(HARNESS, p)` is `is_harness(p)`
+// for every path, including the `xtask-` prefix entry.
+#[test]
+fn listed_matches_like_is_harness() {
+    for path in [
+        "target/debug/deps/xtask-0123abcd",
+        "TARGET/debug/deps/XTASK-0123",
+        "target/debug/deps/xtaskish-0123abcd",
+        "target/debug/xtask",
+        "target/debug/xtask2",
+        "XTASK/src/main.rs",
+        "xtaskX/src/main.rs",
+        "Cargo.toml",
+        "cargo.TOML",
+        "Cargo.toml.bak",
+        "crates/qoob3d-core/Cargo.toml",
+        ".github",
+        ".github/workflows/ci.yml",
+        "docs/harness.md",
+    ] {
+        assert_eq!(listed(HARNESS, path), is_harness(path), "{path}");
+    }
+    assert!(listed(&["a/b-"], "A/B-c"));
+    assert!(listed(&["a/"], "a/x"));
+    assert!(!listed(&["a/b-"], "a/bc"));
+    assert!(!listed(&["a/b"], "a/b/c"));
+}
+
 // ADR-0030/ADR-0039: the fixture directory constant.
 #[test]
 fn fixture_directory() {

@@ -22,7 +22,11 @@ proposals. Harness files are changed only by a session the human has unlocked.
    - `git log --grep "Mixed-Change:"`: how often and why was the test separation bypassed with
      a reason?
    - `target/critic/*.json`: share of `refuted` among `blocker`/`major` (false alarms of the
-     critic), most frequent rules, how many `accepted`.
+     critic), most frequent rules, how many `accepted`; per model and lens, which findings
+     only that review found (ADR-0052).
+   - `docs/escapes.md` (ADR-0052): escapes per class and per layer that missed them. A class
+     with two escapes needs a deterministic check, or else a checklist item or a lens; propose
+     it with finished content. Rows with status `open` older than one milestone are a finding.
    - Results of the last CI runs (`gh run list`), especially `mutants` and
      `check (Linux, experimental)`.
 5. **Fitness for purpose:** which check has never fired since the last audit (dead or
