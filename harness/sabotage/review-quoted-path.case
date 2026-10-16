@@ -1,20 +1,22 @@
-# `cargo xtask review` reads `git log --name-only` without `-z` again: git
+# `cargo xtask review` reads `git log --numstat` without `-z` again: git
 # quotes a non-ASCII, tab, `"` or `\` path, the quoted name is no code path,
-# and a code change passes without a critic record (ADR-0041; critic finding
-# N3 on 0600f48)
+# and a code change passes without a critic record (ADR-0041, ADR-0052;
+# critic finding N3 on 0600f48)
 command: cargo test -p xtask --quiet quoted_code_paths_need_a_critic_record
 expect: quoted_code_paths_need_a_critic_record
 --- patch
 diff --git a/xtask/src/review.rs b/xtask/src/review.rs
 --- a/xtask/src/review.rs
 +++ b/xtask/src/review.rs
-@@ -21,7 +21,7 @@
+@@ -165,9 +165,9 @@
      // `-z`: paths unquoted, as they are (git quotes non-ASCII, tab, `"`, `\`).
--    let mut args = vec!["log", "--format=", "--name-only", "-z"];
-+    let mut args = vec!["log", "--format=", "--name-only"];
+     // `--no-renames`: a rename changes the old path too.
+-    let mut args = vec!["log", "--format=", "--numstat", "--no-renames", "-z"];
++    let mut args = vec!["log", "--format=", "--numstat", "--no-renames"];
      args.extend(rev_list_args.iter().map(String::as_str));
-     let changed = git(root, &args).map_err(|e| vec![e])?;
--    if !changed.split('\0').any(|f| paths::kind(f) == Kind::Code) {
-+    if !changed.lines().any(|f| paths::kind(f) == Kind::Code) {
-         return Ok(());
-     }
+     let numstat = git(&args)?;
+     let changes: Vec<(&str, usize)> = numstat
+-        .split('\0')
++        .lines()
+         .filter_map(|entry| {
+             let mut fields = entry.splitn(3, '\t');

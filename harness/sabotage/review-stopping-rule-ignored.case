@@ -1,0 +1,16 @@
+# The gate no longer applies the stopping rule in tier high: two general
+# critics that leave R̂ ≥ 1 undiscovered findings pass without a third model
+# (ADR-0052 decision 4)
+command: cargo test -p xtask --quiet stopping_rule_needs_a_third_model
+expect: stopping_rule_needs_a_third_model
+--- patch
+diff --git a/xtask/src/review.rs b/xtask/src/review.rs
+--- a/xtask/src/review.rs
++++ b/xtask/src/review.rs
+@@ -298,5 +298,5 @@
+     problems.extend(rotation_problem(record, records));
+-    if plan.tier == Tier::High {
++    if plan.tier == Tier::None {
+         problems.extend(stopping_problem(reviews, findings));
+     }
+     problems
