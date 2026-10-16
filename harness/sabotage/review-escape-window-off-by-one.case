@@ -1,14 +1,15 @@
 # The escape window is off by one: a row 180 days before the tip still makes
-# the range high (window is 0 ≤ tip − row ≤ 179 days, ADR-0052 decision 1)
+# the range high (a row counts while tip − row < 180 days, ADR-0052
+# decision 1)
 command: cargo test -p xtask --quiet plan_escape_window
 expect: plan_escape_window
 --- patch
 diff --git a/xtask/src/review.rs b/xtask/src/review.rs
 --- a/xtask/src/review.rs
 +++ b/xtask/src/review.rs
-@@ -316,4 +316,4 @@
-         };
--        if (0..ESCAPE_WINDOW_DAYS).contains(&(tip - day)) {
-+        if (0..=ESCAPE_WINDOW_DAYS).contains(&(tip - day)) {
-             places.extend(cells[where_column].split('`').skip(1).step_by(2));
-         }
+@@ -355,4 +355,4 @@
+             };
+-            if tip - day < ESCAPE_WINDOW_DAYS {
++            if tip - day <= ESCAPE_WINDOW_DAYS {
+                 places.extend(paths);
+             }

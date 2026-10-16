@@ -1,0 +1,16 @@
+# The plan no longer reads escape rows at the excluded refs of the range: a
+# branch that forked before a row landed on main misses the row when the
+# hook plans `<tip> --not <remote>/main` (ADR-0052 fix round 2, S1)
+command: cargo test -p xtask --quiet plan_range_reads_escape_rows_at_excluded_refs
+expect: plan_range_reads_escape_rows_at_excluded_refs
+--- patch
+diff --git a/xtask/src/review.rs b/xtask/src/review.rs
+--- a/xtask/src/review.rs
++++ b/xtask/src/review.rs
+@@ -279,5 +279,4 @@
+     let mut logs = BTreeSet::new();
+-    for commit in std::iter::once(tip).chain(boundaries.iter().map(String::as_str)).chain(excluded)
+-    {
++    for commit in std::iter::once(tip).chain(boundaries.iter().map(String::as_str)) {
+         logs.insert(escape_log(root, commit)?);
+     }

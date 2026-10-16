@@ -8,14 +8,15 @@ expect: quoted_code_paths_need_a_critic_record
 diff --git a/xtask/src/review.rs b/xtask/src/review.rs
 --- a/xtask/src/review.rs
 +++ b/xtask/src/review.rs
-@@ -221,9 +221,9 @@
-     // `-z`: paths unquoted, as they are (git quotes non-ASCII, tab, `"`, `\`).
-     // `--no-renames`: a rename changes the old path too. `remerge`: what a
-     // merge commit changes beyond merging its parents (conflict resolutions).
--    let mut args = vec!["log", "--format=", "--numstat", "--no-renames", "-z"];
-+    let mut args = vec!["log", "--format=", "--numstat", "--no-renames"];
-     args.extend(["--diff-merges=remerge"].into_iter().chain(revs.clone()));
-     let numstat = git(&args)?;
+@@ -250,11 +250,10 @@
+     let numstat = with_revs(&[
+         "log",
+         "--format=",
+         "--numstat",
+         "--no-renames",
+-        "-z",
+         "--diff-merges=remerge",
+     ])?;
      let changes: Vec<(&str, usize)> = numstat
 -        .split('\0')
 +        .lines()

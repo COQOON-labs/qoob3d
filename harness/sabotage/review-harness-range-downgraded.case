@@ -7,8 +7,8 @@ expect: plan_harness_trigger
 diff --git a/xtask/src/review.rs b/xtask/src/review.rs
 --- a/xtask/src/review.rs
 +++ b/xtask/src/review.rs
-@@ -153,3 +153,3 @@
+@@ -221,3 +221,3 @@
      .collect();
 -    let tier = if reasons.is_empty() { Tier::Standard } else { Tier::High };
 +    let tier = if reasons.iter().all(|r| r.trigger == Trigger::Harness) { Tier::Standard } else { Tier::High };
-     Ok(Plan { tier, reasons })
+     Ok(Plan { tier, reasons, code_lines })

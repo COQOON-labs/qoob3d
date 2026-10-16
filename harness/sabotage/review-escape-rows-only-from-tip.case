@@ -7,8 +7,10 @@ expect: plan_range_keeps_escape_rows_the_range_removes
 diff --git a/xtask/src/review.rs b/xtask/src/review.rs
 --- a/xtask/src/review.rs
 +++ b/xtask/src/review.rs
-@@ -246,3 +246,3 @@
+@@ -279,5 +279,4 @@
+     let mut logs = BTreeSet::new();
+-    for commit in std::iter::once(tip).chain(boundaries.iter().map(String::as_str)).chain(excluded)
+-    {
++    for commit in std::iter::once(tip) {
+         logs.insert(escape_log(root, commit)?);
      }
--    plan(&changes, &union(&logs), tip_date.trim())
-+    plan(&changes, &logs[0], tip_date.trim())
- }
