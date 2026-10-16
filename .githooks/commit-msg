@@ -3,4 +3,5 @@
 # Installed by `cargo xtask setup`.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
-exec cargo xtask commits --message "$1"
+build_xtask
+exec "$xtask_binary" commits --message "$1"

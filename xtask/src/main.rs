@@ -187,7 +187,6 @@ fn check_rev(root: &Path, rev: &str) -> bool {
     let target = worktree::check_rev_target_dir(root, cargo_target_dir.as_deref());
     let result = worktree::with_worktree(root, rev, |dir| {
         println!("check-rev: checking {rev} in {}", dir.display());
-        worktree::build_xtask(dir, &target)?;
         match worktree::check_command(dir, &target).status() {
             Ok(status) if status.success() => Ok(()),
             Ok(status) => Err(format!("check of {rev} in {} failed ({status})", dir.display())),

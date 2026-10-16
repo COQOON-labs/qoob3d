@@ -1,6 +1,6 @@
 ---
 id: ADR-0051
-title: The git hooks and check-rev build xtask first and remove the macOS quarantine attribute from it
+title: The git hooks run an un-quarantined xtask directly, pre-push stops under a quarantining client
 status: accepted
 date: 2026-10-15
 crates: []
@@ -11,9 +11,8 @@ superseded_by: null
 
 ## Context
 
-The git hooks (ADR-0037) run `cargo xtask …`; `check-rev` (ADR-0048) runs `cargo xtask check`
-in a temporary worktree with its own target directory. Both rebuild the `xtask` binary when its
-sources changed.
+The git hooks (ADR-0037) ran `cargo xtask …`; `check-rev` (ADR-0048) runs `cargo xtask check`
+in a temporary worktree with its own target directory.
 
 GUI git clients run the hooks as their child processes. Sourcetree is registered with
 `LSFileQuarantineEnabled`, so macOS sets `com.apple.quarantine` (`0081;…;Sourcetree;`) on every
@@ -22,32 +21,37 @@ refuses to start the binary ("xtask Not Opened … Apple could not verify"), the
 git aborts; on 2026-10-15 a merge was left half-done. From a terminal the same hooks work,
 because the terminal does not quarantine.
 
+A first fix built xtask, stripped the attribute and then called `cargo xtask`. A real push
+from Sourcetree on 2026-10-15 showed that this cannot work: cargo re-creates the hardlink
+`target/debug/xtask` on every `cargo build` or `cargo run`, even without recompiling, and the
+client quarantines the new link again. The full check of `check-rev` also builds and at once
+runs test binaries and build scripts, which nothing can un-quarantine in time.
+
 ## Decision
 
-- `.githooks/lib.sh` holds the shared setup of the hooks (PATH, repository root) and builds
-  xtask with `cargo build --quiet --package xtask` before a hook runs it. On macOS it removes
-  `com.apple.quarantine` from `${CARGO_TARGET_DIR:-target}/debug/xtask` and ignores a missing
-  attribute; if the binary itself is missing, it says so on stderr instead of calling `xattr`.
-  `cargo xtask` then finds the binary fresh and starts it without relinking.
-  `commit-msg` and `pre-push` source `lib.sh`.
-- `check-rev` builds the worktree's xtask into the shared `check-rev` target directory
-  (`worktree::build_xtask`) before it spawns `cargo xtask check`, and on macOS removes the
-  attribute from that binary with `xattr -d`, ignoring a missing attribute.
+- `.githooks/lib.sh` holds the shared setup of the hooks (PATH, repository root, the path
+  `xtask_binary="${CARGO_TARGET_DIR:-target}/debug/xtask"`); sourcing it builds nothing.
+- Its function `build_xtask` runs `cargo build --quiet --package xtask` and on macOS removes
+  `com.apple.quarantine` from the binary, ignoring a missing attribute; if the binary itself is
+  missing, it says so on stderr instead of calling `xattr`. The hooks then run
+  `"$xtask_binary"` directly, never `cargo xtask`, which would re-link and re-quarantine it.
+- Its function `quarantining_client` creates a probe file with `mktemp`, tests it for
+  `com.apple.quarantine` (macOS only) and removes it again. `pre-push` calls it before it
+  builds anything; under a quarantining client it writes on stderr that the client quarantines
+  newly built programs, that Gatekeeper would block the full check, and that the push must go
+  from a terminal, and exits 1.
+- `check-rev` does nothing about the quarantine.
 
 ## Consequences
 
-- The hooks and `check-rev` clear the quarantine from the xtask binary only, after it is
-  built. The dependencies of xtask (serde, serde_json, proc-macro2, thiserror) have build
-  scripts that cargo compiles and runs during `cargo build --package xtask`; under a
-  quarantining GUI client such as Sourcetree those are quarantined before the hook can strip
-  anything. Commits and merges from such a client therefore work only while xtask and its
-  dependencies are already built. After a toolchain or dependency change (or with a fresh
-  `check-rev` target directory), build xtask once from the terminal.
+- Commits and merges work from Sourcetree, as long as the dependencies of xtask (serde,
+  serde_json, proc-macro2, thiserror) are built: their build scripts are compiled and run
+  during `cargo build --package xtask`, before anything can be stripped. After a toolchain or
+  dependency change, build xtask once from a terminal.
+- Pushes need a terminal (or another client that does not quarantine). The stop comes before
+  any build, so git is not left half-done and the message names the way out.
 - Every hook run starts with a `cargo build` of xtask; with an unchanged xtask that is a no-op
   of well under a second.
-- Pushes are unverified: `check-rev` builds and runs test binaries, build scripts and `qoob3d`
-  for the smoke test, none of which are cleared. A real push from Sourcetree decides; until
-  then, pushing from the terminal is the safe path.
 - The hooks remove a security attribute from a binary we build ourselves from the checked-out
   sources; they never touch downloaded files.
 
@@ -60,9 +64,12 @@ because the terminal does not quarantine.
   bundle; changing it breaks the signature and is undone by every update.
 - **Sign the xtask binary** – needs an Apple developer identity on every machine and in every
   build, for an internal tool.
+- **Strip the quarantine in `check-rev`** – the check re-links xtask and builds and immediately
+  runs test binaries and build scripts; none of them can be cleared before they start.
+- **Skip `check-rev` under a quarantining client** – it would weaken the local brake before a
+  push; the user chose to stop the push instead.
 
 ## References
 
-- Code: `.githooks/lib.sh`, `.githooks/commit-msg`, `.githooks/pre-push`,
-  `xtask/src/worktree.rs`, `xtask/src/main.rs` (`check_rev`)
+- Code: `.githooks/lib.sh`, `.githooks/commit-msg`, `.githooks/pre-push`
 - Related: ADR-0013, ADR-0037, ADR-0048
