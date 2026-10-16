@@ -373,21 +373,21 @@ const RELINK: &str = "ADR-0051: `cargo xtask` (= `cargo run`) re-links target/de
      link again, so the strip in lib.sh is undone; run the binary through the variable lib.sh \
      assigns it to";
 
-// ADR-0051 (finding 2026-10-15, Sourcetree push): `lib.sh` builds xtask and,
-// on macOS only, removes `com.apple.quarantine` from the built binary, after
-// the build (details in `assert_lib_sh_strips_quarantine`). Each hook sources
-// `lib.sh`, has `lib.sh` build xtask, and only then runs the binary directly
-// through the variable `lib.sh` assigns its path to; no `cargo xtask` line is
-// left, because `cargo run` re-links the binary and re-quarantines it.
+// ADR-0051 (finding 2026-10-15, Sourcetree push): each hook sources `lib.sh`,
+// has `lib.sh` build xtask (which strips the quarantine, see the
+// `build_xtask_on_*` tests), and only then runs the binary directly through
+// the variable `lib.sh` assigns its path to; no `cargo xtask` line is left,
+// because `cargo run` re-links the binary and re-quarantines it.
 // commit-msg: `exec "$var" commits --message "$1"` (the former
 // `exec cargo xtask commits --message "$1"`); pre-push runs `commits`,
 // `review` and `check-rev` the same way.
 #[test]
-fn hooks_build_xtask_and_strip_the_macos_quarantine_before_running_it() {
+fn hooks_build_xtask_before_running_the_binary_directly() {
     let lib_text = repo_file(".githooks/lib.sh");
-    assert_lib_sh_strips_quarantine(&lib_text);
     let lib = shell_code(&lib_text);
-    let (assignment, var) = binary_assignment(&lib).expect("checked above");
+    let (assignment, var) = binary_assignment(&lib).unwrap_or_else(|| {
+        panic!("lib.sh must assign the binary path {BINARY} to a variable ({RELINK})")
+    });
     assert!(
         !lib[assignment].starts_with("local "),
         "lib.sh must assign {var} globally, the hooks run the binary through it"
@@ -433,103 +433,174 @@ fn hooks_build_xtask_and_strip_the_macos_quarantine_before_running_it() {
     }
 }
 
-/// Why `lib.sh` must check that the binary exists; part of the failure messages.
-const MISSING: &str = "if the xtask binary is missing, lib.sh must say so on stderr \
-     (`>&2`, e.g. `hooks: … not found, quarantine not removed`) instead of calling \
-     xattr blindly and discarding its failure";
+/// Writes an executable shell script `name` with `body` into `dir`.
+fn write_stub(dir: &Path, name: &str, body: &str) {
+    let path = dir.join(name);
+    fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    fs::set_permissions(&path, permissions).unwrap();
+}
 
-/// Panics unless `lib` (the text of `.githooks/lib.sh`) builds xtask and then,
-/// in the same function (or both at the top level), inside a Darwin check,
-/// removes the quarantine from the binary held in a variable, after an
-/// `if [ -f "$var" ]` whose missing branch writes to stderr.
-fn assert_lib_sh_strips_quarantine(lib: &str) {
-    let code = shell_code(lib);
-    let build = xtask_build_line(&code).unwrap_or_else(|| {
-        panic!("lib.sh must build xtask with `cargo build --package xtask` ({QUARANTINE_REASON})")
-    });
-    let (assignment, var) = binary_assignment(&code).unwrap_or_else(|| {
+/// A fresh, empty scratch directory for `test` in the system temp dir.
+fn scratch_dir(test: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("qoob3d-hooks-{test}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// The definition of the `lib.sh` function (in `lib`, as `shell_code`) whose
+/// body satisfies `body`: its name and its source.
+fn lib_function(lib: &[&str], body: impl Fn(&str) -> bool) -> Option<(String, String)> {
+    shell_functions(lib)
+        .into_iter()
+        .find(|(_, start, end)| lib[start + 1..*end].iter().any(|l| body(l)))
+        .map(|(name, start, end)| (name.to_owned(), lib[start..=end].join("\n")))
+}
+
+/// What one run of the `lib.sh` build function did.
+struct BuildRun {
+    /// The `cargo …` and `xattr …` calls of the stubs, in order.
+    calls: Vec<String>,
+    stderr: String,
+    status: std::process::ExitStatus,
+    /// Where cargo puts the xtask binary: `$CARGO_TARGET_DIR/debug/xtask`.
+    binary: PathBuf,
+}
+
+/// Runs the `lib.sh` function that calls `cargo` (the build of xtask) alone
+/// under `bash -c` with `set -euo pipefail`, after the top-level variable
+/// assignments of lib.sh except `PATH` (so the stubs win). Nothing real is
+/// built or changed: stubs on PATH stand in for `cargo` (logs its arguments
+/// and, if `creates_binary`, creates `$CARGO_TARGET_DIR/debug/xtask` as cargo
+/// does), `uname` (prints `system`) and `xattr` (logs its arguments).
+fn run_build_xtask(test: &str, system: &str, creates_binary: bool) -> BuildRun {
+    let lib_text = repo_file(".githooks/lib.sh");
+    let lib = shell_code(&lib_text);
+    let (name, definition) = lib_function(&lib, |l| calls(l, "cargo"))
+        .unwrap_or_else(|| panic!("lib.sh has no function that builds xtask with cargo"));
+    let functions = shell_functions(&lib);
+    let assignments: Vec<&str> = lib
+        .iter()
+        .enumerate()
+        .filter(|(i, l)| {
+            enclosing_function(&functions, *i).is_none()
+                && assigned_name(l).is_some_and(|n| n != "PATH")
+        })
+        .map(|(_, l)| *l)
+        .collect();
+
+    let dir = scratch_dir(test);
+    let stubs = dir.join("bin");
+    let work = dir.join("work");
+    fs::create_dir_all(&stubs).unwrap();
+    fs::create_dir_all(&work).unwrap();
+    let target = dir.join("target");
+    let log = dir.join("calls.log");
+    write_stub(
+        &stubs,
+        "cargo",
+        "printf 'cargo %s\\n' \"$*\" >> \"$STUB_LOG\"\n\
+         if [ \"$STUB_BINARY\" = yes ]; then\n\
+           mkdir -p \"$CARGO_TARGET_DIR/debug\" && : > \"$CARGO_TARGET_DIR/debug/xtask\"\n\
+         fi\n",
+    );
+    write_stub(&stubs, "uname", "printf '%s\\n' \"$STUB_UNAME\"\n");
+    write_stub(&stubs, "xattr", "printf 'xattr %s\\n' \"$*\" >> \"$STUB_LOG\"\n");
+
+    let script = format!("set -euo pipefail\n{}\n{definition}\n{name}\n", assignments.join("\n"));
+    let path = format!("{}:{}", stubs.display(), std::env::var("PATH").unwrap_or_default());
+    let out = Command::new("bash")
+        .args(["-c", &script])
+        .current_dir(&work)
+        .env("PATH", path)
+        .env("CARGO_TARGET_DIR", &target)
+        .env("STUB_LOG", &log)
+        .env("STUB_UNAME", system)
+        .env("STUB_BINARY", if creates_binary { "yes" } else { "no" })
+        .output()
+        .unwrap();
+    let calls = fs::read_to_string(&log).unwrap_or_default().lines().map(str::to_owned).collect();
+    fs::remove_dir_all(&dir).unwrap();
+    BuildRun {
+        calls,
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        status: out.status,
+        binary: target.join("debug").join("xtask"),
+    }
+}
+
+/// The position of the `cargo build` of the xtask package among `calls`
+/// (`--package xtask`, `--package=xtask` or `-p xtask`).
+fn xtask_build_call(calls: &[String]) -> Option<usize> {
+    calls.iter().position(|call| {
+        let words: Vec<&str> = call.split_whitespace().collect();
+        words.get(..2) == Some(&["cargo", "build"])
+            && (words.contains(&"--package=xtask")
+                || words.windows(2).any(|w| matches!(w, ["--package" | "-p", "xtask"])))
+    })
+}
+
+/// Whether a logged call removes com.apple.quarantine from `binary`.
+fn strips(call: &str, binary: &Path) -> bool {
+    let words: Vec<&str> = call.split_whitespace().collect();
+    words.first() == Some(&"xattr")
+        && words.contains(&"-d")
+        && words.contains(&"com.apple.quarantine")
+        && words.last().map(Path::new) == Some(binary)
+}
+
+// ADR-0051: on macOS the build function of lib.sh builds the xtask package
+// and then removes com.apple.quarantine from the built binary
+// (`xattr -d com.apple.quarantine <$CARGO_TARGET_DIR/debug/xtask>`), after
+// the build that (re-)links it, and succeeds.
+#[test]
+fn build_xtask_on_darwin_strips_the_quarantine_after_the_build() {
+    let run = run_build_xtask("darwin", "Darwin", true);
+    let calls = &run.calls;
+    assert!(run.status.success(), "build_xtask failed: {} {}", run.status, run.stderr);
+    let build = xtask_build_call(calls)
+        .unwrap_or_else(|| panic!("build_xtask must run `cargo build --package xtask`: {calls:?}"));
+    let strip = calls.iter().position(|c| strips(c, &run.binary)).unwrap_or_else(|| {
         panic!(
-            "lib.sh must store the binary path {BINARY} in a variable, so that it can \
-             check the file exists before calling xattr ({QUARANTINE_REASON})"
+            "on Darwin, build_xtask must remove com.apple.quarantine from {} with `xattr -d` \
+             ({QUARANTINE_REASON}): {calls:?}",
+            run.binary.display()
         )
     });
-    let strip = code
-        .iter()
-        .position(|l| l.starts_with("xattr -d com.apple.quarantine") && uses_var(l, var))
-        .unwrap_or_else(|| {
-            panic!(
-                "lib.sh must remove com.apple.quarantine from \"${var}\" ({BINARY}) with \
-                 `xattr -d` ({QUARANTINE_REASON})"
-            )
-        });
-    assert!(
-        assignment < strip,
-        "lib.sh must assign {var} before the xattr call ({QUARANTINE_REASON})"
-    );
-    assert!(
-        build < strip,
-        "lib.sh must strip the quarantine after the build ({QUARANTINE_REASON})"
-    );
-    // A strip at the top level and a build in a function (or the reverse) run
-    // at different times: the strip would run when lib.sh is sourced, before
-    // the build that re-links the binary.
-    let functions = shell_functions(&code);
-    let (build_in, strip_in) =
-        (enclosing_function(&functions, build), enclosing_function(&functions, strip));
-    assert_eq!(
-        build_in, strip_in,
-        "lib.sh must strip the quarantine in the same function that builds xtask (or both at \
-         the top level), so that the strip follows every build ({QUARANTINE_REASON})"
-    );
-    // The `xattr` call sits in an `if` on `uname` = Darwin that is still open:
-    // no `fi` between the guard and the call.
-    let guard = code[..strip]
-        .iter()
-        .rposition(|l| l.starts_with("if ") && l.contains("$(uname)") && l.contains("Darwin"))
-        .unwrap_or_else(|| {
-            panic!("lib.sh must guard the xattr call with a Darwin check ({QUARANTINE_REASON})")
-        });
-    let (_, darwin_end) = if_branches(&code, guard);
-    let darwin_end = darwin_end.unwrap_or_else(|| panic!("lib.sh: the Darwin check has no `fi`"));
-    assert!(
-        strip < darwin_end,
-        "the xattr call in lib.sh must sit inside the Darwin check ({QUARANTINE_REASON})"
-    );
+    assert!(build < strip, "build_xtask must strip the quarantine after the build: {calls:?}");
+}
 
-    // Inside the Darwin block, before the xattr call: `if [ -f "$var" ]` or
-    // `if test -f "$var"` (possibly negated with `!`).
-    let tests_file = |l: &str| {
-        l.starts_with("if ")
-            && (l.contains("[ ") || l.contains("test "))
-            && [format!("-f \"${var}\""), format!("-f \"${{{var}}}\"")]
-                .iter()
-                .any(|t| l.contains(t.as_str()))
-    };
-    let Some(offset) = code[guard + 1..strip].iter().position(|l| tests_file(l)) else {
-        panic!(
-            "inside the Darwin check, lib.sh must test `[ -f \"${var}\" ]` before the \
-             xattr call ({MISSING})"
-        )
-    };
-    let check = guard + 1 + offset;
-    let negated = code[check].contains("! -f") || code[check].contains("! test");
-    let (otherwise, check_end) = if_branches(&code, check);
-    let check_end = check_end.unwrap_or_else(|| panic!("lib.sh: the file check has no `fi`"));
-    assert!(check_end < darwin_end, "the file check must sit inside the Darwin check");
-    let otherwise = otherwise
-        .unwrap_or_else(|| panic!("the file check in lib.sh has no `else` branch ({MISSING})"));
-    let (exists, missing) = if negated {
-        (otherwise..check_end, check..otherwise)
-    } else {
-        (check..otherwise, otherwise..check_end)
-    };
+// ADR-0051: elsewhere there is no quarantine attribute; the build function
+// builds xtask and never runs xattr (a stub would log it even on Linux).
+#[test]
+fn build_xtask_on_linux_never_runs_xattr() {
+    let run = run_build_xtask("linux", "Linux", true);
+    let calls = &run.calls;
+    assert!(run.status.success(), "build_xtask failed: {} {}", run.status, run.stderr);
+    assert!(xtask_build_call(calls).is_some(), "build_xtask must build xtask: {calls:?}");
     assert!(
-        exists.contains(&strip) && strip != exists.start,
-        "the xattr call must sit in the branch where {var} exists ({MISSING})"
+        !calls.iter().any(|c| c.starts_with("xattr")),
+        "build_xtask must run xattr only on Darwin: {calls:?}"
+    );
+}
+
+// ADR-0051 (critic finding): if the build leaves no binary on macOS, the
+// build function says so on stderr instead of calling xattr blindly and
+// discarding its failure.
+#[test]
+fn build_xtask_on_darwin_reports_a_missing_binary_on_stderr() {
+    let run = run_build_xtask("missing", "Darwin", false);
+    let calls = &run.calls;
+    assert!(
+        !calls.iter().any(|c| c.starts_with("xattr")),
+        "build_xtask must not call xattr on a missing binary: {calls:?}"
     );
     assert!(
-        code[missing.start + 1..missing.end].iter().any(|l| l.contains(">&2")),
-        "the branch where {var} is missing writes nothing to stderr ({MISSING})"
+        !run.stderr.trim().is_empty(),
+        "build_xtask writes nothing to stderr when {} is missing ({QUARANTINE_REASON})",
+        run.binary.display()
     );
 }
 
@@ -542,9 +613,8 @@ fn assert_lib_sh_strips_quarantine(lib: &str) {
 fn hooks_set_errexit_themselves_before_sourcing_lib_sh() {
     const REASON: &str = "a failing `source` of lib.sh must stop the hook; errexit set only \
          inside lib.sh is lost when sourcing fails, and the wall must not fail open";
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for hook in [".githooks/commit-msg", ".githooks/pre-push"] {
-        let text = fs::read_to_string(root.join(hook)).unwrap();
+        let text = repo_file(hook);
         let code = shell_code(&text);
         assert_eq!(
             code.first().copied(),
@@ -553,9 +623,7 @@ fn hooks_set_errexit_themselves_before_sourcing_lib_sh() {
         );
         let source = code
             .iter()
-            .position(|l| {
-                (l.starts_with("source ") || l.starts_with(". ")) && l.contains("/lib.sh")
-            })
+            .position(|l| sources_lib_sh(l))
             .unwrap_or_else(|| panic!("{hook} does not source lib.sh ({REASON})"));
         assert!(
             source > 0,
@@ -622,52 +690,10 @@ fn panic_text(check: impl FnOnce()) -> Option<String> {
     )
 }
 
-/// The part of `lib.sh` before the Darwin check, as in the repository.
-const LIB_HEAD: &str = "set -euo pipefail\n\
-    export PATH=\"/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH\"\n\
-    cd \"$(git rev-parse --show-toplevel)\"\n\
-    # Builds xtask before the hook runs it.\n\
-    cargo build --quiet --package xtask\n";
-
-// Oracle self-check for `assert_lib_sh_strips_quarantine` (ADR-0051, critic
-// finding): the shapes the fix may take pass. Without this and the next
-// test, a matcher that never fires (or always fires) would decide the
-// repository test whatever lib.sh contains.
-#[test]
-fn lib_sh_quarantine_check_accepts_a_guarded_strip() {
-    let accepted = [
-        // `[ -f ]`, missing branch in `else`
-        "if [ \"$(uname)\" = Darwin ]; then\n\
-           xtask_binary=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
-           if [ -f \"$xtask_binary\" ]; then\n\
-             xattr -d com.apple.quarantine \"$xtask_binary\" 2>/dev/null || true\n\
-           else\n\
-             echo \"hooks: $xtask_binary not found, quarantine not removed\" >&2\n\
-           fi\n\
-         fi\n",
-        // negated `test -f`, braces, variable assigned before the Darwin check
-        "binary=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
-         if [ \"$(uname)\" = Darwin ]; then\n\
-           if ! test -f \"${binary}\"; then\n\
-             echo \"hooks: ${binary} not found, quarantine not removed\" >&2\n\
-           else\n\
-             xattr -d com.apple.quarantine \"${binary}\" 2>/dev/null || true\n\
-           fi\n\
-         fi\n",
-    ];
-    for tail in accepted {
-        let lib = format!("{LIB_HEAD}{tail}");
-        assert_eq!(panic_text(|| assert_lib_sh_strips_quarantine(&lib)), None, "{lib}");
-    }
-    // Build and strip inside one function that the hooks call (ADR-0051:
-    // sourcing lib.sh builds nothing, so pre-push can check the client first).
-    let lib = format!("{LIB_FUNCTIONS}{BUILD_FUNCTION}");
-    assert_eq!(panic_text(|| assert_lib_sh_strips_quarantine(&lib)), None, "{lib}");
-}
-
 /// The part of a `lib.sh` that builds nothing when sourced: the setup, the
 /// binary path and a quarantine check (the expected shape after ADR-0051's
-/// Sourcetree push finding).
+/// Sourcetree push finding), for the oracle self-checks of the pre-push
+/// matcher.
 const LIB_FUNCTIONS: &str = "set -euo pipefail\n\
     export PATH=\"/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH\"\n\
     cd \"$(git rev-parse --show-toplevel)\"\n\
@@ -696,146 +722,11 @@ const BUILD_FUNCTION: &str = "build_xtask() {\n\
       fi\n\
     }\n";
 
-// Oracle self-check for `assert_lib_sh_strips_quarantine` (ADR-0051, critic
-// finding): each regression fails with the message that names it.
-#[test]
-fn lib_sh_quarantine_check_rejects_each_regression() {
-    let rejected = [
-        // the code before the critic finding: xattr runs blindly on a literal path
-        (
-            "if [ \"$(uname)\" = Darwin ]; then\n\
-               xattr -d com.apple.quarantine \"${CARGO_TARGET_DIR:-target}/debug/xtask\" \
-               2>/dev/null || true\n\
-             fi\n",
-            "in a variable",
-        ),
-        // the sabotage `hooks-keep-quarantine`: no xattr call left
-        (
-            "if [ \"$(uname)\" = Darwin ]; then\n\
-               b=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
-               if [ -f \"$b\" ]; then\n\
-                 true\n\
-               else\n\
-                 echo \"hooks: $b not found\" >&2\n\
-               fi\n\
-             fi\n",
-            "lib.sh must remove com.apple.quarantine",
-        ),
-        // variable, but no file check
-        (
-            "if [ \"$(uname)\" = Darwin ]; then\n\
-               b=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
-               xattr -d com.apple.quarantine \"$b\" 2>/dev/null || true\n\
-             fi\n",
-            "must test `[ -f",
-        ),
-        // file check without an else branch: a missing binary stays silent
-        (
-            "if [ \"$(uname)\" = Darwin ]; then\n\
-               b=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
-               if [ -f \"$b\" ]; then\n\
-                 xattr -d com.apple.quarantine \"$b\" 2>/dev/null || true\n\
-               fi\n\
-             fi\n",
-            "no `else` branch",
-        ),
-        // else branch, but its message goes to stdout
-        (
-            "if [ \"$(uname)\" = Darwin ]; then\n\
-               b=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
-               if [ -f \"$b\" ]; then\n\
-                 xattr -d com.apple.quarantine \"$b\" 2>/dev/null || true\n\
-               else\n\
-                 echo \"hooks: $b not found\"\n\
-               fi\n\
-             fi\n",
-            "writes nothing to stderr",
-        ),
-        // the branches swapped: xattr runs exactly when the file is missing
-        (
-            "if [ \"$(uname)\" = Darwin ]; then\n\
-               b=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
-               if [ -f \"$b\" ]; then\n\
-                 echo \"hooks: $b found\" >&2\n\
-               else\n\
-                 xattr -d com.apple.quarantine \"$b\" 2>/dev/null || true\n\
-               fi\n\
-             fi\n",
-            "branch where b exists",
-        ),
-        // the strip outside the Darwin check
-        (
-            "b=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
-             if [ \"$(uname)\" = Darwin ]; then\n\
-               true\n\
-             fi\n\
-             if [ -f \"$b\" ]; then\n\
-               xattr -d com.apple.quarantine \"$b\" 2>/dev/null || true\n\
-             else\n\
-               echo \"hooks: $b not found\" >&2\n\
-             fi\n",
-            "inside the Darwin check",
-        ),
-    ];
-    for (tail, expected) in rejected {
-        let lib = format!("{LIB_HEAD}{tail}");
-        let message = panic_text(|| assert_lib_sh_strips_quarantine(&lib))
-            .unwrap_or_else(|| panic!("accepted, but must fail with {expected:?}:\n{lib}"));
-        assert!(message.contains(expected), "expected {expected:?}, got {message:?}\n{lib}");
-    }
-    // The strip before the build.
-    let lib = "if [ \"$(uname)\" = Darwin ]; then\n\
-                 b=\"${CARGO_TARGET_DIR:-target}/debug/xtask\"\n\
-                 if [ -f \"$b\" ]; then\n\
-                   xattr -d com.apple.quarantine \"$b\" 2>/dev/null || true\n\
-                 else\n\
-                   echo \"hooks: $b not found\" >&2\n\
-                 fi\n\
-               fi\n\
-               cargo build --quiet --package xtask\n";
-    let message = panic_text(|| assert_lib_sh_strips_quarantine(lib)).expect("strip before build");
-    assert!(message.contains("after the build"), "{message}");
-}
-
-// Oracle self-check for `assert_lib_sh_strips_quarantine` (ADR-0051): build
-// in a function, strip at the top level: the strip runs when lib.sh is
-// sourced, before the build re-links the binary; and the reverse.
-#[test]
-fn lib_sh_quarantine_check_rejects_a_strip_apart_from_the_build() {
-    let strip = "if [ \"$(uname)\" = Darwin ]; then\n\
-                   if [ -f \"$xtask_binary\" ]; then\n\
-                     xattr -d com.apple.quarantine \"$xtask_binary\" 2>/dev/null || true\n\
-                   else\n\
-                     echo \"hooks: $xtask_binary not found\" >&2\n\
-                   fi\n\
-                 fi\n";
-    let split = [
-        format!(
-            "{LIB_FUNCTIONS}build_xtask() {{\ncargo build --quiet --package xtask\n}}\n{strip}"
-        ),
-        format!("{LIB_FUNCTIONS}cargo build --quiet --package xtask\nstrip() {{\n{strip}}}\n"),
-    ];
-    for lib in split {
-        let message = panic_text(|| assert_lib_sh_strips_quarantine(&lib))
-            .unwrap_or_else(|| panic!("accepted, but build and strip run apart:\n{lib}"));
-        assert!(message.contains("same function"), "{message}\n{lib}");
-    }
-}
-
 /// Why pre-push must stop under a quarantining client; part of the failure messages.
 const STOP_REASON: &str = "ADR-0051 (Sourcetree push, 2026-10-15): cargo re-links \
      target/debug/xtask on every build, and the check of check-rev builds and at once runs \
      test binaries and build scripts; a client that quarantines new files gets them all \
      refused by Gatekeeper, so pre-push must stop first, with a message on stderr";
-
-/// The name of the `lib.sh` function (in `lib`, as `shell_code`) whose body
-/// creates a probe file with `mktemp`: the quarantine check.
-fn quarantine_check(lib: &[&str]) -> Option<String> {
-    shell_functions(lib)
-        .into_iter()
-        .find(|(_, start, end)| lib[start + 1..*end].iter().any(|l| calls(l, "mktemp")))
-        .map(|(name, ..)| name.to_owned())
-}
 
 /// Whether `text` names an ADR: `ADR-` followed by four digits.
 fn names_an_adr(text: &str) -> bool {
@@ -859,7 +750,8 @@ fn exits_non_zero(line: &str) -> bool {
 /// quarantine), the way out (a terminal) and an ADR, and exits non-zero.
 fn assert_pre_push_stops_under_quarantine(hook: &str, lib: &str) {
     let lib = shell_code(lib);
-    let check = quarantine_check(&lib).unwrap_or_else(|| {
+    // The quarantine check: the function that creates a probe with `mktemp`.
+    let (check, _) = lib_function(&lib, |l| calls(l, "mktemp")).unwrap_or_else(|| {
         panic!(
             "lib.sh must define a shell function that creates a probe file with `mktemp` and \
              tests it for com.apple.quarantine, the quarantine check ({STOP_REASON})"
@@ -1053,30 +945,24 @@ fn pre_push_quarantine_oracle_rejects_each_regression() {
 fn run_quarantine_check(test: &str, treat: &str) -> (String, Vec<PathBuf>) {
     let lib_text = repo_file(".githooks/lib.sh");
     let lib = shell_code(&lib_text);
-    let name = quarantine_check(&lib).unwrap_or_else(|| {
+    let (name, definition) = lib_function(&lib, |l| calls(l, "mktemp")).unwrap_or_else(|| {
         panic!("lib.sh has no quarantine check (a function that calls `mktemp`) ({STOP_REASON})")
     });
-    let (_, start, end) =
-        shell_functions(&lib).into_iter().find(|(n, ..)| *n == name).expect("found above");
-    let definition = lib[start..=end].join("\n");
 
-    let dir = std::env::temp_dir().join(format!("qoob3d-quarantine-{test}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
+    let dir = scratch_dir(&format!("quarantine-{test}"));
     let stubs = dir.join("bin");
     fs::create_dir_all(&stubs).unwrap();
     let log = dir.join("probes.log");
-    let stub = format!(
-        "#!/bin/sh\n\
-         f=$(PATH=\"$PROBE_REAL_PATH\" mktemp \"$@\") || exit 1\n\
-         {treat} \"$f\" 2>/dev/null || true\n\
-         printf '%s\\n' \"$f\" >> \"$PROBE_LOG\"\n\
-         printf '%s\\n' \"$f\"\n"
+    write_stub(
+        &stubs,
+        "mktemp",
+        &format!(
+            "f=$(PATH=\"$PROBE_REAL_PATH\" mktemp \"$@\") || exit 1\n\
+             {treat} \"$f\" 2>/dev/null || true\n\
+             printf '%s\\n' \"$f\" >> \"$PROBE_LOG\"\n\
+             printf '%s\\n' \"$f\"\n"
+        ),
     );
-    let mktemp = stubs.join("mktemp");
-    fs::write(&mktemp, stub).unwrap();
-    let mut permissions = fs::metadata(&mktemp).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
-    fs::set_permissions(&mktemp, permissions).unwrap();
 
     let real_path = std::env::var("PATH").unwrap_or_default();
     let script = format!(

@@ -1,7 +1,7 @@
 # commit-msg runs `cargo xtask` again instead of the binary lib.sh built and
 # un-quarantined: cargo re-links target/debug/xtask on every run, a client such
 # as Sourcetree quarantines the new link, and Gatekeeper refuses it (ADR-0051)
-command: cargo test -p xtask --quiet hooks_build_xtask_and_strip_the_macos_quarantine_before_running_it
+command: cargo test -p xtask --quiet hooks_build_xtask_before_running_the_binary_directly
 expect: still runs `cargo xtask`
 --- patch
 diff --git a/.githooks/commit-msg b/.githooks/commit-msg
