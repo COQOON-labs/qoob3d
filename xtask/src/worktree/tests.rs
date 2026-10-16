@@ -216,3 +216,120 @@ fn pre_push_checks_the_tip_of_each_pushed_ref_not_the_working_tree() {
         assert!(!bare, "pre-push runs `cargo xtask check` in the working tree: {line}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0052 fix round 1 F2.2: the hook passes the review gate the whole
+// branch (`<local_sha> --not refs/remotes/<remote>/main`) when that ref
+// exists, otherwise the range it used before; commit policy and secret scan
+// keep the pushed range. The hook runs for real with `cargo` and `gitleaks`
+// replaced by exported bash functions that log their arguments (a function
+// wins over the hook's PATH, so no toolchain or network is involved).
+// ---------------------------------------------------------------------------
+
+const ZERO: &str = "0000000000000000000000000000000000000000";
+
+/// Runs the real pre-push hook in `repo` for a push to `remote` with one
+/// stdin line `refs/heads/feat <local> refs/heads/feat <remote_sha>`;
+/// returns the logged `cargo …` and `gitleaks …` calls.
+fn run_pre_push(repo: &Path, remote: &str, local: &str, remote_sha: &str) -> Vec<String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let hook = root.join(".githooks/pre-push");
+    let log = repo.join("stub.log");
+    let stubs = r#"cargo() { printf 'cargo %s\n' "$*" >> "$STUB_LOG"; }
+gitleaks() { printf 'gitleaks %s\n' "$*" >> "$STUB_LOG"; }
+export -f cargo gitleaks
+exec bash "$0" "$@""#;
+    let mut child = Command::new("bash")
+        .args(["-c", stubs])
+        .arg(&hook)
+        .args([remote, "git@example.com:x.git"])
+        .current_dir(repo)
+        .env("STUB_LOG", &log)
+        .env_remove("QOOB3D_SKIP_REVIEW")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let line = format!("refs/heads/feat {local} refs/heads/feat {remote_sha}\n");
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), line.as_bytes()).unwrap();
+    let status = child.wait().unwrap();
+    assert!(status.success(), "pre-push failed");
+    fs::read_to_string(&log).unwrap_or_default().lines().map(str::to_owned).collect()
+}
+
+/// The commits the rev-list arguments after `prefix` in the logged call
+/// select, as a set; `prefix` is e.g. `cargo xtask review <tip>`.
+fn selected(repo: &Path, calls: &[String], prefix: &str) -> std::collections::BTreeSet<String> {
+    let call = calls
+        .iter()
+        .find_map(|c| c.strip_prefix(prefix))
+        .unwrap_or_else(|| panic!("no call `{prefix} …` in {calls:?}"));
+    let mut args = vec!["rev-list"];
+    args.extend(call.split_whitespace());
+    git(repo, &args).lines().map(str::to_owned).collect()
+}
+
+fn set(commits: &[&String]) -> std::collections::BTreeSet<String> {
+    commits.iter().map(|c| (*c).clone()).collect()
+}
+
+/// main = m0, branch feat = b1 (already pushed) → b2 (new).
+fn pushed_branch(test: &str) -> (PathBuf, String, String, String) {
+    let (repo, commits) = throwaway_repo(test, &["m0", "b1", "b2"]);
+    let [m0, b1, b2] = <[String; 3]>::try_from(commits).unwrap();
+    (repo, m0, b1, b2)
+}
+
+// F2.2: pushing b2 onto the remote's b1 with `origin/main` = m0 reviews the
+// whole branch {b1, b2}; the commit policy and gitleaks keep b1..b2.
+#[test]
+fn pre_push_reviews_the_whole_branch_against_the_remote_main() {
+    let (repo, m0, b1, b2) = pushed_branch("pre-push-branch");
+    git(&repo, &["update-ref", "refs/remotes/origin/main", &m0]);
+    git(&repo, &["update-ref", "refs/remotes/origin/feat", &b1]);
+    let calls = run_pre_push(&repo, "origin", &b2, &b1);
+    let review = format!("cargo xtask review {b2} ");
+    assert_eq!(selected(&repo, &calls, &review), set(&[&b1, &b2]), "{calls:?}");
+    assert_eq!(selected(&repo, &calls, "cargo xtask commits "), set(&[&b2]), "{calls:?}");
+    assert!(
+        calls.iter().any(|c| c.starts_with("gitleaks ") && c.contains(&format!("{b1}..{b2}"))),
+        "{calls:?}"
+    );
+    fs::remove_dir_all(&repo).unwrap();
+}
+
+// F2.2: a new branch (remote sha zero) is reviewed against `<remote>/main`
+// too, even if another remote ref already holds b1 (the old range
+// `--not --remotes=origin` would review only b2); the commit policy keeps
+// the old range.
+#[test]
+fn pre_push_reviews_a_new_branch_against_the_remote_main() {
+    let (repo, m0, b1, b2) = pushed_branch("pre-push-new-branch");
+    git(&repo, &["update-ref", "refs/remotes/origin/main", &m0]);
+    git(&repo, &["update-ref", "refs/remotes/origin/backup", &b1]);
+    let calls = run_pre_push(&repo, "origin", &b2, ZERO);
+    let review = format!("cargo xtask review {b2} ");
+    assert_eq!(selected(&repo, &calls, &review), set(&[&b1, &b2]), "{calls:?}");
+    assert_eq!(selected(&repo, &calls, "cargo xtask commits "), set(&[&b2]), "{calls:?}");
+    fs::remove_dir_all(&repo).unwrap();
+}
+
+// F2.2: the main ref of the pushed-to remote counts (`upstream`, not a fixed
+// `origin`); without `<remote>/main` the hook falls back to the old range.
+#[test]
+fn pre_push_uses_the_main_of_the_pushed_remote() {
+    let (repo, m0, b1, b2) = pushed_branch("pre-push-remote");
+    git(&repo, &["update-ref", "refs/remotes/origin/main", &m0]);
+    git(&repo, &["update-ref", "refs/remotes/upstream/feat", &b1]);
+    let review = format!("cargo xtask review {b2} ");
+    let calls = run_pre_push(&repo, "upstream", &b2, &b1);
+    assert_eq!(selected(&repo, &calls, &review), set(&[&b2]), "fallback: {calls:?}");
+
+    git(&repo, &["update-ref", "refs/remotes/upstream/main", &m0]);
+    fs::remove_file(repo.join("stub.log")).unwrap();
+    let calls = run_pre_push(&repo, "upstream", &b2, &b1);
+    assert_eq!(selected(&repo, &calls, &review), set(&[&b1, &b2]), "upstream/main: {calls:?}");
+    fs::remove_dir_all(&repo).unwrap();
+}

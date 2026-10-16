@@ -387,20 +387,40 @@ fn plan_of_a_small_app_change_is_standard() {
     assert!(plan.reasons.is_empty(), "{:?}", plan.reasons);
 }
 
-// ADR-0052 §1: no changed file of kind `Code` is tier `none`, even for test
-// files under the format prefix, harness files of other kinds and big diffs.
+// ADR-0052 §1, fix round 1 ("harness-only changes need a review"): tier
+// `none` only when neither a `Code` file nor a harness path changed, even
+// for test files under the format prefix, non-harness files of other kinds
+// and big diffs.
 #[test]
-fn plan_without_code_is_none() {
+fn plan_without_code_or_harness_is_none() {
     let cases: &[&[(&str, usize)]] = &[
         &[],
         &[("docs/adr/0052-x.md", 5000)],
         &[("crates/qoob3d-core/src/document/tests.rs", 50)],
-        &[(".github/workflows/ci.yml", 3)],
-        &[("xtask/src/review/tests.rs", 1000)],
+        &[("crates/qoob3d-app/tests/modeling.rs", 1000)],
         &[("third_party/opencascade-sys/README.md", 1)],
     ];
     for changes in cases {
         assert_eq!(plan_of(changes).tier, Tier::None, "{changes:?}");
+    }
+}
+
+// ADR-0052 fix round 1: a range that changes only harness files (of any
+// kind: hook, workflow, checklist, harness tests, root config) is `high` with
+// reason harness and the harness file as example.
+#[test]
+fn plan_harness_only_range_is_high() {
+    for path in [
+        ".githooks/pre-push",
+        ".github/workflows/ci.yml",
+        "harness/critic-checklist.md",
+        "xtask/src/review/tests.rs",
+        "Cargo.toml",
+    ] {
+        let plan = plan_of(&[(path, 1)]);
+        assert_eq!(plan.tier, Tier::High, "{path}");
+        assert_eq!(triggers(&plan), [Trigger::Harness], "{path}");
+        assert_eq!(plan.reasons[0].path, path);
     }
 }
 
@@ -657,6 +677,36 @@ fn plan_escape_row_with_unparsable_date_fails_closed() {
     }
 }
 
+// ADR-0052 fix round 1 (escape table parsing fails closed): an escaped `\|`
+// does not split a cell, so the `Where` column stays in place.
+#[test]
+fn plan_escape_row_with_escaped_pipe() {
+    let row = format!("| 2026-10-01 | CI | `a \\| b` broke | `{PANELS}` | critic | c | k | open |");
+    let plan = plan(&[(PANELS, 10)], &escapes(&[row]), TIP_DATE);
+    assert!(plan.as_ref().is_ok_and(|p| triggers(p) == [Trigger::Escape]), "{plan:?}");
+}
+
+// ADR-0052 fix round 1: a row with more or fewer cells than the header is a
+// plan error naming the row (a shifted `Where` must not be read silently).
+#[test]
+fn plan_escape_row_with_wrong_cell_count_fails_closed() {
+    for (marker, row) in [
+        (
+            "extra-cell",
+            format!("| 2026-10-01 | CI | a | b extra-cell | `{PANELS}` | x | c | k | open |"),
+        ),
+        ("short-row", format!("| 2026-10-01 | CI | short-row | `{PANELS}` | x | c | open |")),
+        (
+            "unescaped",
+            "| 2026-10-01 | CI | a | unescaped | `docs/` | x | c | k | open |".to_owned(),
+        ),
+    ] {
+        let result = plan(&[(PANELS, 10)], &escapes(&[row]), TIP_DATE);
+        let Err(errors) = result else { panic!("{marker}: passed: {result:?}") };
+        assert_problem(&errors, marker, marker);
+    }
+}
+
 // ADR-0052 §1: `--plan` prints the tier, one line per reason (trigger and
 // example path) and the required reviews.
 #[test]
@@ -757,15 +807,18 @@ fn complete_records_pass() {
     }
 }
 
-// ADR-0052 §3.2: the record's tier must equal the plan's, in both directions.
+// ADR-0052 §3.2, fix round 1 F2.1: the record's tier must be at least the
+// plan's (none < standard < high); lower, missing or unknown tiers are
+// rejected (tier names are fixed strings, case-sensitive).
 #[test]
-fn tier_must_match_the_plan() {
+fn tier_must_be_at_least_the_plan() {
     let cases = [
         (standard_record(vec![]), size_plan()),
         (with(high_record(vec![]), "tier", json!("standard")), size_plan()),
-        (high_record(vec![]), standard_plan()),
         (with(standard_record(vec![]), "tier", json!("none")), standard_plan()),
         (with(standard_record(vec![]), "tier", json!("Standard")), standard_plan()),
+        (with(standard_record(vec![]), "tier", json!("medium")), standard_plan()),
+        (with(high_record(vec![]), "tier", json!("High")), size_plan()),
         (without(standard_record(vec![]), "tier"), standard_plan()),
     ];
     for (record, plan) in cases {
@@ -773,7 +826,24 @@ fn tier_must_match_the_plan() {
     }
 }
 
-// ADR-0052 §3.3: `reviews` must be a non-empty list.
+// ADR-0052 fix round 1 F2.1: a `high` record for a `standard` plan passes;
+// coverage and the stopping rule follow the plan, so one general review
+// suffices and (2,1,0) needs no third model. It must still cover the
+// standard requirement (a general review).
+#[test]
+fn high_record_for_a_standard_plan_follows_the_plan() {
+    assert_eq!(problems(&high_record(vec![]), &standard_plan()), Vec::<String>::new());
+    let one_general = record("high", vec![review("r1", MODEL_A, "general")], vec![]);
+    assert_eq!(problems(&one_general, &standard_plan()), Vec::<String>::new());
+    let findings = vec![counted(&["r1"]), counted(&["r1"]), counted(&["r2"])];
+    assert_eq!(problems(&high_record(findings), &standard_plan()), Vec::<String>::new());
+
+    let lens_only = record("high", vec![review("r1", MODEL_A, "tests")], vec![]);
+    assert_problem(&problems(&lens_only, &standard_plan()), "general", "high without general");
+}
+
+// ADR-0052 §3.3: `reviews` must be a non-empty list; the problem names the
+// field (test-quality finding of fix round 1: the specific problem).
 #[test]
 fn reviews_must_be_a_non_empty_list() {
     for record in [
@@ -782,7 +852,7 @@ fn reviews_must_be_a_non_empty_list() {
         with(standard_record(vec![]), "reviews", json!({"id": "r1"})),
         with(standard_record(vec![]), "reviews", json!(null)),
     ] {
-        assert_problem(&problems(&record, &standard_plan()), "review", &record.to_string());
+        assert_problem(&problems(&record, &standard_plan()), "`reviews`", &record.to_string());
     }
 }
 
@@ -815,9 +885,69 @@ fn every_review_is_complete() {
         assert_problem(&problems, needle, &extra.to_string());
     }
     // Control: the same extra review, complete, passes; so do all lenses.
+    // (Round 1: a first-round record has only round-1 reviews, fix round 1.)
     for lens in ["general", "tests", "security", "robustness"] {
-        let extra = json!({"id": "r2", "model": MODEL_B, "lens": lens, "round": 2});
+        let extra = json!({"id": "r2", "model": MODEL_B, "lens": lens, "round": 1});
         assert!(problems(&standard_with(extra), &standard_plan()).is_empty(), "{lens}");
+    }
+}
+
+// ADR-0052 fix round 1 F3: `scope` is absent, `diff` (whole diff) or `files`
+// (one file group); any other value is a problem naming `scope`.
+#[test]
+fn review_scope_is_diff_or_files() {
+    for scope in ["diff", "files"] {
+        let extra = json!({"id": "r2", "model": MODEL_B, "lens": "general", "round": 1,
+                           "scope": scope});
+        let found = problems(&standard_with(extra), &standard_plan());
+        assert!(found.is_empty(), "{scope}: {found:?}");
+    }
+    for scope in [json!("all"), json!("Files"), json!(""), json!(1), json!(["files"])] {
+        let extra = json!({"id": "r2", "model": MODEL_B, "lens": "general", "round": 1,
+                           "scope": scope.clone()});
+        assert_problem(
+            &problems(&standard_with(extra), &standard_plan()),
+            "scope",
+            &scope.to_string(),
+        );
+    }
+}
+
+/// A review of one file group (F3).
+fn files_review(id: &str, model: &str, lens: &str) -> Value {
+    json!({"id": id, "model": model, "lens": lens, "round": 1, "scope": "files"})
+}
+
+// ADR-0052 fix round 1 F3: only whole-diff general reviews cover the
+// general requirement of tier standard and the two models of tier high.
+// File-group reviews may still be cited in `found_by`.
+#[test]
+fn file_group_reviews_do_not_count_as_whole_diff() {
+    let standard = record("standard", vec![files_review("r1", MODEL_A, "general")], vec![]);
+    assert_problem(&problems(&standard, &standard_plan()), "general", "files only");
+
+    let reviews = vec![
+        review("r1", MODEL_A, "general"),
+        files_review("r2", MODEL_B, "general"),
+        review("r3", MODEL_A, "tests"),
+    ];
+    let high = record("high", reviews, vec![]);
+    assert_problem(&problems(&high, &size_plan()), "general", "second model only on files");
+
+    let reviews = vec![review("r1", MODEL_A, "general"), files_review("r2", MODEL_B, "general")];
+    let finding = json!({"rule": "K-03", "severity": "minor", "found_by": ["r2"]});
+    let cited = record("standard", reviews, vec![finding]);
+    let found = problems(&cited, &standard_plan());
+    assert!(found.is_empty(), "{found:?}");
+}
+
+// ADR-0052 fix round 1 ("rounds are consistent"): without `previous_tree`
+// every review has round 1.
+#[test]
+fn first_round_reviews_have_round_1() {
+    for round in [2, 3] {
+        let extra = json!({"id": "r2", "model": MODEL_B, "lens": "tests", "round": round});
+        assert_problem(&problems(&standard_with(extra), &standard_plan()), "round", "first round");
     }
 }
 
@@ -909,38 +1039,62 @@ fn records_with_previous(test: &str, previous: &str) -> std::path::PathBuf {
     dir
 }
 
-/// A record of the previous round with general reviews by `models` and a
-/// tests lens on `MODEL_C`.
+/// A record of the previous round (round 1) with whole-diff general reviews
+/// by `models`, in order, and a tests lens on `MODEL_C`.
 fn previous_record(tier: &str, models: &[&str]) -> String {
     let mut reviews: Vec<Value> =
         models.iter().enumerate().map(|(i, m)| review(&format!("p{i}"), m, "general")).collect();
     reviews.push(review("pt", MODEL_C, "tests"));
-    let mut previous = record(tier, reviews, vec![]);
+    previous_with(record(tier, reviews, vec![]))
+}
+
+/// `record` as the record of `PREV`.
+fn previous_with(mut previous: Value) -> String {
     previous["tree"] = json!(PREV);
     previous.to_string()
 }
 
-/// `record` as the round after `PREV`.
-fn after_previous(record: Value) -> Value {
+/// `record` as the round after `PREV`: round 2, one more than the previous
+/// records of these tests (all round 1).
+fn after_previous(mut record: Value) -> Value {
+    for review in record["reviews"].as_array_mut().into_iter().flatten() {
+        review["round"] = json!(2);
+    }
     with(record, "previous_tree", json!(PREV))
 }
 
-// ADR-0052 §3.6 / acceptance "Rotation": after a fix, a general review must
-// use a model no general review of the previous record used. Lens reviews
-// neither rotate nor block the rotation.
+/// The problems of `record` with the records in `dir`.
+fn problems_in(dir: &Path, record: &Value, plan: &Plan) -> Vec<String> {
+    record_problems(record, TREE, plan, dir)
+}
+
+/// The rotation problem: it names the previous tree and a model of the
+/// previous whole-diff general set (`model`), which no missing-record or
+/// format problem can.
+fn assert_rotation_problem(found: &[String], model: &str, what: &str) {
+    assert!(
+        found.iter().any(|p| p.contains(PREV) && p.contains(model)),
+        "{what}: no rotation problem naming {PREV} and {model}: {found:?}"
+    );
+}
+
+// ADR-0052 §3.6 / acceptance "Rotation": after a fix, a whole-diff general
+// review must use a model outside the previous whole-diff general set. Lens
+// reviews neither rotate nor block the rotation.
 #[test]
 fn rotation_needs_a_new_general_model() {
     let dir = records_with_previous("rotation", &previous_record("standard", &[MODEL_A]));
     let rotated = |reviews: Vec<Value>| after_previous(record("standard", reviews, vec![]));
     let same = rotated(vec![review("r1", MODEL_A, "general")]);
-    assert!(!record_problems(&same, TREE, &standard_plan(), &dir).is_empty(), "same model passed");
+    assert_rotation_problem(&problems_in(&dir, &same, &standard_plan()), MODEL_A, "same model");
     let lens_only = rotated(vec![review("r1", MODEL_A, "general"), review("r2", MODEL_B, "tests")]);
-    assert!(!record_problems(&lens_only, TREE, &standard_plan(), &dir).is_empty(), "lens rotated");
+    let found = problems_in(&dir, &lens_only, &standard_plan());
+    assert_rotation_problem(&found, MODEL_A, "lens rotated");
     // The previous tests lens used MODEL_C; that does not block MODEL_C now.
     for model in [MODEL_B, MODEL_C] {
         let fresh = rotated(vec![review("r1", model, "general")]);
-        let problems = record_problems(&fresh, TREE, &standard_plan(), &dir);
-        assert!(problems.is_empty(), "{model}: {problems:?}");
+        let found = problems_in(&dir, &fresh, &standard_plan());
+        assert!(found.is_empty(), "{model}: {found:?}");
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -951,32 +1105,214 @@ fn rotation_needs_a_new_general_model() {
 fn rotation_in_tier_high() {
     let dir = records_with_previous("rotation-high", &previous_record("high", &[MODEL_A, MODEL_B]));
     let same = after_previous(high_record(vec![]));
-    assert!(!record_problems(&same, TREE, &size_plan(), &dir).is_empty(), "same models passed");
+    assert_rotation_problem(&problems_in(&dir, &same, &size_plan()), MODEL_A, "same models");
     let reviews = vec![
         review("r1", MODEL_A, "general"),
         review("r2", MODEL_C, "general"),
         review("r3", MODEL_A, "tests"),
     ];
     let fresh = after_previous(record("high", reviews, vec![]));
-    let problems = record_problems(&fresh, TREE, &size_plan(), &dir);
-    assert!(problems.is_empty(), "{problems:?}");
+    let found = problems_in(&dir, &fresh, &size_plan());
+    assert!(found.is_empty(), "{found:?}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-// ADR-0052 §3.6: a missing or unreadable previous record fails closed and
-// names the previous tree; `null` or no `previous_tree` is a first round.
+// ADR-0052 fix round 1 F1: the previous set is only the a/b pair of the
+// stopping rule. Previous a/b = A/C with a third (stopping-rule) review on B:
+// a new whole-diff general review on B passes; only A and C fails.
+#[test]
+fn rotation_ignores_the_previous_third_review() {
+    let previous = previous_record("high", &[MODEL_A, MODEL_C, MODEL_B]);
+    let dir = records_with_previous("rotation-third", &previous);
+    let reviews = vec![
+        review("r1", MODEL_B, "general"),
+        review("r2", MODEL_A, "general"),
+        review("r3", MODEL_A, "tests"),
+    ];
+    let fresh = after_previous(record("high", reviews, vec![]));
+    let found = problems_in(&dir, &fresh, &size_plan());
+    assert!(found.is_empty(), "{found:?}");
+
+    let reviews = vec![
+        review("r1", MODEL_A, "general"),
+        review("r2", MODEL_C, "general"),
+        review("r3", MODEL_A, "tests"),
+    ];
+    let same = after_previous(record("high", reviews, vec![]));
+    assert_rotation_problem(&problems_in(&dir, &same, &size_plan()), MODEL_A, "only A and C");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ADR-0052 fix round 1 F1: the previous pair is the first whole-diff general
+// review and the first one on a different model, in record order; a repeat
+// of the first model and file-group reviews are not in the set. Previous:
+// A, A again, B (pair A/B), C only on a file group.
+#[test]
+fn rotation_set_is_the_first_whole_diff_pair() {
+    let previous = record(
+        "high",
+        vec![
+            review("p1", MODEL_A, "general"),
+            review("p2", MODEL_A, "general"),
+            files_review("p3", MODEL_C, "general"),
+            review("p4", MODEL_B, "general"),
+            review("pt", MODEL_A, "tests"),
+        ],
+        vec![],
+    );
+    let dir = records_with_previous("rotation-pair", &previous_with(previous));
+    let rotated = |model: &str| {
+        let reviews = vec![
+            review("r1", MODEL_A, "general"),
+            review("r2", model, "general"),
+            review("r3", MODEL_A, "tests"),
+        ];
+        after_previous(record("high", reviews, vec![]))
+    };
+    let found = problems_in(&dir, &rotated(MODEL_C), &size_plan());
+    assert!(found.is_empty(), "C was only a file-group review: {found:?}");
+    assert_rotation_problem(&problems_in(&dir, &rotated(MODEL_B), &size_plan()), MODEL_A, "A/B");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ADR-0052 fix round 1 F1/F3: the new model must be on a whole-diff general
+// review; a file-group general review on a new model does not rotate.
+#[test]
+fn rotation_needs_the_new_model_on_the_whole_diff() {
+    let dir = records_with_previous("rotation-files", &previous_record("standard", &[MODEL_A]));
+    let reviews = vec![review("r1", MODEL_A, "general"), files_review("r2", MODEL_B, "general")];
+    let record = after_previous(record("standard", reviews, vec![]));
+    assert_rotation_problem(&problems_in(&dir, &record, &standard_plan()), MODEL_A, "files");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ADR-0052 §3.6, fix round 1: a missing or unreadable previous record fails
+// closed with exactly one problem naming the previous tree; `null` or no
+// `previous_tree` is a first round.
 #[test]
 fn rotation_fails_closed_without_the_previous_record() {
     let record = after_previous(standard_record(vec![]));
-    assert_problem(&problems(&record, &standard_plan()), PREV, "missing previous record");
+    let found = problems(&record, &standard_plan());
+    assert!(found.len() == 1 && found[0].contains(PREV), "missing previous record: {found:?}");
 
     let dir = records_with_previous("rotation-broken", "{not json");
-    let found = record_problems(&record, TREE, &standard_plan(), &dir);
-    assert_problem(&found, PREV, "unreadable previous record");
+    let found = problems_in(&dir, &record, &standard_plan());
+    assert!(found.len() == 1 && found[0].contains(PREV), "unreadable previous record: {found:?}");
     std::fs::remove_dir_all(&dir).unwrap();
 
     let first = without(standard_record(vec![]), "previous_tree");
     assert!(problems(&first, &standard_plan()).is_empty());
+}
+
+// ADR-0052 fix round 1 (previous record validation): the previous record
+// must have version 2, `tree` equal to `previous_tree` and a whole-diff
+// general review; otherwise exactly one problem naming the previous tree.
+#[test]
+fn previous_record_is_validated() {
+    let general = || vec![review("p1", MODEL_A, "general")];
+    let cases = [
+        ("v1", previous_with(json!({"findings": [], "reviews": general()}))),
+        (
+            "version 3",
+            previous_with(with(record("standard", general(), vec![]), "version", json!(3))),
+        ),
+        (
+            "other tree",
+            with(record("standard", general(), vec![]), "tree", json!(TREE)).to_string(),
+        ),
+        ("no tree", without(record("standard", general(), vec![]), "tree").to_string()),
+        ("no reviews", previous_with(without(record("standard", vec![], vec![]), "reviews"))),
+        (
+            "lens only",
+            previous_with(record("standard", vec![review("p1", MODEL_A, "tests")], vec![])),
+        ),
+        (
+            "files only",
+            previous_with(record("standard", vec![files_review("p1", MODEL_A, "general")], vec![])),
+        ),
+    ];
+    let fresh = after_previous(record("standard", vec![review("r1", MODEL_B, "general")], vec![]));
+    for (what, previous) in cases {
+        let dir = records_with_previous(&format!("previous-{}", what.replace(' ', "-")), &previous);
+        let found = problems_in(&dir, &fresh, &standard_plan());
+        assert!(found.len() == 1 && found[0].contains(PREV), "{what}: {found:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+// ADR-0052 fix round 1: `previous_tree` must be a 40- or 64-character
+// lowercase hex object id (no path); otherwise exactly one problem naming
+// `previous_tree`. A path to a valid record outside the record directory
+// must not be read.
+#[test]
+fn previous_tree_must_be_an_object_id() {
+    let dir = records_with_previous("previous-id", &previous_record("standard", &[MODEL_A]));
+    // A complete previous record one level up whose `tree` is the path: only
+    // the id check keeps `../<TREE>` from passing.
+    let outside = dir.parent().unwrap().join(format!("{TREE}.json"));
+    let mut escaped = record("standard", vec![review("p1", MODEL_A, "general")], vec![]);
+    escaped["tree"] = json!(format!("../{TREE}"));
+    std::fs::write(&outside, escaped.to_string()).unwrap();
+    let fresh =
+        || after_previous(record("standard", vec![review("r1", MODEL_B, "general")], vec![]));
+    for id in [
+        json!(5),
+        json!(true),
+        json!(""),
+        json!(PREV.to_uppercase().replace('1', "A")),
+        json!(&PREV[..39]),
+        json!(format!("{PREV}0")),
+        json!(format!("../{TREE}")),
+        json!("g".repeat(40)),
+    ] {
+        let found =
+            problems_in(&dir, &with(fresh(), "previous_tree", id.clone()), &standard_plan());
+        assert!(found.len() == 1 && found[0].contains("previous_tree"), "{id}: {found:?}");
+    }
+    std::fs::remove_file(&outside).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ADR-0052 fix round 1: a 64-character id (SHA-256 repositories) is valid.
+#[test]
+fn previous_tree_may_be_a_sha256_id() {
+    let id = "ab".repeat(32);
+    let dir = records_with_previous("previous-sha256", "");
+    let mut previous = record("standard", vec![review("p1", MODEL_A, "general")], vec![]);
+    previous["tree"] = json!(id);
+    std::fs::write(dir.join(format!("{id}.json")), previous.to_string()).unwrap();
+    let fresh = after_previous(record("standard", vec![review("r1", MODEL_B, "general")], vec![]));
+    let found = problems_in(&dir, &with(fresh, "previous_tree", json!(id)), &standard_plan());
+    assert!(found.is_empty(), "{found:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ADR-0052 fix round 1 ("rounds are consistent"): with `previous_tree`,
+// every review has round = highest previous round + 1.
+#[test]
+fn rounds_follow_the_previous_record() {
+    let mut previous = record("standard", vec![review("p1", MODEL_A, "general")], vec![]);
+    previous["reviews"][0]["round"] = json!(2);
+    let dir = records_with_previous("rounds", &previous_with(previous));
+    let at = |rounds: &[u64]| {
+        let models = [MODEL_B, MODEL_C];
+        let reviews: Vec<Value> = rounds
+            .iter()
+            .zip(models)
+            .enumerate()
+            .map(|(i, (round, model))| {
+                json!({"id": format!("r{i}"), "model": model, "lens": "general", "round": round})
+            })
+            .collect();
+        with(record("standard", reviews, vec![]), "previous_tree", json!(PREV))
+    };
+    let found = problems_in(&dir, &at(&[3, 3]), &standard_plan());
+    assert!(found.is_empty(), "{found:?}");
+    for rounds in [&[2, 2][..], &[1][..], &[4][..], &[3, 2][..]] {
+        let found = problems_in(&dir, &at(rounds), &standard_plan());
+        assert_problem(&found, "round", &format!("{rounds:?}"));
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// A size-plan record with the reviews of [`high_reviews`] plus `extra`.
@@ -1062,6 +1398,30 @@ fn stopping_rule_takes_the_first_two_models_in_record_order() {
     let findings = vec![counted(&["r1"]), counted(&["r1"]), counted(&["r3"])];
     let found = problems(&record("high", reviews, findings), &size_plan());
     assert_problem(&found, "2.0", "a = r1, b = r3");
+}
+
+// ADR-0052 fix round 1 F3: a and b and the third model are whole-diff
+// general reviews only. r2 (B) reviews a file group, so a = r1 (A),
+// b = r3 (C): (2,1,0) → R̂ = 2. Taking r2 as b would give (2,0,0) → R̂ = 0.
+// The third model must be a whole-diff review: B on a file group is not.
+#[test]
+fn stopping_rule_uses_whole_diff_reviews_only() {
+    let reviews = |third: Value| {
+        vec![
+            review("r1", MODEL_A, "general"),
+            files_review("r2", MODEL_B, "general"),
+            review("r3", MODEL_C, "general"),
+            review("r4", MODEL_A, "tests"),
+            third,
+        ]
+    };
+    let findings = || vec![counted(&["r1"]), counted(&["r1"]), counted(&["r3"])];
+    let record_with = |third| record("high", reviews(third), findings());
+    let files_third = record_with(files_review("r5", MODEL_B, "general"));
+    assert_problem(&problems(&files_third, &size_plan()), "2.0", "third model on a file group");
+    let diff_third = record_with(review("r5", MODEL_B, "general"));
+    let found = problems(&diff_third, &size_plan());
+    assert!(found.is_empty(), "{found:?}");
 }
 
 // ADR-0052 §3.7: only one extra review is required; its findings do not
@@ -1399,12 +1759,140 @@ fn check_range_without_code_needs_no_record() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
-// ADR-0052 acceptance: the pre-push hook keeps calling the gate as
-// `review <tip> <rev-list args…>`, without `--plan`.
+// ADR-0052 acceptance: the pre-push hook calls the gate as
+// `review <tip> <rev-list args…>` with the pushed tip, without `--plan`. (Fix
+// round 1 F2.2 changes the range; `xtask/src/worktree/tests.rs` runs the hook
+// and checks the range itself.)
 #[test]
-fn pre_push_hook_calls_the_review_gate_unchanged() {
+fn pre_push_hook_calls_the_review_gate() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let hook = std::fs::read_to_string(root.join(".githooks/pre-push")).unwrap();
-    assert!(hook.contains(r#"cargo xtask review "$local_sha" "${range[@]}""#), "{hook}");
+    let calls = hook
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#') && l.contains("cargo xtask review"))
+        .collect::<Vec<_>>();
+    assert!(!calls.is_empty(), "{hook}");
+    for call in calls {
+        assert!(call.starts_with(r#"cargo xtask review "$local_sha" "#), "{call}");
+    }
     assert!(!hook.contains("--plan"), "{hook}");
+}
+
+// ADR-0052 fix round 1: a range that changes only a harness file (here the
+// pre-push hook) needs a critic record.
+#[test]
+fn check_harness_only_range_needs_a_record() {
+    let (root, base) = repo_with_base("check-harness-only", &[]);
+    write_file(&root, ".githooks/pre-push", "#!/usr/bin/env bash\nexit 0\n");
+    commit_all(&root, "Hook");
+    let Err(found) = check(&root, "HEAD", &[format!("{base}..HEAD")]) else {
+        panic!("harness-only range passed without a record");
+    };
+    assert_problem(&found, "no critic review", "harness only");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0052 fix round 1 F5: escape rows are the union of the log at the tip
+// and at every boundary commit, so a range cannot drop the row that makes it
+// high. Both range forms the hook uses are covered.
+#[test]
+fn plan_range_keeps_escape_rows_the_range_removes() {
+    let row = escape_row("2025-02-01", &format!("`{PANELS}`"));
+    let log = escapes(&[row]);
+    let (root, base) =
+        repo_with_base("plan-escape-union", &[(PANELS, "fn f() {}\n"), ("docs/escapes.md", &log)]);
+    write_file(&root, "docs/escapes.md", &escapes(&[]));
+    write_file(&root, PANELS, "fn g() {}\n");
+    commit_all(&root, "Drop the escape row");
+    for range in [vec![format!("{base}..HEAD")], vec!["HEAD".into(), "--not".into(), base.clone()]]
+    {
+        let plan = plan_range(&root, "HEAD", &range).unwrap();
+        assert_eq!(triggers(&plan), [Trigger::Escape], "{range:?}");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0052 fix round 1 F5: a boundary commit without `docs/escapes.md`
+// contributes no rows and no error.
+#[test]
+fn plan_range_with_boundary_without_escape_log() {
+    let (root, _) = repo_with_base("plan-boundary-no-log", &[(PANELS, "fn f() {}\n")]);
+    git_in(&root, &["rm", "-q", "docs/escapes.md"]);
+    let boundary = commit_all(&root, "Drop the log");
+    write_file(&root, PANELS, "fn g() {}\n");
+    commit_all(&root, "Tip");
+    let plan = plan_range(&root, "HEAD", &[format!("{boundary}..HEAD")]);
+    assert!(plan.as_ref().is_ok_and(|p| p.tier == Tier::Standard), "{plan:?}");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0052 fix round 1 (merge commits): code a merge commit itself
+// introduces counts; a plain merge of main does not count main's changes.
+// main gets 500 lines in the document module (size + format if counted); the
+// branch changes `PANELS` and merges main.
+#[test]
+fn plan_range_counts_what_a_merge_itself_changes() {
+    let (root, _) = repo_with_base("plan-merge", &[(PANELS, "fn f() {}\n")]);
+    git_in(&root, &["checkout", "-q", "-b", "feat"]);
+    write_file(&root, PANELS, &format!("fn f() {{}}\n{}", lines(10)));
+    let branch = commit_all(&root, "Branch");
+    git_in(&root, &["checkout", "-q", "main"]);
+    write_file(&root, "crates/qoob3d-core/src/document/main_only.rs", &lines(500));
+    commit_all(&root, "Main");
+
+    git_in(&root, &["checkout", "-q", "feat"]);
+    git_in(&root, &["merge", "-q", "--no-ff", "--no-edit", "main"]);
+    let plan = plan_range(&root, "HEAD", &["HEAD".into(), "--not".into(), "main".into()]).unwrap();
+    assert_eq!(plan.tier, Tier::Standard, "plain merge: {:?}", plan.reasons);
+
+    let evil = "crates/qoob3d-core/src/document/evil.rs";
+    git_in(&root, &["checkout", "-q", "-b", "evil", &branch]);
+    git_in(&root, &["merge", "-q", "--no-ff", "--no-commit", "main"]);
+    write_file(&root, evil, "fn evil() {}\n");
+    git_in(&root, &["add", "-A"]);
+    git_in(&root, &["commit", "-q", "-m", "Merge main with a change of its own"]);
+    let plan = plan_range(&root, "HEAD", &["HEAD".into(), "--not".into(), "main".into()]).unwrap();
+    assert_eq!(triggers(&plan), [Trigger::Format], "evil merge: {:?}", plan.reasons);
+    assert_eq!(plan.reasons[0].path, evil);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0052 fix round 1 (test quality): a binary code file (numstat `-`) is
+// still a changed code file, without a plan error.
+#[test]
+fn plan_range_with_a_binary_code_file() {
+    let (root, base) = repo_with_base("plan-binary", &[]);
+    write_file(&root, "crates/qoob3d-app/src/blob.rs", "\0\u{1}\u{2}binary\0");
+    commit_all(&root, "Binary");
+    let plan = plan_range(&root, "HEAD", &[format!("{base}..HEAD")]);
+    assert!(plan.as_ref().is_ok_and(|p| p.tier == Tier::Standard), "{plan:?}");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+fn strings(args: &[&str]) -> Vec<String> {
+    args.iter().map(|&a| a.to_owned()).collect()
+}
+
+// ADR-0052 fix round 1 (test quality): `review [--plan] <tip> <revs…>`
+// argument handling. `--plan` is never a tip, and revs are required.
+#[test]
+fn review_arguments() {
+    let args = strings(&["--plan", "abc", "x", "--not", "--remotes=origin"]);
+    assert_eq!(parse_args(&args), Some(Invocation::Plan { tip: "abc", revs: &args[2..] }));
+    let args = strings(&["--plan", "abc", "a..b"]);
+    assert_eq!(parse_args(&args), Some(Invocation::Plan { tip: "abc", revs: &args[2..] }));
+    let args = strings(&["abc", "a..b"]);
+    assert_eq!(parse_args(&args), Some(Invocation::Gate { tip: "abc", revs: &args[1..] }));
+    let args = strings(&["abc", "x", "--not", "--remotes=origin"]);
+    assert_eq!(parse_args(&args), Some(Invocation::Gate { tip: "abc", revs: &args[1..] }));
+    for args in [
+        &[][..],
+        &["abc"][..],
+        &["--plan"][..],
+        &["--plan", "a..b"][..],
+        &["--plan", "--plan", "a..b"][..],
+    ] {
+        assert_eq!(parse_args(&strings(args)), None, "{args:?}");
+    }
 }
