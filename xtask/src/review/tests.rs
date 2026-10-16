@@ -1264,8 +1264,12 @@ fn rotation_needs_the_new_model_on_the_whole_diff() {
 }
 
 // ADR-0052 §3.6, fix round 1: a missing or unreadable previous record fails
-// closed with exactly one problem naming the previous tree; `null` or no
-// `previous_tree` is a first round.
+// closed with exactly one problem naming the previous tree. Fix round 4
+// (K-10): `null` or no `previous_tree` is a first round only while the
+// branch has no earlier record. `record_problems` alone knows no range, so
+// it sees no predecessor and the last assertion is the case without one;
+// with a predecessor in the range the gate rejects `null`
+// (`check_predecessor_requires_previous_tree`).
 #[test]
 fn rotation_fails_closed_without_the_previous_record() {
     let record = after_previous(standard_record(vec![]));
@@ -1278,7 +1282,8 @@ fn rotation_fails_closed_without_the_previous_record() {
     std::fs::remove_dir_all(&dir).unwrap();
 
     let first = without(standard_record(vec![]), "previous_tree");
-    assert!(problems(&first, &standard_plan()).is_empty());
+    let found = problems(&first, &standard_plan());
+    assert!(found.is_empty(), "first round without a predecessor: {found:?}");
 }
 
 // ADR-0052 fix round 1 (previous record validation): the previous record
@@ -2137,4 +2142,247 @@ fn review_arguments() {
     ] {
         assert_eq!(parse_args(&strings(args)), None, "{args:?}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0052 fix round 4 (K-10): rotation is not opt-in. The gate finds the
+// earlier version-2 records of the branch itself (head in the planned
+// range, another tree) and requires `previous_tree` to name one with the
+// highest round; the rotation and round rules then apply as before.
+// ---------------------------------------------------------------------------
+
+/// A repository whose branch `feat` forks from `main` at the base commit;
+/// `PANELS` exists and the record directory is ignored, so stored records
+/// never enter a commit. Returns the root and the base commit.
+fn feature_repo(test: &str) -> (std::path::PathBuf, String) {
+    let (root, base) =
+        repo_with_base(test, &[(PANELS, "fn f() {}\n"), (".gitignore", "/target/\n")]);
+    git_in(&root, &["checkout", "-q", "-b", "feat"]);
+    (root, base)
+}
+
+/// Commits the `n`-th change of `PANELS` (a fix round) and returns its sha.
+fn change(root: &Path, n: usize) -> String {
+    write_file(root, PANELS, &format!("fn f{n}() {{}}\n"));
+    commit_all(root, &format!("Change {n}"))
+}
+
+/// Stores a complete standard record of `commit` (its tree and head, base
+/// `base`) with one whole-diff general review per model in `models`, all in
+/// `round`, and `previous` as `previous_tree`. Returns the commit's tree.
+fn store_round(
+    root: &Path,
+    commit: &str,
+    base: &str,
+    models: &[&str],
+    round: u64,
+    previous: Option<&str>,
+) -> String {
+    let tree = git_in(root, &["rev-parse", &format!("{commit}^{{tree}}")]);
+    let reviews: Vec<Value> = models
+        .iter()
+        .enumerate()
+        .map(|(i, model)| {
+            json!({"id": format!("r{i}"), "model": model, "lens": "general", "round": round})
+        })
+        .collect();
+    let mut record = record("standard", reviews, vec![]);
+    record["tree"] = json!(tree);
+    record["head"] = json!(git_in(root, &["rev-parse", &format!("{commit}^{{commit}}")]));
+    record["base"] = json!(base);
+    record["previous_tree"] = previous.map_or(Value::Null, |p| json!(p));
+    write_file(root, &format!("{RECORD_DIR}/{tree}.json"), &record.to_string());
+    tree
+}
+
+/// Both range forms the pre-push hook uses for a branch forked at `base`
+/// while `main` is still at `base`.
+fn feature_ranges(base: &str) -> [Vec<String>; 2] {
+    [vec![format!("{base}..HEAD")], strings(&["HEAD", "--not", "main"])]
+}
+
+/// The gate's problems; panics if it passes.
+fn gate_problems(root: &Path, range: &[String], what: &str) -> Vec<String> {
+    match check(root, "HEAD", range) {
+        Ok(()) => panic!("{what} {range:?}: the gate passed"),
+        Err(found) => found,
+    }
+}
+
+/// A problem that names `previous_tree` and the expected tree `tree` (spec
+/// criterion 2). No other problem of these records names that tree: the
+/// rotation and previous-record problems name the tree the record points to.
+fn assert_previous_tree_problem(found: &[String], tree: &str, what: &str) {
+    assert!(
+        found.iter().any(|p| p.contains("previous_tree") && p.contains(tree)),
+        "{what}: no problem naming `previous_tree` and the expected tree {tree}: {found:?}"
+    );
+}
+
+// K-10 / spec criteria 1, 2, 6: after a fix round, the earlier record of the
+// branch (head = the first commit, in range, another tree) is a predecessor.
+// A record with `previous_tree: null` (or without the key), round 1 and the
+// same general model as the earlier record must not pass: the problem names
+// the earlier tree. Both range forms of the hook.
+#[test]
+fn check_predecessor_requires_previous_tree() {
+    let (root, base) = feature_repo("pred-null");
+    let first = change(&root, 1);
+    let earlier = store_round(&root, &first, &base, &[MODEL_A], 1, None);
+    let fix = change(&root, 2);
+    for range in feature_ranges(&base) {
+        store_round(&root, &fix, &base, &[MODEL_A], 1, None);
+        let found = gate_problems(&root, &range, "previous_tree null");
+        assert_previous_tree_problem(&found, &earlier, "previous_tree null");
+
+        let tree = git_in(&root, &["rev-parse", "HEAD^{tree}"]);
+        let file = root.join(RECORD_DIR).join(format!("{tree}.json"));
+        let stored: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        std::fs::write(&file, without(stored, "previous_tree").to_string()).unwrap();
+        let found = gate_problems(&root, &range, "no previous_tree");
+        assert_previous_tree_problem(&found, &earlier, "no previous_tree");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// Spec criteria 2, 6: with two predecessors (round 1 at the first commit,
+// round 2 at the second), `previous_tree` must name the round-2 record. A
+// record that names the older round-1 record is rejected naming the round-2
+// tree, although its rounds (2 = 1 + 1) and rotation (C is outside {A}) are
+// consistent with the older record.
+#[test]
+fn check_predecessor_previous_tree_names_the_latest_round() {
+    let (root, base) = feature_repo("pred-latest");
+    let first = change(&root, 1);
+    let round_1 = store_round(&root, &first, &base, &[MODEL_A], 1, None);
+    let second = change(&root, 2);
+    let round_2 = store_round(&root, &second, &base, &[MODEL_B], 2, Some(&round_1));
+    let third = change(&root, 3);
+    store_round(&root, &third, &base, &[MODEL_C], 2, Some(&round_1));
+    for range in feature_ranges(&base) {
+        let found = gate_problems(&root, &range, "previous_tree names round 1");
+        assert_previous_tree_problem(&found, &round_2, "previous_tree names round 1");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// Spec criteria 2, 3, 6 (controls): a `previous_tree` naming a predecessor
+// with the highest round passes, with round = its round + 1 and a rotated
+// model. Two predecessors in round 1 (A at the first commit, B at the
+// second): either is accepted for round 2 on C. Then that round-2 record
+// is the only latest one: round 3 on A (outside {C}) naming it passes.
+#[test]
+fn check_predecessor_named_correctly_passes() {
+    let (root, base) = feature_repo("pred-correct");
+    let first = change(&root, 1);
+    let tied_a = store_round(&root, &first, &base, &[MODEL_A], 1, None);
+    let second = change(&root, 2);
+    let tied_b = store_round(&root, &second, &base, &[MODEL_B], 1, None);
+    let third = change(&root, 3);
+    for previous in [&tied_a, &tied_b] {
+        store_round(&root, &third, &base, &[MODEL_C], 2, Some(previous));
+        for range in feature_ranges(&base) {
+            assert_eq!(check(&root, "HEAD", &range), Ok(()), "tie, previous {previous} {range:?}");
+        }
+    }
+    let latest = store_round(&root, &third, &base, &[MODEL_C], 2, Some(&tied_a));
+    let fourth = change(&root, 4);
+    store_round(&root, &fourth, &base, &[MODEL_A], 3, Some(&latest));
+    for range in feature_ranges(&base) {
+        assert_eq!(check(&root, "HEAD", &range), Ok(()), "chain {range:?}");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// Spec criteria 1, 4, 5, 6: records whose head the range does not select are
+// no predecessors: the record of a commit on `main` after the fork (excluded
+// by `main`), the record of the boundary commit (a PR already merged) and a
+// record whose head is no commit of the repository. Their rounds (2, 1, 3)
+// are higher than the branch's, so counting any of them would require a
+// `previous_tree`. The branch's first record (null, round 1) passes.
+#[test]
+fn check_predecessor_ignores_records_outside_the_range() {
+    let (root, base) = feature_repo("pred-outside");
+    git_in(&root, &["checkout", "-q", "main"]);
+    let on_main = change(&root, 1);
+    store_round(&root, &on_main, &base, &[MODEL_A, MODEL_B], 2, None);
+    store_round(&root, &base, &base, &[MODEL_A], 1, None);
+    let mut stray = record("standard", vec![review("r1", MODEL_A, "general")], vec![]);
+    stray["tree"] = json!("e".repeat(40));
+    stray["head"] = json!("f".repeat(40));
+    stray["reviews"][0]["round"] = json!(3);
+    write_file(&root, &format!("{RECORD_DIR}/{}.json", "e".repeat(40)), &stray.to_string());
+    git_in(&root, &["checkout", "-q", "feat"]);
+    let tip = change(&root, 2);
+    store_round(&root, &tip, &base, &[MODEL_A], 1, None);
+    for range in [vec!["main..HEAD".to_owned()], strings(&["HEAD", "--not", "main"])] {
+        assert_eq!(check(&root, "HEAD", &range), Ok(()), "{range:?}");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// Spec criteria 1, 6: files of the record directory that do not parse, are
+// not version 2 (no version, 1, 3, the string "2"), are no JSON object or
+// are not `*.json` are no predecessors, even with a head in the range: they
+// cannot block a push. The branch's record (null, round 1) passes.
+#[test]
+fn check_predecessor_ignores_unreadable_and_other_versions() {
+    let (root, base) = feature_repo("pred-ignored");
+    let first = change(&root, 1);
+    let tree = git_in(&root, &["rev-parse", &format!("{first}^{{tree}}")]);
+    let dir = root.join(RECORD_DIR);
+    let reviews = vec![json!({"id": "p1", "model": MODEL_A, "lens": "general", "round": 4})];
+    let candidate = |version: Option<Value>| {
+        let mut record = record("standard", reviews.clone(), vec![]);
+        record["tree"] = json!(tree);
+        record["head"] = json!(first);
+        match version {
+            Some(version) => record["version"] = version,
+            None => record = without(record, "version"),
+        }
+        record.to_string()
+    };
+    std::fs::create_dir_all(&dir).unwrap();
+    for (file, text) in [
+        ("garbage.json".to_owned(), "{not json".to_owned()),
+        ("empty.json".to_owned(), String::new()),
+        ("array.json".to_owned(), json!([{"version": 2, "head": first}]).to_string()),
+        (format!("{tree}.json"), candidate(None)),
+        ("v1.json".to_owned(), candidate(Some(json!(1)))),
+        ("v3.json".to_owned(), candidate(Some(json!(3)))),
+        ("v2-string.json".to_owned(), candidate(Some(json!("2")))),
+        (format!("{tree}.json.bak"), candidate(Some(json!(2)))),
+    ] {
+        std::fs::write(dir.join(file), text).unwrap();
+    }
+    let tip = change(&root, 2);
+    store_round(&root, &tip, &base, &[MODEL_A], 1, None);
+    for range in feature_ranges(&base) {
+        assert_eq!(check(&root, "HEAD", &range), Ok(()), "{range:?}");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// Spec criterion 4: without a predecessor, a `previous_tree` that is set is
+// validated as before. It names the record of a commit on `main` (no
+// predecessor, round 2, general on A and B): round 3 on A repeats a previous
+// model (rotation problem naming that tree and A); round 3 on C passes.
+#[test]
+fn check_previous_tree_without_predecessor_is_validated_as_before() {
+    let (root, base) = feature_repo("pred-none-set");
+    git_in(&root, &["checkout", "-q", "main"]);
+    let on_main = change(&root, 1);
+    let main_tree = store_round(&root, &on_main, &base, &[MODEL_A, MODEL_B], 2, None);
+    git_in(&root, &["checkout", "-q", "feat"]);
+    let tip = change(&root, 2);
+    let range = strings(&["HEAD", "--not", "main"]);
+    store_round(&root, &tip, &base, &[MODEL_A], 3, Some(&main_tree));
+    let found = gate_problems(&root, &range, "same model");
+    assert!(
+        found.iter().any(|p| p.contains(&main_tree) && p.contains(MODEL_A)),
+        "no rotation problem naming {main_tree} and {MODEL_A}: {found:?}"
+    );
+    store_round(&root, &tip, &base, &[MODEL_C], 3, Some(&main_tree));
+    assert_eq!(check(&root, "HEAD", &range), Ok(()));
+    std::fs::remove_dir_all(&root).unwrap();
 }
