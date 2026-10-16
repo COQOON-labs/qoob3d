@@ -1943,19 +1943,22 @@ fn plan_range_reads_escape_rows_at_excluded_refs() {
         let plan = plan_range(&root, "feat", &strings(range)).unwrap();
         assert_eq!(triggers(&plan), [Trigger::Escape], "{range:?}");
     }
-    // The hook's fallback form with a ref glob plans without an error.
+    // The hook's fallback form with a ref glob reads the row too (ADR-0052
+    // fix round 6 S5: not only `is_ok`).
     let main = git_in(&root, &["rev-parse", "main"]);
     git_in(&root, &["update-ref", "refs/remotes/origin/main", &main]);
     let plan = plan_range(&root, "feat", &strings(&["feat", "--not", "--remotes=origin"]));
-    assert!(plan.is_ok(), "{plan:?}");
+    assert!(plan.as_ref().is_ok_and(|p| triggers(p) == [Trigger::Escape]), "{plan:?}");
     std::fs::remove_dir_all(&root).unwrap();
 }
 
-// ADR-0052 fix round 2 (tests): a range that deletes `docs/escapes.md` while
-// the boundary's log has a matching row keeps the escape trigger, in both
-// range forms.
+// ADR-0052 fix round 2 (tests), fix round 6 S2: a range that deletes
+// `docs/escapes.md` while the boundary's log has a row deletes that row; the
+// log is append-only, so the plan is an error naming the row (Date and
+// Where), in both range forms. (Until round 6 this range kept the escape
+// trigger; that was the old behaviour.)
 #[test]
-fn plan_range_that_deletes_the_escape_log_keeps_the_trigger() {
+fn plan_range_that_deletes_the_escape_log_fails() {
     let log = escapes(&[escape_row("2025-02-01", &format!("`{PANELS}`"))]);
     let (root, base) =
         repo_with_base("plan-delete-log", &[(PANELS, "fn f() {}\n"), ("docs/escapes.md", &log)]);
@@ -1964,14 +1967,23 @@ fn plan_range_that_deletes_the_escape_log_keeps_the_trigger() {
     commit_all(&root, "Delete the escape log");
     for range in [vec![format!("{base}..HEAD")], vec!["HEAD".into(), "--not".into(), base.clone()]]
     {
-        let plan = plan_range(&root, "HEAD", &range).unwrap();
-        assert_eq!(triggers(&plan), [Trigger::Escape], "{range:?}");
+        let plan = plan_range(&root, "HEAD", &range);
+        let Err(errors) = plan else { panic!("{range:?}: deleting the log passed: {plan:?}") };
+        assert_row_named(&errors, "2025-02-01", PANELS, &format!("{range:?}"));
     }
     std::fs::remove_dir_all(&root).unwrap();
 }
 
-// ADR-0052 fix round 2 (each log with its own header): the boundary's log
-// has its columns in another order; its rows are read with its own header.
+// ADR-0052 fix round 2 (each log with its own header): a log may have its
+// columns in another order; its rows are read with its own header.
+// Fix round 6 S2: the tip may no longer drop the boundary's row (that is a
+// deletion now), so the round-2 setup (tip without rows) became an error.
+// Part 1: the boundary's log is reordered and the tip keeps the row in the
+// standard order with another status. That is no deletion only if the
+// boundary's row is identified with its own header (read with the tip's
+// header its Date would be the path). Part 2 keeps the round-2 point for the
+// trigger: a log with a reordered header at an excluded ref that is no
+// ancestor of the tip (a row that landed on main after the fork) triggers.
 #[test]
 fn plan_range_reads_each_log_with_its_own_header() {
     let reordered = format!(
@@ -1984,10 +1996,23 @@ fn plan_range_reads_each_log_with_its_own_header() {
         "plan-own-header",
         &[(PANELS, "fn f() {}\n"), ("docs/escapes.md", &reordered)],
     );
-    write_file(&root, "docs/escapes.md", &escapes(&[]));
+    let kept = format!("| 2025-02-01 | CI | x | `{PANELS}` | critic | c | k | covered |");
+    write_file(&root, "docs/escapes.md", &escapes(&[kept]));
     write_file(&root, PANELS, "fn g() {}\n");
-    commit_all(&root, "Standard header, no rows");
+    commit_all(&root, "Standard header, the same row");
     let plan = plan_range(&root, "HEAD", &[format!("{base}..HEAD")]);
+    assert!(plan.as_ref().is_ok_and(|p| triggers(p) == [Trigger::Escape]), "{plan:?}");
+    std::fs::remove_dir_all(&root).unwrap();
+
+    let (root, _) = repo_with_base("plan-own-header-main", &[(PANELS, "fn f() {}\n")]);
+    git_in(&root, &["checkout", "-q", "-b", "feat"]);
+    write_file(&root, PANELS, "fn g() {}\n");
+    commit_all(&root, "Branch");
+    git_in(&root, &["checkout", "-q", "main"]);
+    write_file(&root, "docs/escapes.md", &reordered);
+    commit_all(&root, "Reordered log with a row on main");
+    git_in(&root, &["checkout", "-q", "feat"]);
+    let plan = plan_range(&root, "feat", &strings(&["feat", "--not", "main"]));
     assert!(plan.as_ref().is_ok_and(|p| triggers(p) == [Trigger::Escape]), "{plan:?}");
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -2040,9 +2065,13 @@ fn check_harness_only_range_needs_a_record() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
-// ADR-0052 fix round 1 F5: escape rows are the union of the log at the tip
-// and at every boundary commit, so a range cannot drop the row that makes it
-// high. Both range forms the hook uses are covered.
+// ADR-0052 fix round 1 F5: a range cannot drop the row that makes it high.
+// Fix round 6 S2: the escape log is append-only, so a range that drops the
+// row is a plan error naming the row (until round 6 the plan kept the
+// trigger from the boundary's log; that was the old behaviour). A range that
+// only changes the row's status keeps it and stays high by escape. Both range
+// forms the hook uses are covered. (The test keeps its name: the sabotage
+// case `review-escape-rows-only-from-tip` names it.)
 #[test]
 fn plan_range_keeps_escape_rows_the_range_removes() {
     let row = escape_row("2025-02-01", &format!("`{PANELS}`"));
@@ -2052,10 +2081,25 @@ fn plan_range_keeps_escape_rows_the_range_removes() {
     write_file(&root, "docs/escapes.md", &escapes(&[]));
     write_file(&root, PANELS, "fn g() {}\n");
     commit_all(&root, "Drop the escape row");
-    for range in [vec![format!("{base}..HEAD")], vec!["HEAD".into(), "--not".into(), base.clone()]]
-    {
-        let plan = plan_range(&root, "HEAD", &range).unwrap();
-        assert_eq!(triggers(&plan), [Trigger::Escape], "{range:?}");
+    for range in base_ranges(&base) {
+        let plan = plan_range(&root, "HEAD", &range);
+        let Err(errors) = plan else { panic!("{range:?}: dropping the row passed: {plan:?}") };
+        assert_row_named(&errors, "2025-02-01", PANELS, &format!("{range:?}"));
+    }
+
+    git_in(&root, &["reset", "-q", "--hard", &base]);
+    let covered = format!(
+        "| 2025-02-01 | CI Linux | a defect | `{PANELS}` | critic | a class | a check | covered |"
+    );
+    write_file(&root, "docs/escapes.md", &escapes(&[covered]));
+    write_file(&root, PANELS, "fn g() {}\n");
+    commit_all(&root, "Cover the escape");
+    for range in base_ranges(&base) {
+        let plan = plan_range(&root, "HEAD", &range);
+        assert!(
+            plan.as_ref().is_ok_and(|p| triggers(p) == [Trigger::Escape]),
+            "{range:?}: {plan:?}"
+        );
     }
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -2385,4 +2429,343 @@ fn check_previous_tree_without_predecessor_is_validated_as_before() {
     store_round(&root, &tip, &base, &[MODEL_C], 3, Some(&main_tree));
     assert_eq!(check(&root, "HEAD", &range), Ok(()));
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+// ===========================================================================
+// ADR-0052 fix round 6: structural escape tables (S1), the append-only
+// escape log (S2), build manifests and OCCT build files (S3), lens coverage
+// by whole-diff reviews (S4) and closed coverage gaps (S5).
+// ===========================================================================
+
+/// The plan errors of a small app change with the escape log `log`; panics
+/// if the plan passes.
+fn plan_errors(log: &str, what: &str) -> Vec<String> {
+    match plan(&[(PANELS, 10)], log, TIP_DATE) {
+        Ok(plan) => panic!("{what}: the plan passed: {plan:?}"),
+        Err(errors) => errors,
+    }
+}
+
+// ADR-0052 fix round 6 S1: a `|` block of one line is no table. A valid
+// log, a blank line and one more data row (with a unique marker) is a plan
+// error whose text contains that row; so is a lone header after a blank line.
+#[test]
+fn plan_escape_block_of_one_line_fails_closed() {
+    let row = "| 2026-10-01 | CI | lone-row-marker | `docs/` | critic | c | k | open |";
+    let log = format!("{}\n{row}\n", escapes(&[escape_row("2026-10-01", "`docs/`")]));
+    assert_problem(&plan_errors(&log, "lone row"), row, "lone row");
+
+    let header = "| Date | Where | lone-header-marker |";
+    let log = format!("{}\n{header}\n", escapes(&[]));
+    assert_problem(&plan_errors(&log, "lone header"), header, "lone header");
+}
+
+// ADR-0052 fix round 6 S1: the second line of a table must be a separator:
+// between the outer pipes only non-empty cells of `-` and `:`. A table whose
+// second line is a data row, has an empty cell or a cell with another
+// character is a plan error naming that line.
+#[test]
+fn plan_escape_table_without_separator_fails_closed() {
+    let header = "| Date | Found by | What escaped | Where | Missed by | Class | Check for the class \
+                  | Status |";
+    for second in [
+        "| 2026-10-01 | CI | no-separator-marker | `docs/` | critic | c | k | open |",
+        "| --- | --- |  | --- | --- | --- | --- | --- |",
+        "| --- | -x- | --- | --- | --- | --- | --- | --- |",
+        "| === | === | === | === | === | === | === | === |",
+    ] {
+        let log = format!(
+            "# Escape log\n\n{header}\n{second}\n{}\n",
+            escape_row("2026-10-01", "`docs/`")
+        );
+        assert_problem(&plan_errors(&log, second), second, second);
+    }
+}
+
+// ADR-0052 fix round 6 S1 (control): separators with alignment colons and
+// single dashes are separators, so the table parses and its row counts.
+#[test]
+fn plan_escape_separator_with_alignment_parses() {
+    let log = format!(
+        "# Escape log\n\n\
+         | Date | Found by | What escaped | Where | Missed by | Class | Check for the class | Status |\n\
+         | :--- | :-: | ---: | - | :- | -: | --- | --- |\n\
+         {}\n",
+        escape_row("2026-10-01", &format!("`{PANELS}`"))
+    );
+    let plan = plan(&[(PANELS, 10)], &log, TIP_DATE);
+    assert!(plan.as_ref().is_ok_and(|p| triggers(p) == [Trigger::Escape]), "{plan:?}");
+}
+
+/// The rows of the append-only tests: `KEPT` stays in every tip, `GONE` is
+/// the row a commit drops, redates or moves. Distinct dates and paths, so
+/// an error can only name `GONE` by naming its own Date and Where.
+const KEPT_DATE: &str = "2025-01-10";
+const KEPT_PATH: &str = "crates/qoob3d-app/src/kept.rs";
+const GONE_DATE: &str = "2025-01-20";
+const GONE_PATH: &str = "crates/qoob3d-render/src/gone.rs";
+
+fn kept_row() -> String {
+    escape_row(KEPT_DATE, &format!("`{KEPT_PATH}`"))
+}
+
+fn gone_row() -> String {
+    escape_row(GONE_DATE, &format!("`{GONE_PATH}`"))
+}
+
+/// Both range forms of the pre-push hook for a range from `base` to `HEAD`.
+fn base_ranges(base: &str) -> [Vec<String>; 2] {
+    [vec![format!("{base}..HEAD")], strings(&["HEAD", "--not", base])]
+}
+
+/// Some error names the missing row by its Date and its Where path.
+fn assert_row_named(errors: &[String], date: &str, path: &str, what: &str) {
+    assert!(
+        errors.iter().any(|e| e.contains(date) && e.contains(path)),
+        "{what}: no error naming the row {date} / {path}: {errors:?}"
+    );
+}
+
+/// A repository whose base log has `KEPT` and `GONE`; then a docs-only
+/// commit that sets the log to `rows`. Returns the root and the base.
+fn repo_with_log_change(test: &str, rows: &[String]) -> (std::path::PathBuf, String) {
+    let log = escapes(&[kept_row(), gone_row()]);
+    let (root, base) = repo_with_base(test, &[("docs/escapes.md", &log)]);
+    write_file(&root, "docs/escapes.md", &escapes(rows));
+    commit_all(&root, "Docs: edit the escape log");
+    (root, base)
+}
+
+// ADR-0052 fix round 6 S2: rows of the escape log are never deleted. A
+// docs-only commit (tier none otherwise) that removes `GONE` is a plan error
+// naming GONE's Date and Where, not KEPT, in both range forms; the gate
+// fails too (`check` plans the range before it looks at tier none).
+#[test]
+fn plan_range_rejects_a_deleted_escape_row() {
+    let (root, base) = repo_with_log_change("append-only-delete", &[kept_row()]);
+    for range in base_ranges(&base) {
+        let plan = plan_range(&root, "HEAD", &range);
+        let Err(errors) = plan else { panic!("{range:?}: a deleted row passed: {plan:?}") };
+        assert_row_named(&errors, GONE_DATE, GONE_PATH, &format!("{range:?}"));
+        assert!(!errors.iter().any(|e| e.contains(KEPT_PATH)), "{range:?}: {errors:?}");
+
+        let Err(found) = check(&root, "HEAD", &range) else {
+            panic!("{range:?}: the gate passed a deleted row");
+        };
+        assert_row_named(&found, GONE_DATE, GONE_PATH, &format!("gate {range:?}"));
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0052 fix round 6 S2: a row is identified by its Date and Where cells
+// (text equal after trimming); every other cell may change. A docs-only
+// commit that changes GONE's `Status` and `Check for the class`, pads its
+// cells with spaces and moves it before KEPT deletes nothing: tier none, and
+// the gate passes without a record.
+#[test]
+fn plan_range_allows_changing_other_cells_of_an_escape_row() {
+    let changed = format!(
+        "|   {GONE_DATE}   | CI Linux | a defect |   `{GONE_PATH}`   | critic | a class | \
+         `xtask check` now catches it | covered |"
+    );
+    let (root, base) = repo_with_log_change("append-only-status", &[changed, kept_row()]);
+    for range in base_ranges(&base) {
+        let plan = plan_range(&root, "HEAD", &range);
+        assert!(plan.as_ref().is_ok_and(|p| p.tier == Tier::None), "{range:?}: {plan:?}");
+        assert_eq!(check(&root, "HEAD", &range), Ok(()), "{range:?}");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0052 fix round 6 S2: changing the Date of a row deletes the row with
+// the old Date (the identity is Date and Where); so does changing its Where.
+// Each is a plan error naming the old Date and the old Where path.
+#[test]
+fn plan_range_rejects_a_redated_or_moved_escape_row() {
+    for (what, row) in [
+        ("redated", escape_row("2025-01-21", &format!("`{GONE_PATH}`"))),
+        ("moved", escape_row(GONE_DATE, "`crates/qoob3d-render/src/moved.rs`")),
+    ] {
+        let (root, base) = repo_with_log_change(&format!("append-only-{what}"), &[kept_row(), row]);
+        for range in base_ranges(&base) {
+            let plan = plan_range(&root, "HEAD", &range);
+            let Err(errors) = plan else { panic!("{what} {range:?}: passed: {plan:?}") };
+            assert_row_named(&errors, GONE_DATE, GONE_PATH, &format!("{what} {range:?}"));
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+// ADR-0052 fix round 6 S2: adding rows is allowed. A docs-only commit that
+// appends a row (and keeps both) is tier none.
+#[test]
+fn plan_range_allows_appending_an_escape_row() {
+    let added = escape_row("2025-02-01", "`crates/qoob3d-core/src/added.rs`");
+    let (root, base) = repo_with_log_change("append-only-add", &[kept_row(), gone_row(), added]);
+    for range in base_ranges(&base) {
+        let plan = plan_range(&root, "HEAD", &range);
+        assert!(plan.as_ref().is_ok_and(|p| p.tier == Tier::None), "{range:?}: {plan:?}");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0052 fix round 6 S2: an excluded ref that is an ancestor of the tip
+// counts as an earlier log. The branch merges main (which has the row) and
+// then drops the row: planned as `feat --not main`, that is a deletion.
+#[test]
+fn plan_range_rejects_dropping_a_row_merged_from_main() {
+    let root = repo_with_row_on_main("append-only-merged");
+    git_in(&root, &["merge", "-q", "--no-ff", "--no-edit", "main"]);
+    write_file(&root, "docs/escapes.md", &escapes(&[]));
+    commit_all(&root, "Docs: drop the merged row");
+    for range in [strings(&["feat", "--not", "main"]), strings(&["main..feat"])] {
+        let plan = plan_range(&root, "feat", &range);
+        let Err(errors) = plan else { panic!("{range:?}: dropping a merged row passed: {plan:?}") };
+        assert_row_named(&errors, "2025-02-01", PANELS, &format!("{range:?}"));
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0052 fix round 6 S2 (control): a row that landed on main after the
+// branch forked was never in the branch, so its absence at the tip is no
+// deletion (main is an excluded ref but no ancestor of the tip). A docs-only
+// branch plans tier none; the row stays an escape trigger only, as
+// `plan_range_reads_escape_rows_at_excluded_refs` checks for a code change.
+#[test]
+fn plan_range_row_only_on_main_is_no_deletion() {
+    let (root, _) = repo_with_base("append-only-main", &[]);
+    git_in(&root, &["checkout", "-q", "-b", "feat"]);
+    write_file(&root, "docs/architecture.md", "# Architecture\n");
+    commit_all(&root, "Docs on the branch");
+    git_in(&root, &["checkout", "-q", "main"]);
+    write_file(&root, "docs/escapes.md", &escapes(&[gone_row()]));
+    commit_all(&root, "Escape row on main");
+    git_in(&root, &["checkout", "-q", "feat"]);
+    let main = git_in(&root, &["rev-parse", "main"]);
+    git_in(&root, &["update-ref", "refs/remotes/origin/main", &main]);
+    for range in [
+        strings(&["feat", "--not", "main"]),
+        strings(&["main..feat"]),
+        strings(&["feat", "--not", "--remotes=origin"]),
+    ] {
+        let plan = plan_range(&root, "feat", &range);
+        assert!(plan.as_ref().is_ok_and(|p| p.tier == Tier::None), "{range:?}: {plan:?}");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0052 fix round 6 S3: tier none needs no build manifest and no
+// non-Markdown OCCT-boundary file. OCCT build files (a fork's `Cargo.toml`,
+// `CMakeLists.txt`, a patch) are high by occt-boundary with the file as
+// example; a crate manifest or `Cargo.lock` alone is standard; Markdown at
+// the OCCT boundary and other docs stay none; the root `Cargo.toml` stays
+// high by harness.
+#[test]
+fn plan_build_manifests_and_occt_build_files_are_never_none() {
+    for path in [
+        "third_party/opencascade-sys/Cargo.toml",
+        "third_party/opencascade-sys/CMakeLists.txt",
+        "third_party/opencascade-sys/patches/fix.patch",
+        "crates/qoob3d-kernel/cpp/CMakeLists.txt",
+    ] {
+        let plan = plan_of(&[(path, 1)]);
+        assert_eq!(plan.tier, Tier::High, "{path}: {:?}", plan.reasons);
+        assert_eq!(triggers(&plan), [Trigger::OcctBoundary], "{path}");
+        assert_eq!(plan.reasons[0].path, path);
+    }
+    for path in ["crates/qoob3d-core/Cargo.toml", "crates/qoob3d-app/Cargo.toml", "Cargo.lock"] {
+        let plan = plan_of(&[(path, 1), ("docs/architecture.md", 1)]);
+        assert_eq!(plan.tier, Tier::Standard, "{path}: {:?}", plan.reasons);
+        assert!(plan.reasons.is_empty(), "{path}: {:?}", plan.reasons);
+    }
+    for path in [
+        "third_party/opencascade-sys/README.md",
+        "crates/qoob3d-kernel/cpp/README.md",
+        "docs/adr/0052-x.md",
+    ] {
+        assert_eq!(plan_of(&[(path, 1)]).tier, Tier::None, "{path}");
+    }
+    let plan = plan_of(&[("Cargo.toml", 1)]);
+    assert_eq!((plan.tier, triggers(&plan)), (Tier::High, vec![Trigger::Harness]));
+}
+
+// ADR-0052 fix round 6 S3, on a real range: a range that changes only a
+// crate manifest needs a critic record.
+#[test]
+fn check_manifest_only_range_needs_a_record() {
+    let manifest = "crates/qoob3d-core/Cargo.toml";
+    let (root, base) = repo_with_base("check-manifest", &[(manifest, "[package]\n")]);
+    write_file(&root, manifest, "[package]\nname = \"qoob3d-core\"\n");
+    commit_all(&root, "Manifest");
+    let Err(found) = check(&root, "HEAD", &[format!("{base}..HEAD")]) else {
+        panic!("manifest-only range passed without a record");
+    };
+    assert_problem(&found, "no critic review", "manifest only");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+// ADR-0052 fix round 6 S4: a required lens is covered only by a review of
+// the whole diff. A lens review with `"scope": "files"` does not cover
+// `security` (harness), `tests` (any high) or `robustness` (OCCT boundary).
+// Control: the same lens with `"scope": "diff"` covers it.
+#[test]
+fn lens_coverage_counts_whole_diff_reviews_only() {
+    let mut reviews = high_reviews();
+    reviews.push(files_review("r4", MODEL_B, "security"));
+    let found = problems(&record("high", reviews.clone(), vec![]), &harness_plan());
+    assert_problem(&found, "tier high needs a review with lens `security`", "files security");
+    reviews.push(json!({"id": "r5", "model": MODEL_C, "lens": "security", "round": 1,
+                        "scope": "diff"}));
+    let found = problems(&record("high", reviews, vec![]), &harness_plan());
+    assert!(found.is_empty(), "whole-diff security: {found:?}");
+
+    let reviews = vec![
+        review("r1", MODEL_A, "general"),
+        review("r2", MODEL_B, "general"),
+        files_review("r3", MODEL_A, "tests"),
+    ];
+    let found = problems(&record("high", reviews, vec![]), &size_plan());
+    assert_problem(&found, "tier high needs a review with lens `tests`", "files tests");
+
+    let mut reviews = high_reviews();
+    reviews.push(files_review("r4", MODEL_C, "robustness"));
+    let found = problems(&record("high", reviews, vec![]), &occt_plan());
+    assert_problem(&found, "tier high needs a review with lens `robustness`", "files robustness");
+}
+
+// ADR-0052 fix round 6 S5: an escape table without a `Date` or a `Where`
+// column is a plan error naming the missing column. The headers name the
+// columns `Day` and `Place`, so neither word comes from the header itself.
+#[test]
+fn plan_escape_table_without_date_or_where_column_fails_closed() {
+    for (missing, header) in [
+        ("Date", "| Day | Found by | What escaped | Where | Missed by | Class | Check | Status |"),
+        (
+            "Where",
+            "| Date | Found by | What escaped | Place | Missed by | Class | Check | Status |",
+        ),
+    ] {
+        let log = format!(
+            "# Escape log\n\n{header}\n| --- | --- | --- | --- | --- | --- | --- | --- |\n{}\n",
+            escape_row("2026-10-01", "`docs/`")
+        );
+        assert_problem(&plan_errors(&log, missing), missing, missing);
+    }
+}
+
+// ADR-0052 fix round 6 S5: dates past the end of their month fail closed
+// (Feb 2026 and Feb 2025 have 28 days, April 30, there is no month 13), and
+// the plan error names the date. 2024 is a leap year, so 2024-02-29 parses;
+// its day number is pinned by the window: 2024-02-29 is day of year
+// 31 + 29 = 60, 2024-08-26 is day 31+29+31+30+31+30+31+26 = 239, 179 days
+// later (in the window), 2024-08-27 is 180 days later (out).
+#[test]
+fn plan_escape_dates_past_the_month_end_fail_closed() {
+    for date in ["2026-02-30", "2026-13-01", "2025-02-29", "2026-04-31"] {
+        let log = escapes(&[escape_row(date, "`docs/`")]);
+        assert_problem(&plan_errors(&log, date), date, date);
+    }
+    let row = format!("`{PANELS}`");
+    assert_eq!(escape_tier("2024-02-29", &row, "2024-08-26"), (Tier::High, vec![Trigger::Escape]));
+    assert_eq!(escape_tier("2024-02-29", &row, "2024-08-27"), (Tier::Standard, vec![]));
 }
