@@ -18,10 +18,11 @@ Unverified and `fixed` findings still block (a fix changes the tree and needs a 
 2. **Plan.** `cargo xtask review --plan HEAD <base>..HEAD` prints the tier, its reasons and the
    required reviews. Tier `none` needs no record.
 3. **Models and round.** Models are the Agent tool's `model` values: `opus`, `fable`, `sonnet`.
-   If this review follows a fix of findings from an earlier record of this branch, set
-   `previous_tree` to that record's tree, use `round` = its highest round + 1 for every
-   review, and give a whole-diff general review a model outside the previous record's
-   whole-diff pair (its first two general reviews on different models). Otherwise
+   Whenever `target/critic/` holds an earlier version-2 record of this branch (another tree,
+   `head` in `<base>..HEAD`), not only after a fix, set `previous_tree` to the tree of the
+   one with the highest round, use `round` = that round + 1 for every review, and give a
+   whole-diff general review a model outside that record's whole-diff pair (its first two
+   general reviews on different models); the gate enforces it. Only without such a record
    `previous_tree` is `null` and `round` is 1.
 4. **Critics, all in one message so they run in parallel.** Subagent `critic` per required
    review, with the range `base..head`, the lens and the plan's reasons, nothing else. Do not

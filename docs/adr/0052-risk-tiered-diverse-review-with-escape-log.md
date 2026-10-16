@@ -46,10 +46,14 @@ OCCT boundary or the file format, where a miss is expensive.
    available set (Opus, Fable, Sonnet). Every round after a fix uses, for a general review
    of the whole diff, a model outside the previous round's whole-diff pair (the two samples
    of decision 4; a third stopping-rule critic and file-group critics do not count).
+   Rotation is not opt-in: the gate finds the earlier records of the branch itself
+   (version-2 records of another tree whose `head` is in the planned range).
 3. **Record, version 2.** `target/critic/<tree>.json` additionally names the `tier` (at
-   least the plan's), the `previous_tree` (if any), the reviews (`id`, `model`, `lens`,
+   least the plan's), the `previous_tree`, the reviews (`id`, `model`, `lens`,
    `round`, and `scope: files` for a file-group critic) and for every finding `found_by`
-   (review ids, duplicates merged). `cargo xtask review` checks that the record covers the
+   (review ids, duplicates merged). If the branch has an earlier record, `previous_tree`
+   must name one with the highest round; it is `null` only for the first record of a
+   branch. `cargo xtask review` checks that the record covers the
    plan of the pushed range, the model rotation and the stopping rule. The record stays local
    and forgeable (ADR-0041); every PR description carries its summary.
 4. **Stopping rule (capture–recapture).** In tier `high`, the two general critics are two

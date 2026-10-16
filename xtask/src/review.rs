@@ -419,8 +419,56 @@ pub(crate) fn check(root: &Path, tip: &str, rev_list_args: &[String]) -> Result<
     let record: Value = serde_json::from_str(&text)
         .map_err(|e| vec![format!("{}: not valid JSON: {e}", file.display())])?;
     let mut problems = record_problems(&record, tree, &plan, &records);
+    problems.extend(predecessor_problem(root, &record, tree, rev_list_args, &records)?);
     problems.extend(range_problems(&record, commit.trim(), &boundaries));
     if problems.is_empty() { Ok(()) } else { Err(problems) }
+}
+
+/// Rotation is not opt-in (ADR-0052 decision 2): the earlier records of the
+/// branch are the version-2 `*.json` files in `records` of another tree whose
+/// `head` the range selects. If there are any, `previous_tree` names one with
+/// the highest round. Other files are ignored and cannot block a push.
+fn predecessor_problem(
+    root: &Path,
+    record: &Value,
+    tree: &str,
+    rev_list_args: &[String],
+    records: &Path,
+) -> Result<Option<String>, Vec<String>> {
+    let mut args = vec!["rev-list"];
+    args.extend(rev_list_args.iter().map(String::as_str));
+    let commits = git(root, &args).map_err(|e| vec![e])?;
+    let commits: BTreeSet<&str> = commits.lines().collect();
+    let entries = std::fs::read_dir(records)
+        .map_err(|e| vec![format!("{}: cannot be listed: {e}", records.display())])?;
+    let predecessors: BTreeSet<(u64, String)> = entries
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()? != "json" {
+                return None;
+            }
+            let earlier: Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+            let other = earlier["tree"].as_str().filter(|other| *other != tree)?;
+            (earlier["version"].as_u64() == Some(2)
+                && earlier["head"].as_str().is_some_and(|head| commits.contains(head)))
+            .then(|| (highest_round(&earlier), other.to_owned()))
+        })
+        .collect();
+    let Some((round, _)) = predecessors.last() else {
+        return Ok(None);
+    };
+    let latest: Vec<&str> =
+        predecessors.iter().filter(|p| p.0 == *round).map(|p| p.1.as_str()).collect();
+    if latest.iter().any(|t| record["previous_tree"] == *t) {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "previous_tree {} must be {} (the latest earlier record of this branch, round {round}) \
+         (ADR-0052)",
+        record["previous_tree"],
+        latest.join(" or ")
+    )))
 }
 
 /// The record names the reviewed range: `head` is the tip commit, `base` one
@@ -485,8 +533,7 @@ pub(crate) fn record_problems(
         Ok(None) => Some(1),
         Ok(Some(previous)) => {
             problems.extend(rotation_problem(record, &previous));
-            let rounds = reviews_of(&previous).iter().filter_map(|r| r["round"].as_u64());
-            Some(rounds.max().unwrap_or(0) + 1)
+            Some(highest_round(&previous) + 1)
         }
         Err(problem) => {
             problems.push(problem);
@@ -504,6 +551,11 @@ pub(crate) fn record_problems(
 
 fn reviews_of(record: &Value) -> &[Value] {
     record["reviews"].as_array().map_or(&[], Vec::as_slice)
+}
+
+/// The highest `round` of the record's reviews, 0 without one.
+fn highest_round(record: &Value) -> u64 {
+    reviews_of(record).iter().filter_map(|r| r["round"].as_u64()).max().unwrap_or(0)
 }
 
 /// The `general` reviews of the whole diff (no `files` or unknown scope).
