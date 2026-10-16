@@ -29,6 +29,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   review_range=("${range[@]}")
   if git rev-parse --verify --quiet "refs/remotes/$remote/main" >/dev/null; then
     review_range=("$local_sha" --not "refs/remotes/$remote/main")
+  else
+    echo "pre-push: refs/remotes/$remote/main missing – the review plans only the pushed commits" >&2
   fi
   echo "pre-push: commit policy for $local_ref"
   cargo xtask commits "${range[@]}"

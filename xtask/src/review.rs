@@ -5,14 +5,17 @@
 //!
 //! The plan follows from the commits of the range (including what merge
 //! commits change themselves), the tip's committer date and the escape log
-//! `docs/escapes.md` as of the tip and the range's boundary commits: tier
+//! `docs/escapes.md` as of the tip, the range's boundary commits and the
+//! commits the range excludes, each log read with its own header: tier
 //! `none` (neither production code nor the harness changed), `standard` or
 //! `high` (harness, OCCT boundary, format, size or a recent escape).
 //!
-//! Record (version 2): `target/critic/<tree>.json`
+//! Record (version 2): `target/critic/<tree>.json`; `head` is the pushed tip
+//! commit, `base` one of the range's boundary commits (null without one).
 //! `{"version": 2, "tree": "<sha>", "base": "<sha>", "head": "<sha>",
 //!   "tier": "standard|high", "previous_tree": "<tree>|null",
-//!   "reviews": [{"id": "r1", "model": "...", "lens": "general|tests|security|robustness",
+//!   "reviews": [{"id": "r1", "model": "opus|fable|sonnet",
+//!     "lens": "general|tests|security|robustness",
 //!     "round": 1, "scope": "diff|files"}],
 //!   "findings": [{"rule": "K-03", "severity": "blocker|major|minor",
 //!     "verdict": "confirmed|refuted|unverified", "resolution": "open|fixed|accepted",
@@ -35,8 +38,11 @@ pub(crate) const RECORD_DIR: &str = "target/critic";
 
 /// The escape log (ADR-0052 decision 5).
 const ESCAPES: &str = "docs/escapes.md";
-/// An escape row counts for this many days up to and including the tip date.
+/// An escape row counts if it is dated less than this many days before the
+/// tip, or after it (a branch committed before the row landed on main).
 const ESCAPE_WINDOW_DAYS: i64 = 180;
+/// The models a review may name: the Agent tool's names the skill uses.
+const MODELS: &[&str] = &["opus", "fable", "sonnet"];
 /// More changed production code lines than this make a diff high-risk.
 const MAX_STANDARD_LINES: usize = 400;
 
@@ -124,6 +130,8 @@ pub(crate) struct Reason {
 pub(crate) struct Plan {
     pub(crate) tier: Tier,
     pub(crate) reasons: Vec<Reason>,
+    /// Added + deleted lines of `Code` files over the range (size trigger).
+    pub(crate) code_lines: usize,
 }
 
 impl Plan {
@@ -141,6 +149,7 @@ impl Plan {
 impl fmt::Display for Plan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "tier: {}", self.tier.name())?;
+        writeln!(f, "code lines: {}", self.code_lines)?;
         for reason in &self.reasons {
             writeln!(f, "reason: {} ({})", reason.trigger.name(), reason.path)?;
         }
@@ -182,32 +191,36 @@ pub(crate) fn parse_args(args: &[String]) -> Option<Invocation<'_>> {
 
 /// The plan of `changes` (path and changed lines, one entry per file and
 /// commit) with the escape log `escapes` as of a tip committed on `tip_date`.
+/// Every table in `escapes` is read with its own header, so several logs may
+/// be joined.
 pub(crate) fn plan(
     changes: &[(&str, usize)],
     escapes: &str,
     tip_date: &str,
 ) -> Result<Plan, Vec<String>> {
-    let escaped = recent_escapes(escapes, tip_date)?;
+    let tip = day_number(tip_date)
+        .ok_or_else(|| vec![format!("tip date `{tip_date}` is not YYYY-MM-DD")])?;
+    let escaped = recent_escapes(escapes, tip)?;
     let code: Vec<(&str, usize)> =
         changes.iter().copied().filter(|(path, _)| paths::kind(path) == Kind::Code).collect();
+    let code_lines: usize = code.iter().map(|c| c.1).sum();
     let first = |hit: fn(&str) -> bool| changes.iter().map(|c| c.0).find(|path| hit(path));
     let harness = first(paths::is_harness);
     if code.is_empty() && harness.is_none() {
-        return Ok(Plan { tier: Tier::None, reasons: Vec::new() });
+        return Ok(Plan { tier: Tier::None, reasons: Vec::new(), code_lines });
     }
-    let lines: usize = code.iter().map(|c| c.1).sum();
     let reasons: Vec<Reason> = [
         (Trigger::Harness, harness),
         (Trigger::OcctBoundary, first(paths::is_occt_boundary)),
         (Trigger::Format, first(paths::is_format)),
-        (Trigger::Size, code.first().map(|c| c.0).filter(|_| lines > MAX_STANDARD_LINES)),
+        (Trigger::Size, code.first().map(|c| c.0).filter(|_| code_lines > MAX_STANDARD_LINES)),
         (Trigger::Escape, code.iter().map(|c| c.0).find(|path| paths::listed(&escaped, path))),
     ]
     .into_iter()
     .filter_map(|(trigger, path)| Some(Reason { trigger, path: path?.to_owned() }))
     .collect();
     let tier = if reasons.is_empty() { Tier::Standard } else { Tier::High };
-    Ok(Plan { tier, reasons })
+    Ok(Plan { tier, reasons, code_lines })
 }
 
 /// The plan of the commits in `rev_list_args`, pushed as `tip`.
@@ -216,14 +229,32 @@ pub(crate) fn plan_range(
     tip: &str,
     rev_list_args: &[String],
 ) -> Result<Plan, Vec<String>> {
+    planned_range(root, tip, rev_list_args).map(|(plan, _)| plan)
+}
+
+/// [`plan_range`] and the boundary commits of the range.
+fn planned_range(
+    root: &Path,
+    tip: &str,
+    rev_list_args: &[String],
+) -> Result<(Plan, Vec<String>), Vec<String>> {
     let git = |args: &[&str]| git(root, args).map_err(|e| vec![e]);
-    let revs = rev_list_args.iter().map(String::as_str);
+    let with_revs = |args: &[&'static str]| {
+        let mut args = args.to_vec();
+        args.extend(rev_list_args.iter().map(String::as_str));
+        git(&args)
+    };
     // `-z`: paths unquoted, as they are (git quotes non-ASCII, tab, `"`, `\`).
     // `--no-renames`: a rename changes the old path too. `remerge`: what a
     // merge commit changes beyond merging its parents (conflict resolutions).
-    let mut args = vec!["log", "--format=", "--numstat", "--no-renames", "-z"];
-    args.extend(["--diff-merges=remerge"].into_iter().chain(revs.clone()));
-    let numstat = git(&args)?;
+    let numstat = with_revs(&[
+        "log",
+        "--format=",
+        "--numstat",
+        "--no-renames",
+        "-z",
+        "--diff-merges=remerge",
+    ])?;
     let changes: Vec<(&str, usize)> = numstat
         .split('\0')
         .filter_map(|entry| {
@@ -235,16 +266,23 @@ pub(crate) fn plan_range(
         })
         .collect();
     let tip_date = git(&["log", "-1", "--format=%cs", tip, "--"])?;
-    // The range must not drop the row that makes it high-risk: the rows of
-    // the log at the tip and at every boundary commit count.
-    let mut args = vec!["rev-list", "--boundary"];
-    args.extend(revs);
-    let boundary = git(&args)?;
-    let mut logs = vec![escape_log(root, tip)?];
-    for commit in boundary.lines().filter_map(|l| l.strip_prefix('-')) {
-        logs.push(escape_log(root, commit)?);
+    let boundaries: Vec<String> = with_revs(&["rev-list", "--boundary"])?
+        .lines()
+        .filter_map(|line| line.strip_prefix('-'))
+        .map(str::to_owned)
+        .collect();
+    // Neither the range nor a branch forked before a row landed on main may
+    // drop the row that makes it high-risk: the logs at the tip, the
+    // boundaries and the excluded commits (`--not`, `^`, `a..b`, globs) count.
+    let parsed = with_revs(&["rev-parse"])?;
+    let excluded = parsed.lines().filter_map(|line| line.strip_prefix('^'));
+    let mut logs = BTreeSet::new();
+    for commit in std::iter::once(tip).chain(boundaries.iter().map(String::as_str)).chain(excluded)
+    {
+        logs.insert(escape_log(root, commit)?);
     }
-    plan(&changes, &union(&logs), tip_date.trim())
+    let escapes = logs.into_iter().collect::<Vec<_>>().join("\n\n");
+    Ok((plan(&changes, &escapes, tip_date.trim())?, boundaries))
 }
 
 /// The escape log at `commit`; empty where it did not exist yet.
@@ -256,66 +294,68 @@ fn escape_log(root: &Path, commit: &str) -> Result<String, Vec<String>> {
     git(&["show", &format!("{commit}:{ESCAPES}")])
 }
 
-/// The first non-empty log plus the table rows of the others it lacks;
-/// identical rows count once.
-fn union(logs: &[String]) -> String {
-    let mut logs = logs.iter().filter(|log| !log.is_empty());
-    let Some(first) = logs.next() else {
-        return String::new();
-    };
-    let mut union = first.clone();
-    let mut rows: BTreeSet<&str> = first.lines().map(str::trim).collect();
-    for log in logs {
-        // Header and separator are the first two table lines.
-        for row in log.lines().map(str::trim).filter(|l| l.starts_with('|')).skip(2) {
-            if rows.insert(row) {
-                union.push('\n');
-                union.push_str(row);
-            }
-        }
-    }
-    union
-}
-
 /// The backticked `Where` paths of the escape-log rows dated within the
-/// window up to `tip_date`. Fails closed on a row with an unparsable date or
-/// with another cell count than the header.
-fn recent_escapes<'a>(escapes: &'a str, tip_date: &str) -> Result<Vec<&'a str>, Vec<String>> {
-    let tip = day_number(tip_date)
-        .ok_or_else(|| vec![format!("tip date `{tip_date}` is not YYYY-MM-DD")])?;
-    let mut table = escapes.lines().map(str::trim).filter(|l| l.starts_with('|'));
-    let Some(header) = table.next().map(cells) else {
-        return Ok(Vec::new());
-    };
-    let column = |name: &str| {
-        header
-            .iter()
-            .position(|cell| *cell == name)
-            .ok_or_else(|| vec![format!("{ESCAPES}: table without a `{name}` column")])
-    };
-    let (date_column, where_column) = (column("Date")?, column("Where")?);
+/// window of the tip day `tip`. Each table (consecutive `|` lines) is read
+/// with its own header; the line after the header is the separator. A row
+/// with another cell count than its header, no backticked path or an
+/// unparsable date fails closed.
+fn recent_escapes(escapes: &str, tip: i64) -> Result<Vec<&str>, Vec<String>> {
+    let mut lines = escapes.lines().map(str::trim).peekable();
     let mut places = Vec::new();
     let mut errors = Vec::new();
-    for row in table {
-        let cells = cells(row);
-        if cells.len() != header.len() {
-            errors.push(format!(
-                "{ESCAPES}: row with {} cells, the header has {} – {row}",
-                cells.len(),
-                header.len()
-            ));
-            continue;
-        }
-        let date = cells[date_column];
-        if !date.is_empty() && date.trim_matches(['-', ':']).is_empty() {
-            continue; // the separator row
-        }
-        let Some(day) = day_number(date) else {
-            errors.push(format!("{ESCAPES}: row date `{date}` is not a valid YYYY-MM-DD date"));
+    while lines.peek().is_some() {
+        let table: Vec<&str> = lines
+            .by_ref()
+            .skip_while(|l| !l.starts_with('|'))
+            .take_while(|l| l.starts_with('|'))
+            .collect();
+        let [header, _separator, rows @ ..] = table.as_slice() else {
             continue;
         };
-        if (0..ESCAPE_WINDOW_DAYS).contains(&(tip - day)) {
-            places.extend(cells[where_column].split('`').skip(1).step_by(2));
+        let header = cells(header);
+        let column = |name: &str| {
+            header
+                .iter()
+                .position(|cell| *cell == name)
+                .ok_or_else(|| format!("{ESCAPES}: table without a `{name}` column"))
+        };
+        let (date_column, where_column) = match (column("Date"), column("Where")) {
+            (Ok(date), Ok(place)) => (date, place),
+            (date, place) => {
+                errors.extend(date.err().into_iter().chain(place.err()));
+                continue;
+            }
+        };
+        for row in rows {
+            let cells = cells(row);
+            if cells.len() != header.len() {
+                errors.push(format!(
+                    "{ESCAPES}: row with {} cells, the header has {} – {row}",
+                    cells.len(),
+                    header.len()
+                ));
+                continue;
+            }
+            let paths: Vec<&str> = cells[where_column]
+                .split('`')
+                .skip(1)
+                .step_by(2)
+                .filter(|p| !p.is_empty())
+                .collect();
+            if paths.is_empty() {
+                errors.push(format!("{ESCAPES}: row without a backticked path in `Where` – {row}"));
+                continue;
+            }
+            let date = cells[date_column];
+            let Some(day) = day_number(date) else {
+                errors.push(format!(
+                    "{ESCAPES}: row date `{date}` is not a valid YYYY-MM-DD date – {row}"
+                ));
+                continue;
+            };
+            if tip - day < ESCAPE_WINDOW_DAYS {
+                places.extend(paths);
+            }
         }
     }
     if errors.is_empty() { Ok(places) } else { Err(errors) }
@@ -360,11 +400,13 @@ fn day_number(date: &str) -> Option<i64> {
 /// Requires a record covering the plan for `tip` if any commit in
 /// `rev_list_args` changes production code or the harness.
 pub(crate) fn check(root: &Path, tip: &str, rev_list_args: &[String]) -> Result<(), Vec<String>> {
-    let plan = plan_range(root, tip, rev_list_args)?;
+    let (plan, boundaries) = planned_range(root, tip, rev_list_args)?;
     if plan.tier == Tier::None {
         return Ok(());
     }
-    let tree = git(root, &["rev-parse", &format!("{tip}^{{tree}}")]).map_err(|e| vec![e])?;
+    let resolve = |rev: String| git(root, &["rev-parse", &rev]).map_err(|e| vec![e]);
+    let commit = resolve(format!("{tip}^{{commit}}"))?;
+    let tree = resolve(format!("{tip}^{{tree}}"))?;
     let tree = tree.trim();
     let records = root.join(RECORD_DIR);
     let file = records.join(format!("{tree}.json"));
@@ -376,8 +418,33 @@ pub(crate) fn check(root: &Path, tip: &str, rev_list_args: &[String]) -> Result<
     })?;
     let record: Value = serde_json::from_str(&text)
         .map_err(|e| vec![format!("{}: not valid JSON: {e}", file.display())])?;
-    let problems = record_problems(&record, tree, &plan, &records);
+    let mut problems = record_problems(&record, tree, &plan, &records);
+    problems.extend(range_problems(&record, commit.trim(), &boundaries));
     if problems.is_empty() { Ok(()) } else { Err(problems) }
+}
+
+/// The record names the reviewed range: `head` is the tip commit, `base` one
+/// of the range's boundary commits (absent or null for a range without one).
+pub(crate) fn range_problems(record: &Value, tip: &str, boundaries: &[String]) -> Vec<String> {
+    let mut problems = Vec::new();
+    if record["head"].as_str() != Some(tip) {
+        problems
+            .push(format!("record head {} is not the pushed tip {tip} (ADR-0052)", record["head"]));
+    }
+    let base = &record["base"];
+    let known = if boundaries.is_empty() {
+        base.is_null()
+    } else {
+        base.as_str().is_some_and(|base| boundaries.iter().any(|b| b == base))
+    };
+    if !known {
+        let expected = if boundaries.is_empty() { "none".into() } else { boundaries.join(", ") };
+        problems.push(format!(
+            "record base {base} is not a boundary commit of the pushed range ({expected}) \
+             (ADR-0052)"
+        ));
+    }
+    problems
 }
 
 /// Everything that keeps `record` from passing for `tree` under `plan`;
@@ -466,16 +533,18 @@ fn review_problems(reviews: &[Value], round: Option<u64>) -> Vec<String> {
     let mut ids = BTreeSet::new();
     for (i, review) in reviews.iter().enumerate() {
         let index = i + 1;
-        let text = |name: &str| review[name].as_str().filter(|s| !s.is_empty());
-        if let Some(id) = text("id") {
+        if let Some(id) = review["id"].as_str().filter(|id| !id.is_empty()) {
             if !ids.insert(id) {
                 problems.push(format!("review id `{id}` is not unique"));
             }
         } else {
             problems.push(format!("review {index}: `id` is missing or empty"));
         }
-        if text("model").is_none() {
-            problems.push(format!("review {index}: `model` is missing or empty"));
+        if !review["model"].as_str().is_some_and(|model| MODELS.contains(&model)) {
+            problems.push(format!(
+                "review {index}: `model` is missing or unknown (`{}`)",
+                review["model"]
+            ));
         }
         if !Lens::ALL.iter().any(|lens| review["lens"] == lens.name()) {
             problems.push(format!(
