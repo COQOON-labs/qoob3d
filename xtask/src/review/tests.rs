@@ -1990,19 +1990,33 @@ fn plan_range_reads_each_log_with_its_own_header() {
 // ADR-0052 acceptance: the pre-push hook calls the gate as
 // `review <tip> <rev-list args…>` with the pushed tip, without `--plan`. (Fix
 // round 1 F2.2 changes the range; `xtask/src/worktree/tests.rs` runs the hook
-// and checks the range itself.)
+// and checks the range itself.) ADR-0051: the hook runs the xtask binary
+// through the variable `.githooks/lib.sh` assigns its path to, never through
+// `cargo xtask`; a `cargo xtask review` line counts as a call and fails.
 #[test]
 fn pre_push_hook_calls_the_review_gate() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let hook = std::fs::read_to_string(root.join(".githooks/pre-push")).unwrap();
+    let lib = std::fs::read_to_string(root.join(".githooks/lib.sh")).unwrap();
+    let var = lib
+        .lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_suffix(r#"="${CARGO_TARGET_DIR:-target}/debug/xtask""#))
+        .unwrap_or_else(|| panic!("lib.sh assigns no variable the xtask binary path: {lib}"));
+    let runs = [format!("\"${var}\""), format!("\"${{{var}}}\"")];
     let calls = hook
         .lines()
         .map(str::trim)
-        .filter(|l| !l.starts_with('#') && l.contains("cargo xtask review"))
+        .filter(|l| !l.starts_with('#'))
+        .filter(|l| {
+            l.contains("cargo xtask review")
+                || runs.iter().any(|run| l.contains(&format!("{run} review")))
+        })
         .collect::<Vec<_>>();
     assert!(!calls.is_empty(), "{hook}");
     for call in calls {
-        assert!(call.starts_with(r#"cargo xtask review "$local_sha" "#), "{call}");
+        let tip = runs.each_ref().map(|run| format!(r#"{run} review "$local_sha" "#));
+        assert!(tip.iter().any(|t| call.starts_with(t.as_str())), "{call}");
     }
     assert!(!hook.contains("--plan"), "{hook}");
 }

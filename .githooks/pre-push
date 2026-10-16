@@ -10,10 +10,19 @@
 #      small pushes does not lower its tier (ADR-0052); a human skips it with
 #      QOOB3D_SKIP_REVIEW=1
 #   4. the full definition of done for the tip of each pushed ref, in a
-#      temporary worktree of exactly that commit: `cargo xtask check-rev` (ADR-0048)
+#      temporary worktree of exactly that commit: `xtask check-rev` (ADR-0048)
+# A client that quarantines new files (Sourcetree) cannot run the check: cargo
+# re-links xtask, and the check builds and runs test binaries and build scripts
+# that Gatekeeper refuses. The hook stops before building anything (ADR-0051).
 set -euo pipefail
-export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
-cd "$(git rev-parse --show-toplevel)"
+source "$(dirname "$0")/lib.sh"
+
+if quarantining_client; then
+  echo "pre-push: this git client quarantines newly built programs (com.apple.quarantine)," >&2
+  echo "pre-push: so Gatekeeper would block the full check; push from a terminal (ADR-0051)" >&2
+  exit 1
+fi
+build_xtask
 
 remote="$1"
 zero=0000000000000000000000000000000000000000
@@ -33,7 +42,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     echo "pre-push: refs/remotes/$remote/main missing – the review plans only the pushed commits" >&2
   fi
   echo "pre-push: commit policy for $local_ref"
-  cargo xtask commits "${range[@]}"
+  "$xtask_binary" commits "${range[@]}"
   if command -v gitleaks >/dev/null; then
     gitleaks git --no-banner --redact --log-opts="$log_opts" .
   else
@@ -42,7 +51,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   if [ "${QOOB3D_SKIP_REVIEW:-}" = 1 ]; then
     echo "pre-push: critic review skipped (QOOB3D_SKIP_REVIEW=1)" >&2
   else
-    cargo xtask review "$local_sha" "${review_range[@]}"
+    "$xtask_binary" review "$local_sha" "${review_range[@]}"
   fi
-  cargo xtask check-rev "$local_sha"
+  "$xtask_binary" check-rev "$local_sha"
 done

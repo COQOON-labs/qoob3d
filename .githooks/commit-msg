@@ -2,6 +2,6 @@
 # Rejects commit messages that name an AI as (co-)author or generator (ADR-0038).
 # Installed by `cargo xtask setup`.
 set -euo pipefail
-export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
-cd "$(git rev-parse --show-toplevel)"
-exec cargo xtask commits --message "$1"
+source "$(dirname "$0")/lib.sh"
+build_xtask
+exec "$xtask_binary" commits --message "$1"

@@ -1,0 +1,14 @@
+# The hooks build xtask but no longer strip com.apple.quarantine from it (the
+# xattr call becomes a no-op), so a commit from Sourcetree fails because
+# Gatekeeper refuses the binary (ADR-0051)
+command: cargo test -p xtask --quiet build_xtask_on_darwin_strips_the_quarantine_after_the_build
+expect: build_xtask must remove com.apple.quarantine
+--- patch
+diff --git a/.githooks/lib.sh b/.githooks/lib.sh
+--- a/.githooks/lib.sh
++++ b/.githooks/lib.sh
+@@ -18,3 +18,3 @@
+     if [ -f "$xtask_binary" ]; then
+-      xattr -d com.apple.quarantine "$xtask_binary" 2>/dev/null || true
++      :
+     else

@@ -58,7 +58,7 @@ pub(crate) fn handle_input(
     // calling a `Response` method inside the input closure deadlocks.
     let middle_dragged = response.dragged_by(PointerButton::Middle);
     let left_orbit = left_drag_orbit && response.dragged_by(PointerButton::Primary);
-    let middle_double_clicked = response.double_clicked_by(PointerButton::Middle);
+    let middle_double_clicked = double_clicked_by(response, PointerButton::Middle);
     let hovered = response.hovered();
 
     let (delta, shift, pointer, now, f6, events) = ui.input(|i| {
@@ -128,6 +128,16 @@ pub(crate) fn handle_input(
     }
 
     out
+}
+
+/// A double click on `response` by `button`, also when egui reports it as a
+/// triple click. egui 0.36 counts a release as click 3 when the click before
+/// the previous one is less than 2 × `max_double_click_delay` ago, but checks
+/// the distance only to the previous click: a click elsewhere followed
+/// quickly by a double click yields counts 1, 3 and `double_clicked_by` never
+/// fires. Callers must tolerate a real triple click firing a second time.
+pub(crate) fn double_clicked_by(response: &Response, button: PointerButton) -> bool {
+    response.double_clicked_by(button) || response.triple_clicked_by(button)
 }
 
 /// Converts a screen position into normalised device coordinates of `rect`.

@@ -2,13 +2,14 @@
 //! sketch palette. Panels only *report* user intent as [`UiAction`]s; the
 //! app applies them. Layout per docs/design/theme.md, texts per ADR-0020.
 
-use eframe::egui::{self, Align, Layout, RichText};
+use eframe::egui::{self, Align, Layout, PointerButton, RichText};
 use qoob3d_core::document::{Document, FeatureId, FeatureKind, OriginPlane, PlaneRef};
 use qoob3d_kernel::BodyResult;
 use qoob3d_sketch::tools::ToolKind;
 
 use crate::commands::{CommandKind, icon};
 use crate::i18n::{self, Language, decimal, tr, tr_args};
+use crate::navigation::double_clicked_by;
 use crate::settings::Settings;
 use crate::sketch_ui::plane_label;
 use crate::theme;
@@ -331,7 +332,8 @@ pub(crate) fn browser(ui: &mut egui::Ui, s: &PanelState<'_>, title: &str) -> Vec
                             }
                             let active = s.sketching == Some(f.id);
                             let label = ui.selectable_label(active, format!("✏ {}", f.name));
-                            if label.double_clicked() {
+                            // Already editing: a real triple click must not restart it.
+                            if !active && double_clicked_by(&label, PointerButton::Primary) {
                                 out.push(UiAction::EditFeature(f.id));
                             }
                             label.on_hover_text(tr("feature-edit-tip"));
@@ -367,7 +369,8 @@ pub(crate) fn timeline(ui: &mut egui::Ui, s: &PanelState<'_>) -> Vec<UiAction> {
                 text = text.color(theme::ERROR);
             }
             let chip = ui.selectable_label(active, text);
-            if chip.double_clicked() {
+            // Already editing: a real triple click must not restart it.
+            if !active && double_clicked_by(&chip, PointerButton::Primary) {
                 out.push(UiAction::EditFeature(f.id));
             }
             chip.context_menu(|ui| {

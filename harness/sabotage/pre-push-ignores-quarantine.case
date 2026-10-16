@@ -1,0 +1,14 @@
+# pre-push no longer calls the quarantine check, so a push from a quarantining
+# client such as Sourcetree builds and runs binaries that Gatekeeper refuses,
+# instead of stopping with a clear message (ADR-0051)
+command: cargo test -p xtask --quiet pre_push_stops_under_a_quarantining_client_before_building_anything
+expect: does not call the quarantine check
+--- patch
+diff --git a/.githooks/pre-push b/.githooks/pre-push
+--- a/.githooks/pre-push
++++ b/.githooks/pre-push
+@@ -19,3 +19,3 @@
+
+-if quarantining_client; then
++if false; then
+   echo "pre-push: this git client quarantines newly built programs (com.apple.quarantine)," >&2
