@@ -7,9 +7,8 @@ expect: file_group_reviews_do_not_count_as_whole_diff
 diff --git a/xtask/src/review.rs b/xtask/src/review.rs
 --- a/xtask/src/review.rs
 +++ b/xtask/src/review.rs
-@@ -444,5 +444,4 @@
-     reviews
-         .iter()
-         .filter(|r| r["lens"] == Lens::General.name())
--        .filter(|r| r.get("scope").is_none_or(|scope| scope == "diff"))
+@@ -646,3 +646,3 @@
+ fn whole_diff(reviews: &[Value]) -> impl Iterator<Item = &Value> {
+-    reviews.iter().filter(|r| r.get("scope").is_none_or(|scope| scope == "diff"))
++    reviews.iter()
  }

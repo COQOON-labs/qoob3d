@@ -7,8 +7,10 @@
 //! commits change themselves), the tip's committer date and the escape log
 //! `docs/escapes.md` as of the tip, the range's boundary commits and the
 //! commits the range excludes, each log read with its own header: tier
-//! `none` (neither production code nor the harness changed), `standard` or
-//! `high` (harness, OCCT boundary, format, size or a recent escape).
+//! `none` (neither production code, the harness, a build manifest nor a
+//! non-Markdown OCCT-boundary file changed), `standard` or `high` (harness,
+//! OCCT boundary, format, size or a recent escape). The escape log is
+//! append-only: a row of an earlier log missing at the tip is a plan error.
 //!
 //! Record (version 2): `target/critic/<tree>.json`; `head` is the pushed tip
 //! commit, `base` one of the range's boundary commits (null without one).
@@ -206,7 +208,7 @@ pub(crate) fn plan(
     let code_lines: usize = code.iter().map(|c| c.1).sum();
     let first = |hit: fn(&str) -> bool| changes.iter().map(|c| c.0).find(|path| hit(path));
     let harness = first(paths::is_harness);
-    if code.is_empty() && harness.is_none() {
+    if code.is_empty() && harness.is_none() && first(is_build_input).is_none() {
         return Ok(Plan { tier: Tier::None, reasons: Vec::new(), code_lines });
     }
     let reasons: Vec<Reason> = [
@@ -221,6 +223,16 @@ pub(crate) fn plan(
     .collect();
     let tier = if reasons.is_empty() { Tier::Standard } else { Tier::High };
     Ok(Plan { tier, reasons, code_lines })
+}
+
+/// A build manifest (`Cargo.toml` or `Cargo.lock` in any directory) or a
+/// non-Markdown file at the OCCT boundary: it changes the built product, so
+/// its range is never tier `none` (ADR-0052).
+fn is_build_input(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    let file = lower.rsplit('/').next().unwrap_or(&lower);
+    matches!(file, "cargo.toml" | "cargo.lock")
+        || (paths::is_occt_boundary(path) && !file.ends_with(".md"))
 }
 
 /// The plan of the commits in `rev_list_args`, pushed as `tip`.
@@ -276,13 +288,45 @@ fn planned_range(
     // boundaries and the excluded commits (`--not`, `^`, `a..b`, globs) count.
     let parsed = with_revs(&["rev-parse"])?;
     let excluded = parsed.lines().filter_map(|line| line.strip_prefix('^'));
-    let mut logs = BTreeSet::new();
-    for commit in std::iter::once(tip).chain(boundaries.iter().map(String::as_str)).chain(excluded)
-    {
-        logs.insert(escape_log(root, commit)?);
+    let now = escape_log(root, tip)?;
+    let mut logs = BTreeSet::from([now.clone()]);
+    let mut earlier = BTreeSet::new();
+    for commit in boundaries.iter().map(String::as_str).chain(excluded) {
+        let log = escape_log(root, commit)?;
+        // Only an ancestor of the tip was in the branch: a row that landed on
+        // main after the fork is a trigger, its absence no deletion.
+        if git(&["rev-list", "-n", "1", commit, "--not", tip, "--"])?.is_empty() {
+            earlier.insert(log.clone());
+        }
+        logs.insert(log);
     }
     let escapes = logs.into_iter().collect::<Vec<_>>().join("\n\n");
-    Ok((plan(&changes, &escapes, tip_date.trim())?, boundaries))
+    let plan = plan(&changes, &escapes, tip_date.trim())?;
+    append_only(&now, &earlier)?;
+    Ok((plan, boundaries))
+}
+
+/// Every row of the `earlier` logs is still in the log `now` at the tip,
+/// identified by its `Date` and `Where` cells: rows are never deleted, only
+/// their other cells change (ADR-0052 decision 5). Every tier, `none` too.
+fn append_only(now: &str, earlier: &BTreeSet<String>) -> Result<(), Vec<String>> {
+    let kept: BTreeSet<(&str, &str)> = escape_rows(now)?.iter().map(Row::id).collect();
+    let mut deleted = BTreeSet::new();
+    for log in earlier {
+        deleted.extend(escape_rows(log)?.iter().map(Row::id).filter(|id| !kept.contains(id)));
+    }
+    if deleted.is_empty() {
+        return Ok(());
+    }
+    Err(deleted
+        .into_iter()
+        .map(|(date, place)| {
+            format!(
+                "{ESCAPES}: the row {date} | {place} is missing at the tip – the log is \
+                 append-only, change the row's status instead (ADR-0052)"
+            )
+        })
+        .collect())
 }
 
 /// The escape log at `commit`; empty where it did not exist yet.
@@ -295,13 +339,52 @@ fn escape_log(root: &Path, commit: &str) -> Result<String, Vec<String>> {
 }
 
 /// The backticked `Where` paths of the escape-log rows dated within the
-/// window of the tip day `tip`. Each table (consecutive `|` lines) is read
-/// with its own header; the line after the header is the separator. A row
-/// with another cell count than its header, no backticked path or an
+/// window of the tip day `tip`. A row without a backticked path or with an
 /// unparsable date fails closed.
 fn recent_escapes(escapes: &str, tip: i64) -> Result<Vec<&str>, Vec<String>> {
-    let mut lines = escapes.lines().map(str::trim).peekable();
     let mut places = Vec::new();
+    let mut errors = Vec::new();
+    for Row { date, place, line: row } in escape_rows(escapes)? {
+        let paths: Vec<&str> =
+            place.split('`').skip(1).step_by(2).filter(|p| !p.is_empty()).collect();
+        if paths.is_empty() {
+            errors.push(format!("{ESCAPES}: row without a backticked path in `Where` – {row}"));
+            continue;
+        }
+        let Some(day) = day_number(date) else {
+            errors.push(format!(
+                "{ESCAPES}: row date `{date}` is not a valid YYYY-MM-DD date – {row}"
+            ));
+            continue;
+        };
+        if tip - day < ESCAPE_WINDOW_DAYS {
+            places.extend(paths);
+        }
+    }
+    if errors.is_empty() { Ok(places) } else { Err(errors) }
+}
+
+/// A data row of the escape log: its `Date` and `Where` cells and the line.
+struct Row<'a> {
+    date: &'a str,
+    place: &'a str,
+    line: &'a str,
+}
+
+impl<'a> Row<'a> {
+    /// What identifies a row for the append-only rule (ADR-0052).
+    fn id(&self) -> (&'a str, &'a str) {
+        (self.date, self.place)
+    }
+}
+
+/// The data rows of every table (consecutive `|` lines) in `escapes`, each
+/// read with its own header. A table needs a header, a separator line and
+/// `Date` and `Where` columns, a row the header's cell count; anything else
+/// fails closed.
+fn escape_rows(escapes: &str) -> Result<Vec<Row<'_>>, Vec<String>> {
+    let mut lines = escapes.lines().map(str::trim).peekable();
+    let mut found = Vec::new();
     let mut errors = Vec::new();
     while lines.peek().is_some() {
         let table: Vec<&str> = lines
@@ -309,9 +392,18 @@ fn recent_escapes(escapes: &str, tip: i64) -> Result<Vec<&str>, Vec<String>> {
             .skip_while(|l| !l.starts_with('|'))
             .take_while(|l| l.starts_with('|'))
             .collect();
-        let [header, _separator, rows @ ..] = table.as_slice() else {
+        let [header, separator, rows @ ..] = table.as_slice() else {
+            errors.extend(table.first().map(|line| {
+                format!("{ESCAPES}: table of one line, without header and separator – {line}")
+            }));
             continue;
         };
+        if !is_separator(separator) {
+            errors.push(format!(
+                "{ESCAPES}: the line after a table header is no separator – {separator}"
+            ));
+            continue;
+        }
         let header = cells(header);
         let column = |name: &str| {
             header
@@ -326,7 +418,7 @@ fn recent_escapes(escapes: &str, tip: i64) -> Result<Vec<&str>, Vec<String>> {
                 continue;
             }
         };
-        for row in rows {
+        for &row in rows {
             let cells = cells(row);
             if cells.len() != header.len() {
                 errors.push(format!(
@@ -336,29 +428,21 @@ fn recent_escapes(escapes: &str, tip: i64) -> Result<Vec<&str>, Vec<String>> {
                 ));
                 continue;
             }
-            let paths: Vec<&str> = cells[where_column]
-                .split('`')
-                .skip(1)
-                .step_by(2)
-                .filter(|p| !p.is_empty())
-                .collect();
-            if paths.is_empty() {
-                errors.push(format!("{ESCAPES}: row without a backticked path in `Where` – {row}"));
-                continue;
-            }
-            let date = cells[date_column];
-            let Some(day) = day_number(date) else {
-                errors.push(format!(
-                    "{ESCAPES}: row date `{date}` is not a valid YYYY-MM-DD date – {row}"
-                ));
-                continue;
-            };
-            if tip - day < ESCAPE_WINDOW_DAYS {
-                places.extend(paths);
-            }
+            found.push(Row { date: cells[date_column], place: cells[where_column], line: row });
         }
     }
-    if errors.is_empty() { Ok(places) } else { Err(errors) }
+    if errors.is_empty() { Ok(found) } else { Err(errors) }
+}
+
+/// A table's separator line: between its outer pipes only non-empty cells
+/// of `-` and `:`.
+fn is_separator(line: &str) -> bool {
+    line.strip_prefix('|').and_then(|line| line.strip_suffix('|')).is_some_and(|inner| {
+        inner
+            .split('|')
+            .map(str::trim)
+            .all(|cell| !cell.is_empty() && cell.chars().all(|c| matches!(c, '-' | ':')))
+    })
 }
 
 /// The trimmed cells of a table row, split on every `|` not escaped as `\|`.
@@ -558,12 +642,14 @@ fn highest_round(record: &Value) -> u64 {
     reviews_of(record).iter().filter_map(|r| r["round"].as_u64()).max().unwrap_or(0)
 }
 
-/// The `general` reviews of the whole diff (no `files` or unknown scope).
+/// The reviews of the whole diff (no `files` or unknown scope).
+fn whole_diff(reviews: &[Value]) -> impl Iterator<Item = &Value> {
+    reviews.iter().filter(|r| r.get("scope").is_none_or(|scope| scope == "diff"))
+}
+
+/// The `general` reviews of the whole diff.
 fn whole_diff_general(reviews: &[Value]) -> impl Iterator<Item = &Value> {
-    reviews
-        .iter()
-        .filter(|r| r["lens"] == Lens::General.name())
-        .filter(|r| r.get("scope").is_none_or(|scope| scope == "diff"))
+    whole_diff(reviews).filter(|r| r["lens"] == Lens::General.name())
 }
 
 /// The two general samples (ADR-0052 decision 4): the first whole-diff
@@ -632,8 +718,9 @@ fn coverage_problems(reviews: &[Value], plan: &Plan) -> Vec<String> {
     } else if samples == 0 {
         problems.push("the record needs a whole-diff `general` review".into());
     }
+    // A lens covers the plan only if it reviewed the whole diff (ADR-0052).
     for lens in plan.lenses() {
-        if !reviews.iter().any(|r| r["lens"] == lens.name()) {
+        if !whole_diff(reviews).any(|r| r["lens"] == lens.name()) {
             problems.push(format!("tier high needs a review with lens `{}`", lens.name()));
         }
     }

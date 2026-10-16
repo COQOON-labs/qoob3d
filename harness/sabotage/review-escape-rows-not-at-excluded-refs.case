@@ -7,10 +7,10 @@ expect: plan_range_reads_escape_rows_at_excluded_refs
 diff --git a/xtask/src/review.rs b/xtask/src/review.rs
 --- a/xtask/src/review.rs
 +++ b/xtask/src/review.rs
-@@ -279,5 +279,4 @@
-     let mut logs = BTreeSet::new();
--    for commit in std::iter::once(tip).chain(boundaries.iter().map(String::as_str)).chain(excluded)
--    {
-+    for commit in std::iter::once(tip).chain(boundaries.iter().map(String::as_str)) {
-         logs.insert(escape_log(root, commit)?);
-     }
+@@ -292,5 +292,5 @@
+     let mut logs = BTreeSet::from([now.clone()]);
+     let mut earlier = BTreeSet::new();
+-    for commit in boundaries.iter().map(String::as_str).chain(excluded) {
++    for commit in boundaries.iter().map(String::as_str) {
+         let log = escape_log(root, commit)?;
+         // Only an ancestor of the tip was in the branch: a row that landed on

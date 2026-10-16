@@ -1,16 +1,15 @@
 # The plan reads escape rows only from the tip again: a range that deletes
-# the row naming its file drops its own `escape` trigger (ADR-0052 fix
-# round 1, F5)
+# the row naming its file drops its own `escape` trigger, and the
+# append-only check sees no earlier log (ADR-0052 fix round 1, F5; fix
+# round 6, S2)
 command: cargo test -p xtask --quiet plan_range_keeps_escape_rows_the_range_removes
 expect: plan_range_keeps_escape_rows_the_range_removes
 --- patch
 diff --git a/xtask/src/review.rs b/xtask/src/review.rs
 --- a/xtask/src/review.rs
 +++ b/xtask/src/review.rs
-@@ -279,5 +279,4 @@
-     let mut logs = BTreeSet::new();
--    for commit in std::iter::once(tip).chain(boundaries.iter().map(String::as_str)).chain(excluded)
--    {
-+    for commit in std::iter::once(tip) {
-         logs.insert(escape_log(root, commit)?);
-     }
+@@ -293,3 +293,3 @@
+     let mut earlier = BTreeSet::new();
+-    for commit in boundaries.iter().map(String::as_str).chain(excluded) {
++    for commit in std::iter::empty::<&str>() {
+         let log = escape_log(root, commit)?;

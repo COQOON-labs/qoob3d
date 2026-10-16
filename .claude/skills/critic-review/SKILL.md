@@ -5,9 +5,10 @@ description: Run the AI critics the review plan asks for over a revision range, 
 
 # Critic review (ADR-0041, ADR-0052)
 
-The pre-push hook (`cargo xtask review`) requires, for every pushed state with production code,
-a record `target/critic/<tree>.json` (version 2) that covers the review plan of the pushed range,
-rotates the general model after a fix, satisfies the stopping rule, and in which every
+The review gate of the pre-push hook (`xtask review`) requires, for every pushed state with
+production code, harness or build-manifest changes, a record `target/critic/<tree>.json`
+(version 2) that covers the review plan of the pushed range, rotates the general model after
+a fix, satisfies the stopping rule, and in which every
 `blocker`/`major` finding is refuted, or accepted by the user with an `accepted_reason`.
 Unverified and `fixed` findings still block (a fix changes the tree and needs a new review).
 
@@ -15,15 +16,17 @@ Unverified and `fixed` findings still block (a fix changes the tree and needs a 
    uncommitted changes committed first, commits only on the user's instruction).
    `base` = `git merge-base origin/main HEAD`; without a remote, the last state the user
    already knows. `tree` = `git rev-parse HEAD^{tree}`.
-2. **Plan.** `cargo xtask review --plan HEAD <base>..HEAD` prints the tier, its reasons and the
-   required reviews. Tier `none` needs no record.
+2. **Plan.** `cargo xtask review --plan HEAD HEAD --not origin/main` (the hook's range form)
+   prints the tier, its reasons and the required reviews. Tier `none` needs no record. A
+   deleted or redated row of `docs/escapes.md` is a plan error (the log is append-only).
 3. **Models and round.** Models are the Agent tool's `model` values: `opus`, `fable`, `sonnet`.
    Whenever `target/critic/` holds an earlier version-2 record of this branch (another tree,
    `head` in `<base>..HEAD`), not only after a fix, set `previous_tree` to the tree of the
    one with the highest round, use `round` = that round + 1 for every review, and give a
    whole-diff general review a model outside that record's whole-diff pair (its first two
    general reviews on different models); the gate enforces it. Only without such a record
-   `previous_tree` is `null` and `round` is 1.
+   `previous_tree` is `null` and `round` is 1. An amend or rebase changes the heads, so the
+   gate no longer finds the earlier records; the rotation then rests on you.
 4. **Critics, all in one message so they run in parallel.** Subagent `critic` per required
    review, with the range `base..head`, the lens and the plan's reasons, nothing else. Do not
    pass on the author's reasoning; the critic is supposed to judge freshly.
@@ -62,7 +65,8 @@ Unverified and `fixed` findings still block (a fix changes the tree and needs a 
    ```
    `resolution`: `open` (initial state), `fixed` (fixed in a later commit, then a new review
    for the new state), `accepted` (only the **user** may accept a confirmed finding; reason in
-   `"accepted_reason"`). Then `cargo xtask review HEAD <base>..HEAD` must print `review: ok`.
+   `"accepted_reason"`). Then `cargo xtask review HEAD HEAD --not origin/main` (the hook's
+   range form) must print `review: ok`.
 9. **Escapes.** A confirmed finding in code that an earlier round already reviewed unchanged,
    or a finding from Copilot, CI or the user that our critics missed, gets a row in
    `docs/escapes.md` (ADR-0052).
