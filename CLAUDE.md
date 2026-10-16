@@ -31,6 +31,7 @@ cargo xtask check --fast                    # without smoke + deny (runs automat
 cargo xtask setup                           # once: activate Git hooks from .githooks/ (ADR-0037)
 cargo xtask selftest                        # harness must reject every sabotage in harness/sabotage/
 cargo xtask commits main..HEAD              # commit policy: identity, no AI attribution, tests/code separate
+cargo xtask review --plan HEAD main..HEAD   # review tier, reasons and required critics (ADR-0052)
 cargo xtask check-rev <rev>                 # full check of a commit in a temporary worktree (pre-push, ADR-0048)
 cargo xtask docs [--fix]                    # docs lint; --fix regenerates the ADR index
 cargo xtask i18n                            # translations complete, no hard-coded UI texts
@@ -51,7 +52,7 @@ needed (rustup is installed keg-only via Homebrew).
 
 1. **Done means: `cargo xtask check` is green.** Report nothing as finished before that.
    Additionally check visual changes with `cargo xtask screenshot` and look at the PNGs.
-   Before the push: critic review (`/critic-review`, ADR-0041).
+   Before the push: critic review (`/critic-review`, ADR-0041, ADR-0052).
 2. **Document decisions:** Every new architecture or design decision gets an ADR
    (copy `docs/adr/0000-template.md`, then `cargo xtask docs --fix`), in the same commit as the
    code. Do not rewrite accepted ADRs; supersede them with a new one.

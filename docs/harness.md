@@ -41,7 +41,7 @@ flowchart LR
 | Test quality (mutation tests) | – | `mutants` |
 | Harness works (sabotage corpus) | `cargo xtask selftest` | `selftest`, Mondays |
 | Harness files, roles, bypasses, self-unlock | guard | CODEOWNERS review |
-| Critic review | pre-push (`xtask review`) | – (record stays local) |
+| Critic review: depth by risk, model rotation, stopping rule (ADR-0052) | pre-push (`xtask review`) | Copilot review on the PR (record stays local) |
 
 ## Roles (Claude Code subagents)
 
@@ -49,7 +49,7 @@ flowchart LR
 | --- | --- | --- |
 | `test-author` | write tests only | tests from the specification, before the implementation |
 | `implementer` | write production code only | make tests green, with as little code as possible |
-| `critic` | read only | diff against `harness/critic-checklist.md` |
+| `critic` | read only | diff against `harness/critic-checklist.md`, with one lens |
 | `verifier` | read only | refute or confirm a single finding |
 | `harness-auditor` | read only | check the harness for fitness for purpose |
 
@@ -83,7 +83,9 @@ cargo xtask selftest              # check the harness against all sabotage cases
   (a harness path needs a pure read, an allowlist, and so do test, code and fixture paths
   outside the agent's role, ADR-0049), the role ledger and the critic record live in directories
   the agent can reach. CI catches this as long as the agent cannot merge with admin rights.
-- The critic is not deterministic. It only blocks through verified findings.
+- The critic is not deterministic. It only blocks through verified findings. Its depth follows
+  the risk of the diff, its models rotate, and escaped defects are logged in
+  `docs/escapes.md` (ADR-0052).
 - Usability and accessibility are so far checked by the critic (`/usability-review`). Still
   missing as deterministic checks: AccessKit names of all controls, contrast of the theme
   colors, target sizes, interaction budgets for core workflows.
