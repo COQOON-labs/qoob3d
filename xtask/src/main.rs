@@ -72,8 +72,8 @@ fn main() -> ExitCode {
         }
         Some("rules") => report("rules", rules::check(&root)),
         Some("selftest") => report("selftest", selftest::run(&root)),
-        Some("review") => match &args[1..] {
-            [flag, tip, revs @ ..] if flag == "--plan" && !revs.is_empty() => {
+        Some("review") => match review::parse_args(&args[1..]) {
+            Some(review::Invocation::Plan { tip, revs }) => {
                 match review::plan_range(&root, tip, revs) {
                     Ok(plan) => {
                         print!("{plan}");
@@ -82,10 +82,10 @@ fn main() -> ExitCode {
                     Err(problems) => report("review --plan", Err(problems)),
                 }
             }
-            [tip, revs @ ..] if tip != "--plan" && !revs.is_empty() => {
+            Some(review::Invocation::Gate { tip, revs }) => {
                 report("review", review::check(&root, tip, revs))
             }
-            _ => {
+            None => {
                 eprintln!("usage: cargo xtask review [--plan] <tip> <rev-list args>");
                 false
             }

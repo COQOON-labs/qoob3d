@@ -52,23 +52,18 @@ const FORMAT: &[&str] = &[
 const SOURCE_TREES: &[&str] = &["crates/", "xtask/", "third_party/"];
 const CODE_EXTENSIONS: &[&str] = &[".rs", ".wgsl", ".cpp", ".hpp", ".hxx", ".h"];
 
-/// Ignores case: macOS file systems do (ADR-0043).
 pub(crate) fn is_harness(path: &str) -> bool {
-    let path = path.to_lowercase();
-    HARNESS
-        .iter()
-        .map(|h| h.to_lowercase())
-        .any(|h| if h.ends_with(['/', '-']) { path.starts_with(&h) } else { path == h })
+    listed(HARNESS, path)
 }
 
-/// Whether `path` is one of `entries`, where an entry ending in `/` is a
-/// directory prefix. Ignores case, as macOS file systems do (ADR-0043).
+/// Whether `path` is one of `entries`, where an entry ending in `/` or `-` is
+/// a prefix. Ignores case, as macOS file systems do (ADR-0043).
 pub(crate) fn listed(entries: &[&str], path: &str) -> bool {
     let path = path.to_lowercase();
     entries
         .iter()
         .map(|e| e.to_lowercase())
-        .any(|e| if e.ends_with('/') { path.starts_with(&e) } else { path == e })
+        .any(|e| if e.ends_with(['/', '-']) { path.starts_with(&e) } else { path == e })
 }
 
 pub(crate) fn is_occt_boundary(path: &str) -> bool {
