@@ -6,8 +6,8 @@ expect: writes nothing to stderr
 diff --git a/.githooks/lib.sh b/.githooks/lib.sh
 --- a/.githooks/lib.sh
 +++ b/.githooks/lib.sh
-@@ -16,3 +16,3 @@
-   else
--    echo "hooks: $xtask_binary not found, quarantine not removed" >&2
-+    echo "hooks: $xtask_binary not found, quarantine not removed"
-   fi
+@@ -20,3 +20,3 @@
+     else
+-      echo "hooks: $xtask_binary not found, quarantine not removed" >&2
++      echo "hooks: $xtask_binary not found, quarantine not removed"
+     fi
