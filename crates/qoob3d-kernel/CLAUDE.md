@@ -30,6 +30,12 @@ OpenCascade connection. Runs entirely in its own worker thread.
 - `src/profiles.rs`: `sketch_profiles` → regions via General Fuse (`qoob3d_sketch_regions`
   in C++, ADR-0028). Construction and degenerate curves do not count.
 - `src/tessellate.rs`: call of the C++ mesher → `ShapeMesh`, structure check, demo part.
+- `src/script.rs` + `src/script/`: script kernel (ADR-0053): `run`, `ScriptError`, `Shape`,
+  sandboxed imports, STL/3MF/STEP export; `api.rs` solids, booleans (batched, plausibility
+  AG-SC-12), transforms, measures; `profile.rs` profiles, extrude/revolve/loft, pipe;
+  `select.rs` edge/face selectors, fillet, chamfer, shell. Runs on the calling thread, not
+  the worker. Every API change updates `docs/script-api.md` (its examples run in
+  `tests/script.rs`).
 - `src/occt.rs` + `cpp/`: own cxx bridge. `build.rs` compiles it against the OCCT headers
   from `DEP_OCCT_INCLUDE` (set by the `opencascade-sys` fork in `third_party/opencascade-sys`
   via `links = "occt"`, ADR-0047).
@@ -50,6 +56,10 @@ OpenCascade connection. Runs entirely in its own worker thread.
 - Revolved bodies have degenerate edges at the poles; the mesher discards triangles with
   coincident corners, otherwise they do not count as watertight.
 - The rotation for placing into a plane: `gp_Trsf::SetDisplacement(gp_Ax3(), target)`.
+- `qoob3d_boolean` flattens compounds into argument lists: a compound of overlapping solids
+  must never be one BOP argument (self-interference).
+- STEP read/write share static OCCT settings; the wrappers serialise them with a mutex.
+  OCCT's STEP translator prints progress to stdout.
 - OCCT normals follow the surface, not the face orientation → for `TopAbs_REVERSED`
   flip winding and normal (done by `qoob3d_tessellate`).
 

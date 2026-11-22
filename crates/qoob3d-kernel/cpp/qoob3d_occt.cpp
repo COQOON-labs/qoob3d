@@ -4,9 +4,27 @@
 #include <string>
 
 #include <algorithm>
+#include <mutex>
+#include <utility>
 #include <vector>
 
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepFilletAPI_MakeChamfer.hxx>
+#include <BRepFilletAPI_MakeFillet.hxx>
+#include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCone.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakeSphere.hxx>
+#include <BRepPrimAPI_MakeTorus.hxx>
+#include <ChFi2d_FilletAPI.hxx>
+#include <IntCurvesFace_ShapeIntersector.hxx>
+#include <STEPControl_Reader.hxx>
+#include <STEPControl_Writer.hxx>
+#include <gp_Lin.hxx>
+
 #include <BOPAlgo_Builder.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
@@ -352,6 +370,20 @@ std::unique_ptr<TopoDS_Shape> own(const TopoDS_Shape &s) {
   return std::make_unique<TopoDS_Shape>(s);
 }
 
+// Appends `s` to `out`, compounds replaced by their (nested) children.
+void flatten(const TopoDS_Shape &s, TopTools_ListOfShape &out) {
+  if (s.IsNull()) {
+    return;
+  }
+  if (s.ShapeType() != TopAbs_COMPOUND) {
+    out.Append(s);
+    return;
+  }
+  for (TopoDS_Iterator it(s); it.More(); it.Next()) {
+    flatten(it.Value(), out);
+  }
+}
+
 // Merges coplanar / co-cylindrical faces after booleans so no seams show.
 TopoDS_Shape unify(const TopoDS_Shape &s) {
   ShapeUpgrade_UnifySameDomain u(s, Standard_True, Standard_True, Standard_True);
@@ -500,30 +532,49 @@ std::unique_ptr<TopoDS_Shape> qoob3d_loft(const TopoDS_Shape &faces,
 std::unique_ptr<TopoDS_Shape> qoob3d_boolean(const TopoDS_Shape &a, const TopoDS_Shape &b,
                                              uint32_t op) {
   return guarded("boolean", [&] {
-    TopoDS_Shape result;
-    if (op == 0) {
-      BRepAlgoAPI_Fuse fuse(a, b);
-      if (!fuse.IsDone() || fuse.HasErrors()) {
-        throw std::runtime_error("join failed");
-      }
-      result = fuse.Shape();
-    } else {
-      BRepAlgoAPI_Cut cut(a, b);
-      if (!cut.IsDone() || cut.HasErrors()) {
-        throw std::runtime_error("cut failed");
-      }
-      result = cut.Shape();
+    // Compounds are argument lists: one BOP for any number of shapes
+    // (batched booleans, AG-SC-05), and never a self-interfering compound.
+    TopTools_ListOfShape objects, tools;
+    flatten(a, objects);
+    flatten(b, tools);
+    if (objects.IsEmpty() || tools.IsEmpty()) {
+      throw std::runtime_error("boolean needs shapes on both sides");
     }
-    return own(unify(result));
+    std::unique_ptr<BRepAlgoAPI_BooleanOperation> bop;
+    const char *failure = nullptr;
+    switch (op) {
+    case 0:
+      bop = std::make_unique<BRepAlgoAPI_Fuse>();
+      failure = "join failed";
+      break;
+    case 1:
+      bop = std::make_unique<BRepAlgoAPI_Cut>();
+      failure = "cut failed";
+      break;
+    case 2:
+      bop = std::make_unique<BRepAlgoAPI_Common>();
+      failure = "common failed";
+      break;
+    default:
+      throw std::runtime_error("unknown boolean operation");
+    }
+    bop->SetArguments(objects);
+    bop->SetTools(tools);
+    bop->Build();
+    if (!bop->IsDone() || bop->HasErrors()) {
+      throw std::runtime_error(failure);
+    }
+    return own(unify(bop->Shape()));
   });
 }
 
-double qoob3d_distance(const TopoDS_Shape &a, const TopoDS_Shape &b) {
+double qoob3d_distance(const TopoDS_Shape &a, const TopoDS_Shape &b, double max) {
   return guarded("distance", [&] {
     Bnd_Box ba, bb;
     BRepBndLib::Add(a, ba);
     BRepBndLib::Add(b, bb);
-    if (ba.IsOut(bb)) {
+    // The box distance is a lower bound; beyond `max` it is answer enough.
+    if (ba.IsOut(bb) && ba.Distance(bb) > max) {
       return ba.Distance(bb);
     }
     BRepExtrema_DistShapeShape dist(a, b);
@@ -703,5 +754,387 @@ std::unique_ptr<TopoDS_Shape> qoob3d_sweep_circle(rust::Slice<const double> path
       throw std::runtime_error("sweep could not be closed into a solid");
     }
     return own(pipe.Shape());
+  });
+}
+
+// ---------------------------------------------------------------- script kernel (ADR-0053)
+
+namespace {
+
+void need(rust::Slice<const double> values, size_t n, const char *what) {
+  if (values.size() != n) {
+    throw std::runtime_error(std::string(what) + " needs " + std::to_string(n) + " values");
+  }
+}
+
+gp_Pnt point_at(rust::Slice<const double> xyz, size_t i) {
+  return gp_Pnt(xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]);
+}
+
+// STEP translation uses process-wide static settings (Interface_Static).
+std::mutex step_mutex;
+
+} // namespace
+
+std::unique_ptr<TopoDS_Shape> qoob3d_primitive(uint32_t kind, rust::Slice<const double> d) {
+  return guarded("primitive", [&] {
+    switch (kind) {
+    case 0:
+      need(d, 6, "box");
+      return own(BRepPrimAPI_MakeBox(gp_Pnt(d[0], d[1], d[2]), d[3], d[4], d[5]).Shape());
+    case 1:
+      need(d, 2, "cylinder");
+      return own(BRepPrimAPI_MakeCylinder(d[0], d[1]).Shape());
+    case 2:
+      need(d, 1, "sphere");
+      return own(BRepPrimAPI_MakeSphere(d[0]).Shape());
+    case 3:
+      need(d, 3, "cone");
+      return own(BRepPrimAPI_MakeCone(d[0], d[1], d[2]).Shape());
+    case 4:
+      need(d, 2, "torus");
+      return own(BRepPrimAPI_MakeTorus(d[0], d[1]).Shape());
+    default:
+      throw std::runtime_error("unknown primitive");
+    }
+  });
+}
+
+std::unique_ptr<TopoDS_Shape> qoob3d_transform(const TopoDS_Shape &shape, uint32_t kind,
+                                               rust::Slice<const double> p) {
+  return guarded("transform", [&] {
+    gp_Trsf t;
+    switch (kind) {
+    case 0:
+      need(p, 3, "translation");
+      t.SetTranslation(gp_Vec(p[0], p[1], p[2]));
+      break;
+    case 1:
+      need(p, 4, "rotation");
+      t.SetRotation(gp_Ax1(gp::Origin(), gp_Dir(p[0], p[1], p[2])), p[3]);
+      break;
+    case 2:
+      need(p, 3, "mirror");
+      t.SetMirror(gp_Ax2(gp::Origin(), gp_Dir(p[0], p[1], p[2])));
+      break;
+    case 3:
+      need(p, 1, "scale");
+      t.SetScale(gp::Origin(), p[0]);
+      break;
+    default:
+      throw std::runtime_error("unknown transform");
+    }
+    // Rigid motions only set a location; mirror and scale copy the geometry.
+    return own(BRepBuilderAPI_Transform(shape, t, Standard_False).Shape());
+  });
+}
+
+std::unique_ptr<TopoDS_Shape> qoob3d_compound() {
+  return guarded("compound", [&] {
+    BRep_Builder bb;
+    TopoDS_Compound c;
+    bb.MakeCompound(c);
+    return own(c);
+  });
+}
+
+void qoob3d_compound_add(TopoDS_Shape &compound, const TopoDS_Shape &part) {
+  guarded("compound_add", [&] {
+    if (compound.IsNull() || compound.ShapeType() != TopAbs_COMPOUND) {
+      throw std::runtime_error("not a compound");
+    }
+    TopTools_ListOfShape parts;
+    flatten(part, parts);
+    BRep_Builder bb;
+    for (TopTools_ListIteratorOfListOfShape it(parts); it.More(); it.Next()) {
+      bb.Add(compound, it.Value());
+    }
+  });
+}
+
+Qoob3dElements qoob3d_elements(const TopoDS_Shape &shape, bool faces) {
+  return guarded("elements", [&] {
+    TopTools_IndexedMapOfShape map;
+    TopExp::MapShapes(shape, faces ? TopAbs_FACE : TopAbs_EDGE, map);
+    TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
+    if (!faces) {
+      TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edge_faces);
+    }
+    Qoob3dElements out;
+    for (int i = 1; i <= map.Extent(); ++i) {
+      uint32_t kind = 2;
+      gp_Dir dir(0, 0, 1);
+      if (faces) {
+        const TopoDS_Face &face = TopoDS::Face(map(i));
+        BRepAdaptor_Surface surface(face);
+        if (surface.GetType() == GeomAbs_Plane) {
+          kind = 0;
+          dir = surface.Plane().Axis().Direction();
+          if (face.Orientation() == TopAbs_REVERSED) {
+            dir.Reverse();
+          }
+        } else if (surface.GetType() == GeomAbs_Cylinder) {
+          kind = 1;
+          dir = surface.Cylinder().Axis().Direction();
+        }
+      } else {
+        const TopoDS_Edge &edge = TopoDS::Edge(map(i));
+        bool seam = BRep_Tool::Degenerated(edge);
+        if (edge_faces.Contains(edge)) {
+          for (TopTools_ListIteratorOfListOfShape it(edge_faces.FindFromKey(edge)); it.More();
+               it.Next()) {
+            seam = seam || BRep_Tool::IsClosed(edge, TopoDS::Face(it.Value()));
+          }
+        }
+        if (seam) {
+          kind = 3;
+        } else {
+          BRepAdaptor_Curve curve(edge);
+          if (curve.GetType() == GeomAbs_Line) {
+            kind = 0;
+            dir = curve.Line().Direction();
+          } else if (curve.GetType() == GeomAbs_Circle) {
+            kind = 1;
+            dir = curve.Circle().Axis().Direction();
+          }
+        }
+      }
+      Bnd_Box box;
+      double b[6] = {0, 0, 0, 0, 0, 0};
+      if (kind != 3) {
+        BRepBndLib::AddOptimal(map(i), box, Standard_False, Standard_False);
+        if (!box.IsVoid()) {
+          box.Get(b[0], b[1], b[2], b[3], b[4], b[5]);
+        }
+      }
+      out.kinds.push_back(kind);
+      for (double v : b) {
+        out.bounds.push_back(v);
+      }
+      out.directions.push_back(dir.X());
+      out.directions.push_back(dir.Y());
+      out.directions.push_back(dir.Z());
+    }
+    return out;
+  });
+}
+
+std::unique_ptr<TopoDS_Shape> qoob3d_fillet(const TopoDS_Shape &shape,
+                                            rust::Slice<const uint32_t> edges, double size,
+                                            bool chamfer) {
+  return guarded(chamfer ? "chamfer" : "fillet", [&] {
+    TopTools_IndexedMapOfShape map;
+    TopExp::MapShapes(shape, TopAbs_EDGE, map);
+    auto edge = [&](uint32_t i) {
+      if (i < 1 || static_cast<int>(i) > map.Extent()) {
+        throw std::runtime_error("edge index out of range");
+      }
+      return TopoDS::Edge(map(static_cast<int>(i)));
+    };
+    TopoDS_Shape result;
+    if (chamfer) {
+      BRepFilletAPI_MakeChamfer mk(shape);
+      for (uint32_t i : edges) {
+        mk.Add(size, edge(i));
+      }
+      mk.Build();
+      if (!mk.IsDone()) {
+        throw std::runtime_error("chamfer failed");
+      }
+      result = mk.Shape();
+    } else {
+      BRepFilletAPI_MakeFillet mk(shape);
+      for (uint32_t i : edges) {
+        mk.Add(size, edge(i));
+      }
+      mk.Build();
+      if (!mk.IsDone()) {
+        throw std::runtime_error("fillet failed");
+      }
+      result = mk.Shape();
+    }
+    return own(result);
+  });
+}
+
+std::unique_ptr<TopoDS_Shape> qoob3d_shell(const TopoDS_Shape &shape,
+                                           rust::Slice<const uint32_t> open_faces,
+                                           double thickness) {
+  return guarded("shell", [&] {
+    TopTools_IndexedMapOfShape map;
+    TopExp::MapShapes(shape, TopAbs_FACE, map);
+    TopTools_ListOfShape open;
+    for (uint32_t i : open_faces) {
+      if (i < 1 || static_cast<int>(i) > map.Extent()) {
+        throw std::runtime_error("face index out of range");
+      }
+      open.Append(map(static_cast<int>(i)));
+    }
+    BRepOffsetAPI_MakeThickSolid mk;
+    // Negative offset: the wall grows inward, the outer size is kept.
+    mk.MakeThickSolidByJoin(shape, open, -thickness, 1e-5);
+    mk.Build();
+    if (!mk.IsDone()) {
+      throw std::runtime_error("shell failed");
+    }
+    return own(mk.Shape());
+  });
+}
+
+double qoob3d_area(const TopoDS_Shape &shape) {
+  return guarded("area", [&] {
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(shape, props);
+    return props.Mass();
+  });
+}
+
+rust::Vec<double> qoob3d_center(const TopoDS_Shape &shape) {
+  return guarded("center", [&] {
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape, props);
+    const gp_Pnt c = props.CentreOfMass();
+    rust::Vec<double> out;
+    out.push_back(c.X());
+    out.push_back(c.Y());
+    out.push_back(c.Z());
+    return out;
+  });
+}
+
+rust::Vec<double> qoob3d_bbox(const TopoDS_Shape &shape) {
+  return guarded("bbox", [&] {
+    // Tight box from the exact geometry, without tolerance enlargement.
+    Bnd_Box box;
+    BRepBndLib::AddOptimal(shape, box, Standard_False, Standard_False);
+    if (box.IsVoid()) {
+      throw std::runtime_error("empty shape has no bounding box");
+    }
+    double b[6];
+    box.Get(b[0], b[1], b[2], b[3], b[4], b[5]);
+    rust::Vec<double> out;
+    for (double v : b) {
+      out.push_back(v);
+    }
+    return out;
+  });
+}
+
+rust::Vec<double> qoob3d_ray(const TopoDS_Shape &shape, rust::Slice<const double> origin,
+                             rust::Slice<const double> direction) {
+  return guarded("ray", [&] {
+    need(origin, 3, "ray origin");
+    need(direction, 3, "ray direction");
+    const gp_Lin line(point_at(origin, 0), gp_Dir(direction[0], direction[1], direction[2]));
+    IntCurvesFace_ShapeIntersector inter;
+    inter.Load(shape, 1e-7);
+    // A half-line: only hits ahead of the origin.
+    inter.Perform(line, 0.0, RealLast());
+    if (!inter.IsDone()) {
+      throw std::runtime_error("ray intersection failed");
+    }
+    std::vector<std::pair<double, gp_Pnt>> hits;
+    for (int i = 1; i <= inter.NbPnt(); ++i) {
+      hits.emplace_back(inter.WParameter(i), inter.Pnt(i));
+    }
+    std::sort(hits.begin(), hits.end(),
+              [](const auto &a, const auto &b) { return a.first < b.first; });
+    rust::Vec<double> out;
+    double last = -1.0;
+    for (const auto &[w, p] : hits) {
+      // A hit on an edge or seam is reported by every face that shares it.
+      if (!out.empty() && w - last < 1e-7) {
+        continue;
+      }
+      last = w;
+      out.push_back(p.X());
+      out.push_back(p.Y());
+      out.push_back(p.Z());
+    }
+    return out;
+  });
+}
+
+std::unique_ptr<TopoDS_Shape> qoob3d_pipe(rust::Slice<const double> points, double radius,
+                                          double bend_radius) {
+  return guarded("pipe", [&] {
+    const size_t n = points.size() / 3;
+    if (n < 2 || points.size() % 3 != 0) {
+      throw std::runtime_error("pipe needs at least two points");
+    }
+    // Every corner is rounded by a 2D fillet in the plane of its two
+    // segments; the edges are trimmed by OCCT (ChFi2d).
+    BRepBuilderAPI_MakeWire wire;
+    TopoDS_Edge current = BRepBuilderAPI_MakeEdge(point_at(points, 0), point_at(points, 1));
+    for (size_t k = 1; k + 1 < n; ++k) {
+      const gp_Pnt a = point_at(points, k - 1), p = point_at(points, k),
+                   b = point_at(points, k + 1);
+      TopoDS_Edge next = BRepBuilderAPI_MakeEdge(p, b);
+      const gp_Vec normal = gp_Vec(a, p).Crossed(gp_Vec(p, b));
+      if (normal.Magnitude() < 1e-12 * a.Distance(p) * p.Distance(b)) {
+        wire.Add(current); // straight on: no bend
+        current = next;
+        continue;
+      }
+      ChFi2d_FilletAPI fillet(current, next, gp_Pln(p, gp_Dir(normal)));
+      if (!fillet.Perform(bend_radius)) {
+        throw std::runtime_error("bend radius does not fit at point " + std::to_string(k));
+      }
+      TopoDS_Edge before, after;
+      const TopoDS_Edge arc = fillet.Result(p, before, after);
+      if (arc.IsNull()) {
+        throw std::runtime_error("bend radius does not fit at point " + std::to_string(k));
+      }
+      if (!before.IsNull()) {
+        wire.Add(before);
+      }
+      wire.Add(arc);
+      current = after;
+    }
+    if (!current.IsNull()) {
+      wire.Add(current);
+    }
+    if (!wire.IsDone()) {
+      throw std::runtime_error("pipe path is not connected");
+    }
+    const gp_Pnt p0 = point_at(points, 0);
+    const gp_Circ circle(gp_Ax2(p0, gp_Dir(gp_Vec(p0, point_at(points, 1)))), radius);
+    BRepOffsetAPI_MakePipeShell pipe(wire.Wire());
+    pipe.Add(BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(circle).Edge()).Wire());
+    pipe.Build();
+    if (!pipe.IsDone()) {
+      throw std::runtime_error("pipe sweep failed");
+    }
+    if (!pipe.MakeSolid()) {
+      throw std::runtime_error("pipe could not be closed into a solid");
+    }
+    return own(pipe.Shape());
+  });
+}
+
+void qoob3d_write_step(const TopoDS_Shape &shape, rust::Str path) {
+  guarded("write_step", [&] {
+    std::lock_guard<std::mutex> lock(step_mutex);
+    STEPControl_Writer writer;
+    if (writer.Transfer(shape, STEPControl_AsIs) != IFSelect_RetDone) {
+      throw std::runtime_error("STEP transfer failed");
+    }
+    if (writer.Write(std::string(path).c_str()) != IFSelect_RetDone) {
+      throw std::runtime_error("STEP file could not be written");
+    }
+  });
+}
+
+std::unique_ptr<TopoDS_Shape> qoob3d_read_step(rust::Str path) {
+  return guarded("read_step", [&] {
+    std::lock_guard<std::mutex> lock(step_mutex);
+    STEPControl_Reader reader;
+    if (reader.ReadFile(std::string(path).c_str()) != IFSelect_RetDone) {
+      throw std::runtime_error("STEP file could not be read");
+    }
+    if (reader.TransferRoots() == 0) {
+      throw std::runtime_error("STEP file contains no shape");
+    }
+    return own(reader.OneShape());
   });
 }

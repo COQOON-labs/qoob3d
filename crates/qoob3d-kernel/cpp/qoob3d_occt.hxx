@@ -43,11 +43,13 @@ std::unique_ptr<TopoDS_Shape> qoob3d_revolve(const TopoDS_Shape &faces,
 std::unique_ptr<TopoDS_Shape> qoob3d_loft(const TopoDS_Shape &faces,
                                           rust::Slice<const double> start_point,
                                           rust::Slice<const double> end_point);
-// op: 0 fuse, 1 cut (a − b).
+// op: 0 fuse, 1 cut (a − b), 2 common. Compounds count as lists of
+// arguments, so a batch of shapes is one operation.
 std::unique_ptr<TopoDS_Shape> qoob3d_boolean(const TopoDS_Shape &a, const TopoDS_Shape &b,
                                              uint32_t op);
-// Distance between two shapes (0 if they touch or overlap).
-double qoob3d_distance(const TopoDS_Shape &a, const TopoDS_Shape &b);
+// Distance between two shapes (0 if they touch or overlap). Exact up to
+// `max`; beyond it a lower bound (the distance of the bounding boxes).
+double qoob3d_distance(const TopoDS_Shape &a, const TopoDS_Shape &b, double max);
 double qoob3d_volume(const TopoDS_Shape &shape);
 bool qoob3d_is_valid(const TopoDS_Shape &shape);
 // The solids of a shape (compounds are flattened).
@@ -70,3 +72,42 @@ std::unique_ptr<TopoDS_Shape> qoob3d_outline_prism(rust::Slice<const double> poi
 // `binormal`: empty = corrected Frenet, else a fixed binormal direction.
 std::unique_ptr<TopoDS_Shape> qoob3d_sweep_circle(rust::Slice<const double> path, double radius,
                                                   rust::Slice<const double> binormal);
+
+// ---- Script kernel (ADR-0053). Placement and validation live in Rust.
+
+// kind 0 box (corner x y z, size dx dy dz), 1 cylinder (r h), 2 sphere (r),
+// 3 cone (r1 r2 h), 4 torus (R r); axis Z through the origin.
+std::unique_ptr<TopoDS_Shape> qoob3d_primitive(uint32_t kind, rust::Slice<const double> dims);
+// kind 0 translate (dx dy dz), 1 rotate (axis x y z, angle rad), 2 mirror at
+// the plane through the origin (normal x y z), 3 scale about the origin (f).
+std::unique_ptr<TopoDS_Shape> qoob3d_transform(const TopoDS_Shape &shape, uint32_t kind,
+                                               rust::Slice<const double> params);
+// An empty compound; `qoob3d_compound_add` appends a shape (compounds flattened).
+std::unique_ptr<TopoDS_Shape> qoob3d_compound();
+void qoob3d_compound_add(TopoDS_Shape &compound, const TopoDS_Shape &part);
+
+// Edges (or faces) of a shape in the order of TopExp::MapShapes (index i + 1).
+struct Qoob3dElements;
+Qoob3dElements qoob3d_elements(const TopoDS_Shape &shape, bool faces);
+// Fillet (or symmetric chamfer) of the edges with map indices `edges`.
+std::unique_ptr<TopoDS_Shape> qoob3d_fillet(const TopoDS_Shape &shape,
+                                            rust::Slice<const uint32_t> edges, double size,
+                                            bool chamfer);
+// Hollow solid, wall inward, the faces with map indices `open_faces` removed.
+std::unique_ptr<TopoDS_Shape> qoob3d_shell(const TopoDS_Shape &shape,
+                                           rust::Slice<const uint32_t> open_faces,
+                                           double thickness);
+double qoob3d_area(const TopoDS_Shape &shape);
+rust::Vec<double> qoob3d_center(const TopoDS_Shape &shape);
+// Tight bounding box xmin ymin zmin xmax ymax zmax.
+rust::Vec<double> qoob3d_bbox(const TopoDS_Shape &shape);
+// Points (x y z) where the half-line from `origin` along `direction` crosses
+// faces, sorted by distance.
+rust::Vec<double> qoob3d_ray(const TopoDS_Shape &shape, rust::Slice<const double> origin,
+                             rust::Slice<const double> direction);
+// Circle of `radius` swept along the polyline `points` (x y z), corners
+// rounded with `bend_radius`.
+std::unique_ptr<TopoDS_Shape> qoob3d_pipe(rust::Slice<const double> points, double radius,
+                                          double bend_radius);
+void qoob3d_write_step(const TopoDS_Shape &shape, rust::Str path);
+std::unique_ptr<TopoDS_Shape> qoob3d_read_step(rust::Str path);

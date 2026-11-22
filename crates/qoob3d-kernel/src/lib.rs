@@ -8,6 +8,7 @@
 mod model;
 mod occt;
 mod profiles;
+pub mod script;
 mod tessellate;
 mod worker;
 
@@ -28,6 +29,9 @@ pub enum KernelError {
     /// A modelling problem the user can fix (missing profile, nothing to cut …).
     #[error("{0}")]
     Model(String),
+    /// Reading or writing a file failed.
+    #[error("file: {0}")]
+    Io(String),
 }
 
 /// Chordal deviation used for viewport meshes (mm).

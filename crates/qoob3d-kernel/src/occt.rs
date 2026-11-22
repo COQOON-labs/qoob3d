@@ -45,6 +45,17 @@ pub(crate) mod ffi {
         arc_ids: Vec<u32>,
     }
 
+    /// Edges or faces of a shape (script selectors, ADR-0053). Element `i`
+    /// has map index `i + 1`, kind (edges: 0 line, 1 circle, 2 other,
+    /// 3 seam or degenerate; faces: 0 plane, 1 cylinder, 2 other), tight
+    /// bounds `6 i..6 i + 6` (min, max) and direction `3 i..3 i + 3` (line
+    /// direction, circle axis, outward plane normal, cylinder axis).
+    struct Qoob3dElements {
+        kinds: Vec<u32>,
+        bounds: Vec<f64>,
+        directions: Vec<f64>,
+    }
+
     unsafe extern "C++" {
         include!("qoob3d-kernel/cpp/qoob3d_occt.hxx");
 
@@ -84,7 +95,7 @@ pub(crate) mod ffi {
             b: &TopoDS_Shape,
             op: u32,
         ) -> Result<UniquePtr<TopoDS_Shape>>;
-        fn qoob3d_distance(a: &TopoDS_Shape, b: &TopoDS_Shape) -> Result<f64>;
+        fn qoob3d_distance(a: &TopoDS_Shape, b: &TopoDS_Shape, max: f64) -> Result<f64>;
         fn qoob3d_volume(shape: &TopoDS_Shape) -> Result<f64>;
         fn qoob3d_is_valid(shape: &TopoDS_Shape) -> Result<bool>;
         fn qoob3d_solid_count(shape: &TopoDS_Shape) -> Result<u32>;
@@ -103,5 +114,38 @@ pub(crate) mod ffi {
             radius: f64,
             binormal: &[f64],
         ) -> Result<UniquePtr<TopoDS_Shape>>;
+
+        fn qoob3d_primitive(kind: u32, dims: &[f64]) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_transform(
+            shape: &TopoDS_Shape,
+            kind: u32,
+            params: &[f64],
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_compound() -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_compound_add(compound: Pin<&mut TopoDS_Shape>, part: &TopoDS_Shape)
+        -> Result<()>;
+        fn qoob3d_elements(shape: &TopoDS_Shape, faces: bool) -> Result<Qoob3dElements>;
+        fn qoob3d_fillet(
+            shape: &TopoDS_Shape,
+            edges: &[u32],
+            size: f64,
+            chamfer: bool,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_shell(
+            shape: &TopoDS_Shape,
+            open_faces: &[u32],
+            thickness: f64,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_area(shape: &TopoDS_Shape) -> Result<f64>;
+        fn qoob3d_center(shape: &TopoDS_Shape) -> Result<Vec<f64>>;
+        fn qoob3d_bbox(shape: &TopoDS_Shape) -> Result<Vec<f64>>;
+        fn qoob3d_ray(shape: &TopoDS_Shape, origin: &[f64], direction: &[f64]) -> Result<Vec<f64>>;
+        fn qoob3d_pipe(
+            points: &[f64],
+            radius: f64,
+            bend_radius: f64,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_write_step(shape: &TopoDS_Shape, path: &str) -> Result<()>;
+        fn qoob3d_read_step(path: &str) -> Result<UniquePtr<TopoDS_Shape>>;
     }
 }

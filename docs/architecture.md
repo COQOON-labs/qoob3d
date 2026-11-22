@@ -46,6 +46,7 @@ flowchart LR
    as polylines) and sketch profiles via General Fuse (ADR-0028). `model.rs` builds the
    features one after another into bodies (booleans against touched bodies, hash chain cache,
    ADR-0031/0012). Rebuilds are coalesced: only the newest waiting request counts.
+   `script` runs model scripts (Rhai) on the same wrappers, on the calling thread (ADR-0053).
 4. **Renderer** (`qoob3d-render`): background, bodies, edges (pixel-wide quads), grid with
    print bed and axes (ADR-0021), in sketch mode in the sketch plane. Offscreen with MSAA, reverse-Z; egui gets a
    Unorm view (ADR-0019).
@@ -109,6 +110,7 @@ flowchart TD
 | Translations, settings | `crates/qoob3d-app/locales/*/main.ftl`, `src/{i18n,settings}.rs` |
 | Kernel protocol, worker | `crates/qoob3d-kernel/src/worker.rs` |
 | Own OCCT wrappers (C++) | `crates/qoob3d-kernel/cpp/`, bridge `src/occt.rs` |
+| Script kernel: Rhai CAD API, sandbox, errors, STEP/STL/3MF export (ADR-0053) | `crates/qoob3d-kernel/src/script.rs`, `src/script/`, reference `docs/script-api.md` |
 | Camera math (ortho/persp., ray, animation) | `crates/qoob3d-render/src/camera.rs` |
 | Render pipelines, targets, color space | `crates/qoob3d-render/src/renderer.rs` |
 | Shaders (bodies, lines, grid) | `crates/qoob3d-render/src/shaders/scene.wgsl` |
