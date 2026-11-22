@@ -484,6 +484,9 @@ fn ag_mc_02_every_tool_answers_with_the_envelope() {
     git_init(&p.dir);
     // AG-MC-01: a running service is used, not replaced.
     let s = Service::start(&p);
+    // Discovery runs in a worker (ADR-0056): project_status lists A and B
+    // only once it has seen their files.
+    s.wait_discovery();
     let running = service_json(&p.dir);
     let mut mcp = Mcp::open(&p);
     call_information_tools(&mut mcp);
@@ -890,6 +893,9 @@ fn file_write_of_a_nested_script_notes_that_it_is_not_discovered() {
     // script written to `parts/sub/x.rhai` would silently never build, so
     // the result carries a `note` saying which locations are discovered.
     let p = small_project("mcp-note");
+    // A running service, so the status below can wait for discovery
+    // (ADR-0056); the MCP server uses it (AG-MC-01).
+    let s = Service::start(&p);
     let mut mcp = Mcp::open(&p);
     let part = "part(\"Nested\", #{}, |deps| box(4, 4, 4));\n";
     for path in ["parts/sub/x.rhai", "checks/deep/y.rhai"] {
@@ -899,7 +905,9 @@ fn file_write_of_a_nested_script_notes_that_it_is_not_discovered() {
         assert!(r.get("declared").is_none_or(Value::is_null), "{path} declares nothing: {r}");
         assert_eq!(p.read(path), part, "the file is written all the same");
     }
-    // The part is indeed not part of the project.
+    // The part is indeed not part of the project, also once every file is
+    // discovered (before that, its absence would prove nothing).
+    s.wait_discovery();
     let st = mcp.call("project_status", &json!({})).ok().clone();
     assert!(!declared_names(&st["parts"]).contains("Nested"), "{st}");
     // A file in a discovered location has no such note.

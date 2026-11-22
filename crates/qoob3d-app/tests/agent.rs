@@ -224,7 +224,9 @@ fn ag_ck_01_02_03_checks_run_record_expectations_and_report_states() {
     p.write("checks/geometry.rhai", CHECKS_GEOMETRY).write("checks/failing.rhai", CHECKS_FAILING);
     let s = Service::start(&p);
 
-    // AG-CK-03: declared checks are known before any run.
+    // AG-CK-03: declared checks are known before any run. Discovery runs
+    // in a worker (ADR-0056): wait until it has seen every file.
+    s.wait_discovery();
     let st = status(&s);
     let all = ["a_volume", "spacing", "inclusive", "nan", "wrong", "broken", "ghost"];
     let declared = states(&st, "checks");
@@ -379,6 +381,7 @@ fn check_stale(s: &Service, p: &Project) {
     // A changed check file makes its checks stale without a run.
     assert_eq!(check_state(s, "spacing"), "passed");
     p.write("checks/geometry.rhai", &format!("{CHECKS_GEOMETRY}// changed\n"));
+    s.wait_discovery();
     assert_eq!(check_state(s, "spacing"), "stale");
     run_checks(s, Some(&["spacing"]));
     assert_eq!(check_state(s, "spacing"), "passed");
@@ -713,6 +716,7 @@ fn ag_sv_04_review_needs_current_parts_and_passed_checks() {
     // The agent may take it back; a changed part closes the gate again.
     update_ok(&s, &id, &json!({"state": "in_progress", "role": "agent"}), "in_progress");
     p.write("parts/plate.rhai", &format!("{plate}// changed\n"));
+    s.wait_discovery();
     assert_eq!(states(&status(&s), "parts")["Plate"], "outdated");
     gate_refused(&s, &id, &["Plate"]);
     // Rebuilt, but the check has not run after the last build.

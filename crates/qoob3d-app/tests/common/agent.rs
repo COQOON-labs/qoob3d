@@ -300,6 +300,20 @@ impl Service {
         }
     }
 
+    /// `POST /discover {"files": null, "wait_s": 20}` (ADR-0056, §3.1):
+    /// waits until every part and check file is discovered and asserts that
+    /// nothing is left in `discovering`. Discovery runs in a worker, so the
+    /// first `/status` after a start or a file write may not list the
+    /// declarations yet; call this before reading parts, checks or
+    /// `load_errors` from `/status`. 20 s: the start-up budget (WA-OP-02),
+    /// far above one worker round trip per file. Returns the result.
+    pub(crate) fn wait_discovery(&self) -> Value {
+        let r = self.request("POST", "/discover", Some(&json!({"files": null, "wait_s": 20})));
+        let result = r.ok();
+        assert_eq!(result["discovering"], json!([]), "discovery did not finish: {result}");
+        result
+    }
+
     /// One request; panics with the tail of the service log if it gets no answer.
     pub(crate) fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Reply {
         let (token, wait) = (self.token.as_deref(), Duration::from_secs(90));

@@ -742,6 +742,10 @@ fn states(list: &Value) -> Vec<(String, String)> {
 #[test]
 fn ag_mc_10_task_get_returns_the_parts_and_checks_with_their_states() {
     let p = small_project("task-project");
+    // A running service, so the first task_get can wait for discovery
+    // (ADR-0056); the MCP server uses it (AG-MC-01).
+    let s = Service::start(&p);
+    s.wait_discovery();
     let mut mcp = Mcp::open(&p);
     // Nothing built, nothing run.
     let got = mcp.call("task_get", &json!({"id": "T-0001"}));
@@ -777,6 +781,8 @@ fn ag_mc_10_task_get_returns_the_parts_and_checks_with_their_states() {
     // A changed part file shows up without a status call: A and its
     // dependent B are no longer current, the check that read A is stale.
     p.write("parts/a.rhai", "part(\"A\", #{}, |deps| box(20, 10, 12));\n");
+    // Discovery of the changed file runs in a worker (ADR-0056).
+    s.wait_discovery();
     let changed = mcp.call("task_get", &json!({"id": "T-0001"})).ok().clone();
     let parts = states(&changed["project"]["parts"]);
     assert!(parts.iter().all(|(_, s)| s != "current"), "A changed, B depends on it: {parts:?}");
