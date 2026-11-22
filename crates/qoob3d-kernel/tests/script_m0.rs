@@ -1,14 +1,15 @@
-//! R1 acceptance (docs/requirements/agent.md §4): the three M0 probe parts,
-//! written as Rhai scripts in `tests/scripts/*.rhai`, reproduce the analytic
-//! volumes of `werft/m0/teile.py` (`kransaeule_soll_volumen`,
-//! `treppe_soll_volumen`, `reling_soll_volumen`) to < 1e-6 relative, and
-//! build within the AG-SC-15 time budget.
+//! R1 acceptance (docs/requirements/agent.md §7): the three M0 probe parts
+//! (crane column, stair, railing; `docs/concept/m0-report.md`), written as
+//! Rhai scripts in `tests/scripts/*.rhai`, reproduce their analytic target
+//! volumes to < 1e-6 relative, and build within the AG-SC-15 time budget.
 //!
-//! The formulas below are ports of the Python reference functions; they use
-//! only the part dimensions, never the kernel. M0 measured the same parts in
-//! OCCT with a deviation < 1e-12 (werft/docs/m0_bericht.md), so 1e-6 is a
-//! wide margin that still catches any missing or extra feature (the smallest
-//! feature, one pin chamfer ring, is ~0.5 mm³ = 2e-4 of the crane column).
+//! The formulas below are the analytic target volumes of the M0 probe: sums
+//! of cylinders, prisms, Pappus rings and pipe lengths, each derived at its
+//! function. They use only the part dimensions, never the kernel. M0 measured
+//! the same parts in OCCT with a deviation < 1e-12
+//! (`docs/concept/m0-report.md` §1), so 1e-6 is a wide margin that still
+//! catches any missing or extra feature (the smallest feature, one pin
+//! chamfer ring, is ~0.5 mm³ = 2e-4 of the crane column).
 
 use std::f64::consts::PI;
 use std::path::PathBuf;
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use qoob3d_kernel::script::{RunOptions, RunOutput, run};
 
-/// R1 acceptance tolerance (agent.md §4).
+/// R1 acceptance tolerance (agent.md §7).
 const REL_TOL: f64 = 1e-6;
 
 fn script_path(name: &str) -> PathBuf {
@@ -55,12 +56,12 @@ fn assert_build_time(name: &str, elapsed: Duration) {
 
 /// Pappus: a right isosceles triangle with legs `c` in the corner of a turned
 /// edge at radius `r` has area c²/2 and its centroid at radius r − c/3, so the
-/// chamfer ring removes 2π (r − c/3) c²/2 (teile.py `fasenring`).
+/// chamfer ring removes 2π (r − c/3) c²/2 (centroid radius times area).
 fn chamfer_ring(r: f64, c: f64) -> f64 {
     2.0 * PI * (r - c / 3.0) * c * c / 2.0
 }
 
-/// Port of `kransaeule_soll_volumen`: column Ø13 × 20 with two 0.5 chamfer
+/// Target volume of the crane column: column Ø13 × 20 with two 0.5 chamfer
 /// rings, pin Ø4 × 2.45 with one 0.3 chamfer ring, minus the 4.4 × 5.4 × 4.2
 /// pocket (the pocket corners lie at radius 3.48 < 6.0, inside the chamfer).
 fn crane_column_volume() -> f64 {
@@ -74,7 +75,8 @@ fn crane_column_volume() -> f64 {
 
 #[test]
 fn crane_column_reference_volume_matches_the_python_port() {
-    // Guards the port itself: value printed by the M0 formulas in Python.
+    // Guards the formula itself: the value the M0 probe computed for the
+    // same dimensions (docs/concept/m0-report.md).
     assert!((crane_column_volume() - 2575.155811208424).abs() < 1e-9);
 }
 
@@ -112,7 +114,7 @@ fn crane_column_as_revolved_profile_reproduces_the_analytic_volume() {
 // Stair
 // ---------------------------------------------------------------------------
 
-/// Port of `treppe_soll_volumen`.
+/// Target volume of the stair, as the sum of its features:
 ///
 /// - Stringers: an inclined strip with cross-section T × B, cut by z = 0 and
 ///   z = H. Its horizontal section is T × B / sin(w), so V = T·H·B / sin(w),
@@ -154,8 +156,9 @@ fn stair_script_reproduces_the_analytic_volume() {
     assert_rel(shape.volume(), stair_volume(), REL_TOL, "stair");
     // The stringers are cut exactly at z = 0 (nothing else reaches lower:
     // step 1 starts at 5.91 − 0.8). The top is the top face of step 11 at
-    // z = 11 · 5.91 = 65.01, 0.01 above the stringer cut at 65 (teile.py
-    // `_stufe`; the analytic volume counts all 11 full steps). Outer width
+    // z = 11 · 5.91 = 65.01, 0.01 above the stringer cut at 65 (step k has
+    // its top face at k · rise; the analytic volume counts all 11 full
+    // steps). Outer width
     // 20 plus the eyes: x = ±(10 + 1.1 − 0.5 + 1.1) = ±11.7.
     let top = 11.0 * 5.91;
     let (min, max) = shape.bbox();
@@ -170,9 +173,9 @@ fn stair_script_reproduces_the_analytic_volume() {
 // Railing
 // ---------------------------------------------------------------------------
 
-/// Port of `reling_pfadlaengen` + `reling_soll_volumen`: the volume of a
-/// pipe is circle area × centre line length (Pappus), exact for straight
-/// and toroidal sections.
+/// Target volume of the railing from the centre line lengths of its wires:
+/// the volume of a pipe is circle area × centre line length (Pappus), exact
+/// for straight and toroidal sections.
 ///
 /// Handrail: two legs from z = −2 to the bend start at 22 − 1.5 (22.5 each),
 /// two quarter bends π/2 · 1.5, the top run 96 − 2 · 1.5. Inner posts: 3 ×

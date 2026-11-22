@@ -1,4 +1,4 @@
-// Stair (M0 probe part, werft/m0/teile.py `treppe`): two inclined stringers
+// Stair (M0 probe part, docs/concept/m0-report.md): two inclined stringers
 // cut to the height, 11 steps with two through slots each, and six post
 // eyes with a bore. Units mm, +Z up.
 //

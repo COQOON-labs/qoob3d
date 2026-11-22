@@ -1,4 +1,4 @@
-// Crane column (M0 probe part, werft/m0/teile.py `kransaeule`): a turned
+// Crane column (M0 probe part, docs/concept/m0-report.md): a turned
 // column with chamfered top and bottom edges, a chamfered pin below and a
 // rectangular pocket on top. Units mm, +Z up.
 //

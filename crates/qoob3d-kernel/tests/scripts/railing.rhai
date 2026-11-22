@@ -1,4 +1,4 @@
-// Railing section from wire (M0 probe part, werft/m0/teile.py `reling`):
+// Railing section from wire (M0 probe part, docs/concept/m0-report.md):
 // a U-shaped handrail with bent corners, three inner posts and two
 // horizontal rails. Every wire is its own body (as in the M0 probe).
 

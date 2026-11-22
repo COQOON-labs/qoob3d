@@ -1,4 +1,4 @@
-// Crane column (M0 probe part, werft/m0/teile.py `kransaeule`) the way the
+// Crane column (M0 probe part, docs/concept/m0-report.md) the way the
 // M0 probe built it: one half profile (x = radius, y = height) revolved
 // about Z, then the pocket cut from the top (AG-SC-07).
 
