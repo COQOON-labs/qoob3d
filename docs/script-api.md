@@ -15,7 +15,8 @@ run by `crates/qoob3d-kernel/tests/script.rs` with the project folder `docs/`.
   `Runtime` errors at the call.
 - **Points and vectors** are arrays `[x, y, z]`; 2D points are `[x, y]`.
 - **Shapes are values:** every operation returns a new shape, inputs never change.
-- **Types:** `Shape` (solid or compound of solids), `Profile` (closed 2D outline),
+- **Types:** `Shape` (solid or compound of solids), `Profile` (2D region: an outline, or a
+  combination of outlines with holes),
   `Selection` (edges or faces of one shape).
 
 Everything Rhai offers works as usual: `let`, `const`, `if`, `for x in [..]`,
@@ -105,6 +106,10 @@ show(torus(20, 4), "ring");   // outer diameter 24, height 4
 
 Every boolean is one OpenCascade operation and is checked by the plausibility rule (see
 [Errors](#errors-and-limits)).
+
+Booleans run OpenCascade in parallel mode on all cores. For plates with many holes, pockets
+or cut-outs of constant depth, combine **profiles** instead and extrude once (see
+[Profile algebra](#profile-algebra)): that is far faster than cutting solids.
 
 ### `a + b`, `union(shapes) -> Shape`
 
@@ -203,7 +208,8 @@ show(polar(cylinder(2, 3).move(15, 0, 0), 3, 90), "quarter");
 ## Profiles
 
 Profiles are closed outlines in the XY plane (until placed with `on` or `at_z`). They become
-solids with `extrude`, `revolve` or `loft`.
+solids with `extrude`, `revolve` or `loft`. Outlines can be moved in their plane and combined
+into profiles with holes and several regions (see [Profile algebra](#profile-algebra)).
 
 ### `rect(w, h) -> Profile`
 
@@ -227,6 +233,45 @@ show(extrude(rect(10, 20), 5), "rect");
 show(extrude(circle(10), 4), "disc");
 show(extrude(polygon([[0, 0], [10, 0], [0, 10]]), 3), "triangle");
 show(extrude(slot(20, 6), 2), "slot");
+```
+
+### `profile.move(x, y) -> Profile`
+
+Shifts a profile by `[x, y]` mm in its own plane (before or after `on`: the shift is in the
+profile's local axes).
+
+```rhai
+show(extrude(circle(4).move(10, 5), 3), "pin");   // centre (10, 5)
+```
+
+### Profile algebra
+
+`p1 + p2` (union), `p1 - p2` (difference), `p1 & p2` (intersection),
+`profile_union(profiles) -> Profile` and `profile_cut(p, tools) -> Profile` combine profiles
+in 2D. The array forms are **one** operation for any number of profiles. The result is a
+profile again: it may have holes and several separate regions (each region becomes its own
+solid in `extrude`), and it can be moved, placed, combined further, extruded and revolved.
+`loft` takes plain outlines only.
+
+All operands must lie in the same plane: combine first, then place with `on` / `at_z`. An
+empty result, an empty array and a mix of profiles and shapes are errors.
+
+A plate with holes built this way is one planar operation and one extrusion. Use it instead
+of `cut(box, cylinders)` whenever the features go straight through: 1000 holes take a
+fraction of a second instead of seconds.
+
+```rhai
+let holes = [];
+for i in 0..10 { for j in 0..5 { holes.push(circle(2).move(-18 + 4 * i, -8 + 4 * j)); } }
+show(extrude(profile_cut(rect(44, 24), holes), 3), "perforated");
+
+let ring = circle(20) - circle(12);
+show(extrude(ring, 5), "washer");
+show(extrude(rect(30, 6) + rect(6, 30), 2), "cross");
+show(extrude(rect(20, 20) & circle(24), 2), "rounded_square");
+show(extrude(profile_union([circle(10), circle(10).move(6, 0), circle(10).move(12, 0)]), 2), "chain");
+show(extrude(rect(20, 10) - rect(4, 20), 1), "two_halves");   // two solids
+show(extrude(on("xz", ring), 4), "upright_washer");
 ```
 
 ### `extrude(profile, h) -> Shape`
@@ -272,7 +317,8 @@ show(revolve(p, 90), "quarter_tube");
 ### `loft(profiles) -> Shape`
 
 Ruled solid through at least two profiles in order (place them with `at_z`). The profiles
-should have the same number of edges (rectangle to rectangle, circle to circle).
+should have the same number of edges (rectangle to rectangle, circle to circle). Combined
+profiles (results of the profile algebra) are not accepted.
 
 ```rhai
 show(loft([rect(20, 20).at_z(0), rect(10, 10).at_z(15)]), "pyramid_frustum");
@@ -510,6 +556,47 @@ status = "measured"   # measured | one_source | assumption
 ```
 
 `part("Shell", #{}, |deps| box(20, 20, 10) - box(20 - 2 * value("wall"), 20 - 2 * value("wall"), 10).move(0, 0, value("wall")))`
+
+## Checks
+
+The files `checks/*.rhai` of a project hold named checks (`docs/requirements/agent.md` §4.2,
+ADR-0054). `qoob3d check` (or the MCP tool `check`) builds stale parts and runs every check in
+a worker process under the project limits. A task can only go to `review` and a state can only
+be saved when its checks pass.
+
+### `check(name, || { … })`
+
+Declares the check `name` (unique in the project) and runs the closure. Inside it, all
+measure functions, `value(id)` and the functions below are available. A check passes when
+the closure ends without error and every expectation holds. A script error ends the check
+and is reported with file, line and column; other checks still run.
+
+### `part(name) -> Shape`
+
+With one argument, `part` returns the built shape of the project part `name`. It is an error
+if the part is not built and current. Run as a plain script, it returns a part declared
+earlier in the same script. Also available in throwaway scripts (`run_script`).
+
+### `expect(cond, text)`, `expect_near(actual, expected, tol, text)`, `expect_between(actual, min, max, text)`
+
+Record one expectation with its `text`, the actual and the expected value. A failed
+expectation does not stop the check, so one run shows everything that is wrong.
+`expect_near` holds if |`actual` − `expected`| ≤ `tol`, `expect_between` if
+`min` ≤ `actual` ≤ `max` (both borders inclusive). NaN never passes. Outside `check` the three
+functions are `Runtime` errors.
+
+```rhai
+part("Plate", #{}, |deps| box(20, 10, 2));
+check("plate_size", || {
+    let plate = part("Plate");
+    expect_near(plate.volume(), 400, 0.001, "volume of the plate");
+    expect_between(plate.bbox().size[0], 19.9, 20.1, "width of the plate");
+    expect(plate.is_valid(), "the plate is valid");
+});
+```
+
+In a project the part is declared in `parts/*.rhai` and the check file contains only the
+`check(…)` call.
 
 ## Errors and limits
 

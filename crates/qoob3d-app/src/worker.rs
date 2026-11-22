@@ -13,23 +13,30 @@ use std::io::{BufRead as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use qoob3d_core::project::{self, KeyInputs, Values};
+use qoob3d_core::project::{self, KeyInputs, Mesh, Values};
 use qoob3d_core::qmesh;
 use qoob3d_kernel::script::{self, PartMode, RunOptions, ScriptError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+mod probe;
+
+pub(crate) use self::probe::Probe;
 use crate::service::snapshot::{cache_dir, declare};
 
 /// Enters every cache key (§2.1): another program version rebuilds.
-pub(crate) const PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Chordal deviation of cached meshes (§2.1); also the export tolerance, so
-/// STL and 3MF are written from the cached mesh.
-const MESH_TOLERANCE_MM: f64 = qoob3d_kernel::EXPORT_TESSELLATION_TOLERANCE_MM;
+const PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Marks the start of an answer in the worker's stdout.
 pub(crate) const ANSWER_MARK: &str = "{\"job\":";
 
-/// One job: build `part`, or with `step` write the shapes of `deps` as STEP.
+/// The program part of a cache key: the version and the tessellation settings
+/// (AG-PF-05), so changing either rebuilds.
+pub(crate) fn key_version(mesh: &Mesh) -> String {
+    format!("{PROGRAM_VERSION} mesh {} {}", mesh.deflection_mm, mesh.angle_deg)
+}
+
+/// One job: build `part`, with `step` write the shapes of `deps` as STEP, or
+/// with `probe` answer a question about the built parts `deps`.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Request {
     pub(crate) job: u64,
@@ -44,6 +51,17 @@ pub(crate) struct Request {
     pub(crate) deps: BTreeMap<String, PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) step: Option<PathBuf>,
+    /// Tessellation of the cached mesh (AG-PF-05); STL and 3MF are exported
+    /// from that mesh.
+    #[serde(default)]
+    pub(crate) mesh: Mesh,
+    /// Folder that takes the cache entry instead of the project cache
+    /// (`qoob3d bench`, AG-PF-06).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cache: Option<PathBuf>,
+    /// Check, throwaway script or measure (R4); writes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) probe: Option<Probe>,
 }
 
 /// The answer to one job; `job` comes first, see [`ANSWER_MARK`].
@@ -54,7 +72,7 @@ pub(crate) struct Answer {
     /// Cache key of the built part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) key: Option<String>,
-    /// Contents of the cache `.json` of the built part.
+    /// Contents of the cache `.json` of the built part, or the result of a probe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) meta: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -81,13 +99,17 @@ pub(crate) enum ErrorKind {
     /// Service requests: unknown endpoint, part or job; malformed request.
     NotFound,
     BadRequest,
+    /// Review or save refused: parts or checks are not green (AG-TK-04, AG-SV-07).
+    Gate,
+    /// `git` failed or the project is no repository (AG-SV-07).
+    Git,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PartError {
     pub(crate) kind: ErrorKind,
     pub(crate) message: String,
-    /// Part file relative to the project, for script errors.
+    /// Script file relative to the project, for script errors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,7 +123,8 @@ impl PartError {
         Self { kind, message: message.to_string(), file: None, line: None, column: None }
     }
 
-    fn script(file: &Path, error: &ScriptError) -> Self {
+    /// A script error in `file` (`None`: a throwaway script).
+    fn script(file: Option<&Path>, error: &ScriptError) -> Self {
         let (ScriptError::Syntax { line, column, .. }
         | ScriptError::Runtime { line, column, .. }
         | ScriptError::Geometry { line, column, .. }
@@ -109,7 +132,7 @@ impl PartError {
         Self {
             kind: ErrorKind::Script,
             message: error.to_string(),
-            file: Some(file.display().to_string()),
+            file: file.map(|f| f.display().to_string()),
             line: Some(*line),
             column: Some(*column),
         }
@@ -151,19 +174,23 @@ fn handle(line: &str) -> Answer {
         Err(e) => return failed(0, PartError::new(ErrorKind::Load, format!("bad request: {e}"))),
     };
     let job = request.job;
-    match (&request.step, &request.part) {
-        (Some(out), _) => match write_step(&request, out) {
+    match (&request.probe, &request.step, &request.part) {
+        (Some(probe), ..) => match probe::answer(&request, probe) {
+            Ok(meta) => Answer { job, ok: true, key: None, meta: Some(meta), error: None },
+            Err(e) => failed(job, e),
+        },
+        (None, Some(out), _) => match write_step(&request, out) {
             Ok(()) => Answer { job, ok: true, key: None, meta: None, error: None },
             Err(e) => failed(job, e),
         },
-        (None, Some(part)) => match build(&request, part) {
+        (None, None, Some(part)) => match build(&request, part) {
             Ok((key, meta)) => {
                 Answer { job, ok: true, key: Some(key), meta: Some(meta), error: None }
             }
             Err(e) => failed(job, e),
         },
-        (None, None) => {
-            failed(job, PartError::new(ErrorKind::Load, "request without part or step"))
+        (None, None, None) => {
+            failed(job, PartError::new(ErrorKind::Load, "request without part, step or probe"))
         }
     }
 }
@@ -213,35 +240,36 @@ fn build(request: &Request, name: &str) -> Result<(String, Value), PartError> {
         parts: PartMode::One { name: name.to_owned(), deps },
         ..RunOptions::default()
     };
-    let output = script::run(&text, &options).map_err(|e| PartError::script(&file, &e))?;
+    let output = script::run(&text, &options).map_err(|e| PartError::script(Some(&file), &e))?;
     let Some((_, shape)) = output.shapes.iter().find(|(n, _)| n == name) else {
         return Err(load_error(format!("{}: part {name:?} was not built", file.display())));
     };
     let key = project::cache_key(&KeyInputs {
-        program_version: PROGRAM_VERSION.to_owned(),
+        program_version: key_version(&request.mesh),
         part_file: source,
         modules,
         values_read: output.values_read.clone().into_iter().collect(),
         dependency_keys,
     });
 
-    let folder = cache_dir(dir, name);
+    let folder = request.cache.as_ref().map_or_else(|| cache_dir(dir, name), |c| c.join(name));
     std::fs::create_dir_all(&folder).map_err(|e| io_error(&folder, e))?;
     let base = folder.join(&key);
     let brep = base.with_extension("brep");
     shape.write_brep(&brep).map_err(|e| io_error(&brep, e))?;
-    let mesh = shape.mesh(MESH_TOLERANCE_MM).map_err(|e| io_error(&base, e))?;
+    let mesh = shape
+        .mesh_with_angle(request.mesh.deflection_mm, request.mesh.angle_deg)
+        .map_err(|e| io_error(&base, e))?;
     let qmsh = base.with_extension("qmsh");
     std::fs::write(&qmsh, qmesh::write(&mesh)).map_err(|e| io_error(&qmsh, e))?;
     drop(mesh);
 
-    let (min, max) = shape.bbox();
     let valid = shape.is_valid();
     let warnings: Vec<String> =
         if valid { Vec::new() } else { vec!["the shape is not valid (BRepCheck)".to_owned()] };
     let meta = json!({
         "volume": shape.volume(),
-        "bbox": {"min": min, "max": max, "size": std::array::from_fn::<f64, 3, _>(|i| max[i] - min[i])},
+        "bbox": probe::bbox(shape),
         "valid": valid,
         "solids": shape.solid_count(),
         "duration_s": start.elapsed().as_secs_f64(),

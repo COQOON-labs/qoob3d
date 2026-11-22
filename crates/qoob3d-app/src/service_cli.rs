@@ -1,13 +1,14 @@
-//! `qoob3d build|status|export|values` (AG-SV-02, ADR-0053): thin clients of
-//! the project service in the working directory. The service is started on
-//! demand (detached, without our stdio, WA-OP-02); stdout gets exactly the
-//! JSON envelope, the exit code is 1 if `ok` is false or a part failed.
+//! `qoob3d build|status|export|values|check|task` (AG-SV-02, AG-CK-03,
+//! AG-SV-04, ADR-0053): thin clients of the project service in the working
+//! directory. The service is started on demand (detached, without our stdio,
+//! WA-OP-02); stdout gets exactly the JSON envelope, the exit code is 1 if
+//! `ok` is false or a part or check failed.
 
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::cli::ProjectCommand as Command;
+use crate::cli::{ProjectCommand as Command, TaskCommand};
 use crate::live::{Client, ProjectDir, START_TIMEOUT, service_command_from_env};
 
 /// Requests that do not wait for builds.
@@ -33,7 +34,39 @@ pub fn run(command: &Command) -> i32 {
     let part_failed = envelope["result"]["parts"]
         .as_object()
         .is_some_and(|parts| parts.values().any(|p| p["state"] == "failed"));
-    if envelope["ok"] == json!(true) && !part_failed { 0 } else { 1 }
+    let check_failed = envelope["result"]["failed"].as_u64() > Some(0);
+    if envelope["ok"] == json!(true) && !part_failed && !check_failed { 0 } else { 1 }
+}
+
+/// `text` as one segment of a request path: everything but unreserved
+/// characters is percent-encoded, so ids never change the path.
+pub(crate) fn segment(text: &str) -> String {
+    let mut out = String::new();
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn task(client: &Client, command: &TaskCommand) -> anyhow::Result<Value> {
+    match command {
+        TaskCommand::List => client.call("GET", "/tasks", None, QUICK),
+        TaskCommand::Show { id } => {
+            client.call("GET", &format!("/task/{}", segment(id)), None, QUICK)
+        }
+        TaskCommand::New { title, kind, body } => {
+            let body = json!({"title": title, "kind": kind, "body": body.as_deref().unwrap_or("")});
+            client.call("POST", "/task", Some(&body), QUICK)
+        }
+        TaskCommand::Set { id, state, note } => {
+            let body = json!({"state": state, "note": note, "role": "human"});
+            client.call("POST", &format!("/task/{}", segment(id)), Some(&body), QUICK)
+        }
+    }
 }
 
 fn request(command: &Command) -> anyhow::Result<Value> {
@@ -54,5 +87,11 @@ fn request(command: &Command) -> anyhow::Result<Value> {
             let body = json!({"parts": parts, "format": format});
             client.call("POST", "/export", Some(&body), EXPORT_TIMEOUT)
         }
+        Command::Check { names } => {
+            let names = if names.is_empty() { Value::Null } else { json!(names) };
+            let body = json!({"names": names, "wait_s": EXPORT_TIMEOUT.as_secs()});
+            client.call("POST", "/check", Some(&body), EXPORT_TIMEOUT + WAIT_MARGIN)
+        }
+        Command::Task { command } => task(&client, command),
     }
 }

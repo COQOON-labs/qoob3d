@@ -55,6 +55,9 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepGProp.hxx>
+#include <BRepLib.hxx>
+#include <ElSLib.hxx>
+#include <IntTools_FClass2d.hxx>
 #include <GProp_GProps.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_DataMapOfShapeInteger.hxx>
@@ -245,18 +248,11 @@ struct Region {
   std::vector<uint32_t> key; // sorted curve ids
 };
 
-// Splits a helper face by all curves (General Fuse) and returns every closed
-// region with the ids of its boundary curves (ADR-0028).
-std::vector<Region> split_regions(const Qoob3dCurves &c) {
-  std::vector<TopoDS_Shape> edges;
-  std::vector<int> ids;
-  double lo[2] = {1e300, 1e300}, hi[2] = {-1e300, -1e300};
-  auto grow = [&](double x, double y) {
-    lo[0] = std::min(lo[0], x);
-    lo[1] = std::min(lo[1], y);
-    hi[0] = std::max(hi[0], x);
-    hi[1] = std::max(hi[1], y);
-  };
+// The curves as edges in the plane z = 0 with their ids; `grow(x, y)` gets
+// points spanning their bounding box.
+template <typename Grow>
+void curve_edges(const Qoob3dCurves &c, std::vector<TopoDS_Shape> &edges, std::vector<int> &ids,
+                 Grow &&grow) {
   const gp_Dir z(0, 0, 1), x(1, 0, 0);
   for (size_t i = 0; i + 3 < c.lines.size() && i / 4 < c.line_ids.size(); i += 4) {
     gp_Pnt a(c.lines[i], c.lines[i + 1], 0.0), b(c.lines[i + 2], c.lines[i + 3], 0.0);
@@ -281,6 +277,20 @@ std::vector<Region> split_regions(const Qoob3dCurves &c) {
     grow(cx - r, cy - r);
     grow(cx + r, cy + r);
   }
+}
+
+// Splits a helper face by all curves (General Fuse) and returns every closed
+// region with the ids of its boundary curves (ADR-0028).
+std::vector<Region> split_regions(const Qoob3dCurves &c) {
+  std::vector<TopoDS_Shape> edges;
+  std::vector<int> ids;
+  double lo[2] = {1e300, 1e300}, hi[2] = {-1e300, -1e300};
+  curve_edges(c, edges, ids, [&](double x, double y) {
+    lo[0] = std::min(lo[0], x);
+    lo[1] = std::min(lo[1], y);
+    hi[0] = std::max(hi[0], x);
+    hi[1] = std::max(hi[1], y);
+  });
   std::vector<Region> out;
   if (edges.empty()) {
     return out;
@@ -467,6 +477,27 @@ std::unique_ptr<TopoDS_Shape> qoob3d_profile_faces(const Qoob3dCurves &curves,
   });
 }
 
+std::unique_ptr<TopoDS_Shape> qoob3d_outline_face(const Qoob3dCurves &curves) {
+  return guarded("outline_face", [&] {
+    std::vector<TopoDS_Shape> edges;
+    std::vector<int> ids;
+    curve_edges(curves, edges, ids, [](double, double) {});
+    TopTools_ListOfShape list;
+    for (const TopoDS_Shape &e : edges) {
+      list.Append(e);
+    }
+    BRepBuilderAPI_MakeWire wire;
+    wire.Add(list);
+    if (!wire.IsDone() || !wire.Wire().Closed()) {
+      throw std::runtime_error("the outline is not closed");
+    }
+    // The wire runs like its first edge, and the outlines of the script API
+    // start counter-clockwise: no search for the inner side (a fifth of a
+    // profile cut with many tools).
+    return own(BRepBuilderAPI_MakeFace(gp_Pln(gp::XOY()), wire.Wire(), Standard_False).Face());
+  });
+}
+
 std::unique_ptr<TopoDS_Shape> qoob3d_extrude(const TopoDS_Shape &faces,
                                              rust::Slice<const double> vector,
                                              bool symmetric) {
@@ -529,6 +560,154 @@ std::unique_ptr<TopoDS_Shape> qoob3d_loft(const TopoDS_Shape &faces,
   });
 }
 
+namespace {
+
+// One BOP for any number of shapes on both sides, in OCCT's parallel mode
+// (AG-PF-01; OSD_ThreadPool, no extra library).
+TopoDS_Shape boolean(const TopTools_ListOfShape &objects, const TopTools_ListOfShape &tools,
+                     uint32_t op) {
+  if (objects.IsEmpty() || tools.IsEmpty()) {
+    throw std::runtime_error("boolean needs shapes on both sides");
+  }
+  std::unique_ptr<BRepAlgoAPI_BooleanOperation> bop;
+  const char *failure = nullptr;
+  switch (op) {
+  case 0:
+    bop = std::make_unique<BRepAlgoAPI_Fuse>();
+    failure = "join failed";
+    break;
+  case 1:
+    bop = std::make_unique<BRepAlgoAPI_Cut>();
+    failure = "cut failed";
+    break;
+  case 2:
+    bop = std::make_unique<BRepAlgoAPI_Common>();
+    failure = "common failed";
+    break;
+  default:
+    throw std::runtime_error("unknown boolean operation");
+  }
+  bop->SetRunParallel(Standard_True);
+  bop->SetArguments(objects);
+  bop->SetTools(tools);
+  bop->Build();
+  if (!bop->IsDone() || bop->HasErrors()) {
+    throw std::runtime_error(failure);
+  }
+  return unify(bop->Shape());
+}
+
+// Extent of an outline in the plane z = 0, with a margin.
+struct Span {
+  double x0, y0, x1, y1;
+  bool tool;
+};
+
+Span span_of(const TopoDS_Shape &s, bool tool) {
+  Bnd_Box box;
+  BRepBndLib::Add(s, box, Standard_False);
+  box.Enlarge(1e-6);
+  double z0, z1;
+  Span span{0.0, 0.0, 0.0, 0.0, tool};
+  box.Get(span.x0, span.y0, z0, span.x1, span.y1, z1);
+  return span;
+}
+
+// Whether a tool overlaps another tool or a hole (a sweep along X: a plate
+// with a thousand holes is no million comparisons).
+bool tools_collide(std::vector<Span> spans) {
+  std::sort(spans.begin(), spans.end(), [](const Span &a, const Span &b) { return a.x0 < b.x0; });
+  for (size_t i = 0; i < spans.size(); ++i) {
+    for (size_t j = i + 1; j < spans.size() && spans[j].x0 <= spans[i].x1; ++j) {
+      if ((spans[i].tool || spans[j].tool) && spans[j].y0 <= spans[i].y1 &&
+          spans[i].y0 <= spans[j].y1) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Whether the material of a planar profile face is seen from +Z.
+bool faces_up(const TopoDS_Face &face) {
+  const bool plane_up = BRepAdaptor_Surface(face).Plane().Axis().Direction().Z() > 0.0;
+  return plane_up != (face.Orientation() == TopAbs_REVERSED);
+}
+
+// Profile cut without a boolean (AG-PF-02): the tools become inner wires of
+// the base face. Only if that is certainly the same result: one base face,
+// tools without holes, each strictly inside the base, clear of its holes and
+// of each other (by bounding boxes). Otherwise false, and the BOP decides.
+bool punch(const TopTools_ListOfShape &objects, const TopTools_ListOfShape &tools,
+           TopoDS_Shape &out) {
+  if (objects.Extent() != 1 || objects.First().ShapeType() != TopAbs_FACE) {
+    return false;
+  }
+  const TopoDS_Face base = TopoDS::Face(objects.First());
+  const TopoDS_Wire outer = BRepTools::OuterWire(base);
+  std::vector<Span> spans; // holes of the base, then the tools
+  for (TopoDS_Iterator it(base); it.More(); it.Next()) {
+    if (!it.Value().IsSame(outer)) {
+      spans.push_back(span_of(it.Value(), false));
+    }
+  }
+  std::vector<TopoDS_Wire> holes;
+  const bool base_up = faces_up(base);
+  for (TopTools_ListIteratorOfListOfShape t(tools); t.More(); t.Next()) {
+    if (t.Value().ShapeType() != TopAbs_FACE) {
+      return false;
+    }
+    const TopoDS_Face tool = TopoDS::Face(t.Value());
+    TopoDS_Iterator wires(tool); // orientations as seen through the face
+    if (!wires.More()) {
+      return false;
+    }
+    const TopoDS_Wire wire = TopoDS::Wire(wires.Value());
+    wires.Next();
+    if (wires.More()) {
+      return false;
+    }
+    spans.push_back(span_of(wire, true));
+    // A hole runs against the outline of the face it is cut from.
+    holes.push_back(faces_up(tool) == base_up ? TopoDS::Wire(wire.Reversed()) : wire);
+  }
+  if (tools_collide(spans)) {
+    return false;
+  }
+  BRepBuilderAPI_MakeFace result(base);
+  // One classifier for all tools; it works in the parameters of the plane.
+  const gp_Pln plane = BRepAdaptor_Surface(base).Plane();
+  IntTools_FClass2d where(base, 1e-7);
+  for (const TopoDS_Wire &hole : holes) {
+    // The outline does not reach the outer wire and one of its points lies
+    // in the material: all of it does.
+    BRepExtrema_DistShapeShape gap(hole, outer);
+    if (!gap.IsDone() || gap.Value() < 1e-6) {
+      return false;
+    }
+    TopExp_Explorer vertex(hole, TopAbs_VERTEX);
+    if (!vertex.More()) {
+      return false;
+    }
+    double u = 0.0, v = 0.0;
+    ElSLib::Parameters(plane, BRep_Tool::Pnt(TopoDS::Vertex(vertex.Current())), u, v);
+    if (where.Perform(gp_Pnt2d(u, v)) != TopAbs_IN) {
+      return false;
+    }
+    result.Add(hole);
+  }
+  out = result.Face();
+  // Without stored 2D curves OCCT projects every edge onto the plane again
+  // whenever it is asked about the face: the validity check of a plate with
+  // 1000 holes took 9 s instead of 4 s.
+  for (TopExp_Explorer edge(out, TopAbs_EDGE); edge.More(); edge.Next()) {
+    BRepLib::BuildPCurveForEdgeOnPlane(TopoDS::Edge(edge.Current()), TopoDS::Face(out));
+  }
+  return true;
+}
+
+} // namespace
+
 std::unique_ptr<TopoDS_Shape> qoob3d_boolean(const TopoDS_Shape &a, const TopoDS_Shape &b,
                                              uint32_t op) {
   return guarded("boolean", [&] {
@@ -537,34 +716,31 @@ std::unique_ptr<TopoDS_Shape> qoob3d_boolean(const TopoDS_Shape &a, const TopoDS
     TopTools_ListOfShape objects, tools;
     flatten(a, objects);
     flatten(b, tools);
-    if (objects.IsEmpty() || tools.IsEmpty()) {
-      throw std::runtime_error("boolean needs shapes on both sides");
+    return own(boolean(objects, tools, op));
+  });
+}
+
+std::unique_ptr<TopoDS_Shape> qoob3d_profile_boolean(const TopoDS_Shape &a, const TopoDS_Shape &b,
+                                                     uint32_t op) {
+  return guarded("profile_boolean", [&] {
+    TopTools_ListOfShape objects, tools;
+    flatten(a, objects);
+    flatten(b, tools);
+    TopoDS_Shape result;
+    if (op != 1 || !punch(objects, tools, result)) {
+      result = boolean(objects, tools, op);
     }
-    std::unique_ptr<BRepAlgoAPI_BooleanOperation> bop;
-    const char *failure = nullptr;
-    switch (op) {
-    case 0:
-      bop = std::make_unique<BRepAlgoAPI_Fuse>();
-      failure = "join failed";
-      break;
-    case 1:
-      bop = std::make_unique<BRepAlgoAPI_Cut>();
-      failure = "cut failed";
-      break;
-    case 2:
-      bop = std::make_unique<BRepAlgoAPI_Common>();
-      failure = "common failed";
-      break;
-    default:
-      throw std::runtime_error("unknown boolean operation");
+    TopExp_Explorer face(result, TopAbs_FACE);
+    if (!face.More()) {
+      throw std::runtime_error("the result is empty");
     }
-    bop->SetArguments(objects);
-    bop->SetTools(tools);
-    bop->Build();
-    if (!bop->IsDone() || bop->HasErrors()) {
-      throw std::runtime_error(failure);
+    BRep_Builder bb;
+    TopoDS_Compound faces;
+    bb.MakeCompound(faces);
+    for (; face.More(); face.Next()) {
+      bb.Add(faces, face.Current());
     }
-    return own(unify(bop->Shape()));
+    return own(faces);
   });
 }
 
@@ -820,6 +996,9 @@ std::unique_ptr<TopoDS_Shape> qoob3d_transform(const TopoDS_Shape &shape, uint32
     case 3:
       need(p, 1, "scale");
       t.SetScale(gp::Origin(), p[0]);
+      break;
+    case 4:
+      t = frame_trsf(p);
       break;
     default:
       throw std::runtime_error("unknown transform");

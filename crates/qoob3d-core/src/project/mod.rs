@@ -12,7 +12,7 @@ mod values;
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use graph::{Graph, PartDecl};
@@ -54,6 +54,8 @@ pub struct Config {
     pub units: String,
     pub limits: Limits,
     pub workers: Workers,
+    pub cache: Cache,
+    pub mesh: Mesh,
 }
 
 /// Per-build limits of a worker (AG-PJ-05).
@@ -77,11 +79,44 @@ impl Default for Limits {
 #[serde(default)]
 pub struct Workers {
     pub count: usize,
+    /// Resident memory (MB) above which a worker is replaced after its job
+    /// (AG-PF-03).
+    pub recycle_mb: u64,
 }
 
 impl Default for Workers {
     fn default() -> Self {
-        Self { count: 2 }
+        Self { count: 2, recycle_mb: 512 }
+    }
+}
+
+/// Cache eviction (AG-PF-04).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Cache {
+    /// Cache entries kept per part, the newest ones; at least 1.
+    pub keep: usize,
+}
+
+impl Default for Cache {
+    fn default() -> Self {
+        Self { keep: 5 }
+    }
+}
+
+/// Tessellation quality of the cached meshes (AG-PF-05).
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Mesh {
+    /// Largest distance between mesh and surface.
+    pub deflection_mm: f64,
+    /// Largest angle between neighbouring segments of a curve.
+    pub angle_deg: f64,
+}
+
+impl Default for Mesh {
+    fn default() -> Self {
+        Self { deflection_mm: 0.01, angle_deg: 20.0 }
     }
 }
 
@@ -93,6 +128,10 @@ struct RawConfig {
     limits: Limits,
     #[serde(default)]
     workers: Workers,
+    #[serde(default)]
+    cache: Cache,
+    #[serde(default)]
+    mesh: Mesh,
 }
 
 #[derive(Deserialize)]
@@ -110,7 +149,8 @@ impl Config {
     /// Reads `<root>/qoob3d.toml`; a folder without it is no project.
     ///
     /// # Errors
-    /// Missing or malformed file, units other than mm, non-positive limits.
+    /// Missing or malformed file, units other than mm, non-positive limits,
+    /// `[cache] keep = 0`, non-positive mesh settings.
     pub fn load(root: &Path) -> Result<Self, ProjectError> {
         let file = PathBuf::from(CONFIG_FILE);
         let text = read_text(&root.join(&file))?;
@@ -133,11 +173,23 @@ impl Config {
         if raw.workers.count == 0 {
             return Err(invalid("[workers] count must be greater than 0"));
         }
+        if raw.cache.keep == 0 {
+            return Err(invalid("[cache] keep must be greater than 0"));
+        }
+        let positive = |v: f64| v.is_finite() && v > 0.0;
+        if !positive(raw.mesh.deflection_mm) {
+            return Err(invalid("[mesh] deflection_mm must be greater than 0"));
+        }
+        if !positive(raw.mesh.angle_deg) {
+            return Err(invalid("[mesh] angle_deg must be greater than 0"));
+        }
         Ok(Self {
             name: raw.project.name,
             units: raw.project.units,
             limits: raw.limits,
             workers: raw.workers,
+            cache: raw.cache,
+            mesh: raw.mesh,
         })
     }
 }
@@ -149,6 +201,14 @@ impl Config {
 /// The folder exists but cannot be listed.
 pub fn part_files(root: &Path) -> Result<Vec<PathBuf>, ProjectError> {
     files_with_extension(root, "parts", "rhai")
+}
+
+/// The check files `checks/*.rhai` of the project (AG-CK-01), as [`part_files`].
+///
+/// # Errors
+/// The folder exists but cannot be listed.
+pub fn check_files(root: &Path) -> Result<Vec<PathBuf>, ProjectError> {
+    files_with_extension(root, "checks", "rhai")
 }
 
 /// Files `<root>/<dir>/*.<extension>`, sorted, relative to `root`.
@@ -182,6 +242,8 @@ fn read_text(path: &Path) -> Result<String, ProjectError> {
 /// The inputs of a part's cache key (§2.1).
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyInputs {
+    /// Everything about the building program that changes its output: the
+    /// version and the tessellation settings (AG-PF-05), composed by the caller.
     pub program_version: String,
     pub part_file: Vec<u8>,
     /// Bytes of every transitively imported module, in [`resolve_imports`] order.

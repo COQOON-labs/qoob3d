@@ -8,6 +8,8 @@
 //! values (`part`, `value`, agent.md §2.1) are in `project.rs`.
 
 mod api;
+mod check;
+mod measure;
 mod profile;
 mod project;
 mod select;
@@ -25,9 +27,11 @@ use rhai::{Engine, EvalAltResult, Module, ModuleResolver, Position, Shared};
 
 use crate::model::{self, occ};
 use crate::occt::ffi;
-use crate::tessellate::tessellate_raw;
+use crate::tessellate::{tessellate_angle, tessellate_raw};
 use crate::{EXPORT_TESSELLATION_TOLERANCE_MM, KernelError};
 
+pub use check::{CheckOptions, CheckResult, Expectation};
+pub use measure::{common_volume, distance};
 pub use project::{DeclaredPart, PartMode};
 
 /// Call depth limit (AG-SC-02). Rhai's own default differs between debug
@@ -46,6 +50,8 @@ pub struct RunOptions {
     pub values: BTreeMap<String, serde_json::Value>,
     /// What `part(...)` does (AG-PJ-02).
     pub parts: PartMode,
+    /// Built parts for `part("Name")` and the selection of checks (AG-CK-01).
+    pub check: CheckOptions,
 }
 
 impl Default for RunOptions {
@@ -55,6 +61,7 @@ impl Default for RunOptions {
             project_dir: None,
             values: BTreeMap::new(),
             parts: PartMode::All,
+            check: CheckOptions::default(),
         }
     }
 }
@@ -70,6 +77,8 @@ pub struct RunOutput {
     pub parts: Vec<DeclaredPart>,
     /// Values read with `value(id)`, the inputs of the cache key (§2.1).
     pub values_read: BTreeMap<String, serde_json::Value>,
+    /// Checks declared with `check(...)`, in call order (AG-CK-01).
+    pub checks: Vec<CheckResult>,
 }
 
 /// A failed script run (AG-SC-03). Lines and columns are 1-based; 0 means
@@ -156,6 +165,16 @@ impl Shape {
         tessellate_raw(self.get(), tolerance_mm)
     }
 
+    /// As [`Shape::mesh`] with the largest angle `angle_deg` between
+    /// neighbouring segments chosen by the caller (AG-PF-05).
+    pub fn mesh_with_angle(
+        &self,
+        tolerance_mm: f64,
+        angle_deg: f64,
+    ) -> Result<ShapeMesh, KernelError> {
+        tessellate_angle(self.get(), tolerance_mm, angle_deg.to_radians())
+    }
+
     /// Writes the shape as an OCCT BREP file (cache entry, AG-PJ-04).
     pub fn write_brep(&self, path: &Path) -> Result<(), KernelError> {
         occ(ffi::qoob3d_write_brep(self.get(), utf8(path)?))
@@ -220,6 +239,7 @@ pub fn run(source: &str, options: &RunOptions) -> Result<RunOutput, ScriptError>
         api::register(&mut engine, &output, project);
     }
     project::register(&mut engine, &output, options);
+    check::register(&mut engine, &output, options);
 
     let result = engine.run(source);
     // The engine's closures hold clones of `output`.

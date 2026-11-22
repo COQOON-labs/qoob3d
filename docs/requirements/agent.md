@@ -74,7 +74,8 @@ layer where OCCT has it.
 ### 3.1 HTTP details (envelope as in `project-app.md`)
 
 - `GET /status` → `result`: `{"project": name, "parts": [{name, file, state, key, error?}],
-  "jobs": [{id, state}], "workers": {count, busy}}` (superset of WA-PR-01).
+  "jobs": [{id, state}], "workers": {count, busy, recycled}}` (superset of WA-PR-01;
+  `recycled` as AG-PF-03).
 - `POST /build {"parts": [..]|null, "wait_s": f64}` → if finished within `wait_s`:
   `result` = build result; else `{"job": id, "state": "running"}`. Build result:
   `{"parts": {name: {state: "built"|"cached"|"failed", volume, bbox, valid, duration_s,

@@ -29,11 +29,11 @@ const MIN_VOLUME_MM3: f64 = 1e-6;
 /// Relative volume change below which a cut "removed nothing" (AG-SC-12).
 const VOLUME_REL_TOL: f64 = 1e-9;
 
-const FUSE: u32 = 0;
-const CUT: u32 = 1;
-const COMMON: u32 = 2;
+pub(super) const FUSE: u32 = 0;
+pub(super) const CUT: u32 = 1;
+pub(super) const COMMON: u32 = 2;
 
-const TRANSLATE: u32 = 0;
+pub(super) const TRANSLATE: u32 = 0;
 const ROTATE: u32 = 1;
 const MIRROR: u32 = 2;
 const SCALE: u32 = 3;

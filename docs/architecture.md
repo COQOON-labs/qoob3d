@@ -63,6 +63,17 @@ flowchart LR
    `qoob3d build|status|export|values`. Parts are declared without OCCT (`part()` only
    records); cache entries `.qoob3d/cache/<part>/<key>.{brep,qmsh,json}` are written by the
    worker; the app (`--project`) only polls `/status` and loads changed meshes.
+   **Tasks, checks, MCP** (ADR-0054, agent.md §4): `tasks/NNNN-slug.md` is the task inbox
+   (`qoob3d-core::tasks`); the service serves it (`/tasks`, `/task/<id>`) and evaluates the
+   review gate from its own part and check states. `checks/*.rhai` declare checks
+   (`check`, `expect…`, kernel `script/check.rs`); `/check` builds stale parts and runs each
+   check as one worker request; a result is stale once a part it read was rebuilt or its file
+   changed. `/run` and `/measure` are worker requests that write nothing; `/save` commits
+   with the `git` executable only when parts and checks are green. `qoob3d mcp [DIR]` is a
+   JSON-RPC 2.0 server on stdio (hand-written, synchronous): its tools forward to the
+   service over HTTP as role `agent`, file tools are confined to the project folders,
+   `render` runs `qoob3d render-project` in a child process and returns the PNG; the script
+   API reference, guide and examples are embedded in the binary.
 6. **Printer database** (`qoob3d-core/src/printer/`): 441 models, generated from
    OrcaSlicer profiles (ADR-0021).
 
@@ -114,7 +125,12 @@ flowchart TD
 | Script project shown live (`--project`, service client, poller; W1) | `crates/qoob3d-app/src/live.rs` |
 | Project service, jobs, worker pool and limits, part states (R2/R3) | `crates/qoob3d-app/src/service.rs`, `src/service/` |
 | Worker process (build a part, cache entry, STEP) | `crates/qoob3d-app/src/worker.rs` |
-| CLI clients `build`, `status`, `export`, `values` | `crates/qoob3d-app/src/service_cli.rs` |
+| CLI clients `build`, `status`, `export`, `values`, `check`, `task` | `crates/qoob3d-app/src/service_cli.rs` |
+| Checks, throwaway scripts, measure, save, task endpoints (R4) | `crates/qoob3d-app/src/service/{checks,probe,save,tasks}.rs`, `src/worker/probe.rs` |
+| MCP server (tools, confined files, render, embedded reference and guide) | `crates/qoob3d-app/src/mcp.rs`, `src/mcp/` |
+| `qoob3d init`, `qoob3d render-project` | `crates/qoob3d-app/src/{init,project_render}.rs` |
+| Task inbox (files, roles, review gate) | `crates/qoob3d-core/src/tasks/` |
+| `check`/`expect…` in scripts, measures of shapes from Rust | `crates/qoob3d-kernel/src/script/{check,measure}.rs` |
 | Project folder, values, build graph, cache key | `crates/qoob3d-core/src/project/` |
 | Mesh transfer format, STL import | `crates/qoob3d-core/src/{qmesh,stl}.rs` |
 | E2E modeling through the UI | `crates/qoob3d-app/tests/modeling.rs` |

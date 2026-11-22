@@ -33,6 +33,10 @@ std::unique_ptr<TopoDS_Shape> qoob3d_profile_faces(const Qoob3dCurves &curves,
                                                    rust::Slice<const uint32_t> keys,
                                                    rust::Slice<const uint32_t> key_starts,
                                                    rust::Slice<const double> frame);
+// The face inside curves that form one closed outline without
+// self-intersection, the first curve running counter-clockwise (neither is
+// checked), in the plane z = 0. No General Fuse.
+std::unique_ptr<TopoDS_Shape> qoob3d_outline_face(const Qoob3dCurves &curves);
 std::unique_ptr<TopoDS_Shape> qoob3d_extrude(const TopoDS_Shape &faces,
                                              rust::Slice<const double> vector,
                                              bool symmetric);
@@ -47,6 +51,10 @@ std::unique_ptr<TopoDS_Shape> qoob3d_loft(const TopoDS_Shape &faces,
 // arguments, so a batch of shapes is one operation.
 std::unique_ptr<TopoDS_Shape> qoob3d_boolean(const TopoDS_Shape &a, const TopoDS_Shape &b,
                                              uint32_t op);
+// The same on planar faces in the plane z = 0 (profile algebra, AG-PF-02).
+// Result: a compound of faces; an empty result is an error.
+std::unique_ptr<TopoDS_Shape> qoob3d_profile_boolean(const TopoDS_Shape &a, const TopoDS_Shape &b,
+                                                     uint32_t op);
 // Distance between two shapes (0 if they touch or overlap). Exact up to
 // `max`; beyond it a lower bound (the distance of the bounding boxes).
 double qoob3d_distance(const TopoDS_Shape &a, const TopoDS_Shape &b, double max);
@@ -79,7 +87,8 @@ std::unique_ptr<TopoDS_Shape> qoob3d_sweep_circle(rust::Slice<const double> path
 // 3 cone (r1 r2 h), 4 torus (R r); axis Z through the origin.
 std::unique_ptr<TopoDS_Shape> qoob3d_primitive(uint32_t kind, rust::Slice<const double> dims);
 // kind 0 translate (dx dy dz), 1 rotate (axis x y z, angle rad), 2 mirror at
-// the plane through the origin (normal x y z), 3 scale about the origin (f).
+// the plane through the origin (normal x y z), 3 scale about the origin (f),
+// 4 from the XY plane into a plane frame (origin u v n, 12 values).
 std::unique_ptr<TopoDS_Shape> qoob3d_transform(const TopoDS_Shape &shape, uint32_t kind,
                                                rust::Slice<const double> params);
 // An empty compound; `qoob3d_compound_add` appends a shape (compounds flattened).

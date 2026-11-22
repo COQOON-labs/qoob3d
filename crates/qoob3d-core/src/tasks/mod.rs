@@ -87,7 +87,9 @@ impl TaskKind {
         }
     }
 
-    fn from_name(name: &str) -> Option<Self> {
+    /// The kind with the header name `name`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
         [Self::Task, Self::Requirement, Self::Idea].into_iter().find(|k| k.as_str() == name)
     }
 }
@@ -118,7 +120,9 @@ impl TaskState {
         }
     }
 
-    fn from_name(name: &str) -> Option<Self> {
+    /// The state with the header name `name`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
         [Self::Open, Self::InProgress, Self::Blocked, Self::Review, Self::Done, Self::Rejected]
             .into_iter()
             .find(|s| s.as_str() == name)
@@ -330,10 +334,11 @@ pub fn update(
     if let Some(to) = new_state {
         check_transition(&task, role, to, note, gate)?;
     }
+    // The log text is the note as given (`- <date> <who>: <note>`); only a
+    // state change without a note is described by its states.
     let entry = match (new_state, flat) {
-        (Some(to), Some(note)) => format!("{} -> {}: {note}", task.state.as_str(), to.as_str()),
+        (_, Some(note)) => note,
         (Some(to), None) => format!("{} -> {}", task.state.as_str(), to.as_str()),
-        (None, Some(note)) => note,
         (None, None) => return Err(TaskError::NothingToChange { id: id.to_owned() }),
     };
     if !text::is_date(date) {

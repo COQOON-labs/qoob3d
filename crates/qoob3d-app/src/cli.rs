@@ -69,6 +69,10 @@ pub struct Cli {
     pub smoke_test: bool,
 }
 
+/// Name of [`Command::RenderProject`] on the command line, for callers that
+/// start it as a child process (the MCP tool `render`).
+pub const RENDER_PROJECT: &str = "render-project";
+
 /// Script project commands (ADR-0053, docs/requirements/agent.md §2–3).
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -77,6 +81,29 @@ pub enum Command {
     /// Build worker process of the service (AG-PJ-05); talks JSON lines on stdin/stdout.
     #[command(hide = true)]
     Worker,
+    /// Build all parts of DIR uncached twice and print seconds, peak worker
+    /// memory, triangles and mesh bytes per part (AG-PF-06).
+    Bench { dir: PathBuf },
+    /// Create a project skeleton in DIR (AG-SV-08).
+    Init { dir: PathBuf },
+    /// Render the built parts of DIR headless into a PNG (AG-RD-01).
+    #[command(name = RENDER_PROJECT)]
+    RenderProject {
+        dir: PathBuf,
+        #[arg(long, value_name = "PNG")]
+        out: PathBuf,
+        #[arg(long, value_enum, default_value_t = View::Iso)]
+        view: View,
+        /// Image size, e.g. 1024x768.
+        #[arg(long, value_parser = parse_size, default_value = "1024x768")]
+        size: [u32; 2],
+        /// Parts to show, comma separated; all without it.
+        #[arg(long, value_delimiter = ',')]
+        parts: Vec<String>,
+    },
+    /// MCP server for the project in DIR (default: the working directory)
+    /// over stdio (AG-MC-01).
+    Mcp { dir: Option<PathBuf> },
     #[command(flatten)]
     Project(ProjectCommand),
 }
@@ -104,6 +131,38 @@ pub enum ProjectCommand {
     },
     /// Target values with source and status, and the assumptions.
     Values,
+    /// Run checks (all without names) after building stale parts; exit 1
+    /// if any failed (AG-CK-03).
+    Check { names: Vec<String> },
+    /// The task inbox, acting as the human (AG-SV-04).
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TaskCommand {
+    /// All tasks with their states.
+    List,
+    /// One task with body and log.
+    Show { id: String },
+    /// Create a task.
+    New {
+        title: String,
+        /// task, requirement or idea.
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        body: Option<String>,
+    },
+    /// Set the state of a task; every transition is allowed.
+    Set {
+        id: String,
+        state: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

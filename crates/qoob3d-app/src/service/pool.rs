@@ -3,12 +3,13 @@
 //! for the answer while it watches the limits every [`POLL`]: wall-clock
 //! time, resident memory and cancellation. A worker that exceeds a limit is
 //! killed, one that dies on its own is a crash; both are replaced, so the
-//! pool keeps its size.
+//! pool keeps its size. A worker that is too large after its job is replaced
+//! as well (recycling, AG-PF-03).
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -75,11 +76,17 @@ pub(crate) struct Pool {
     total: AtomicUsize,
     busy: AtomicUsize,
     closed: AtomicBool,
+    /// Resident memory (MB) above which a worker is replaced after its job.
+    recycle_mb: u64,
+    /// Workers recycled since the start.
+    recycled: AtomicUsize,
+    /// Largest resident memory (MB) seen at a busy worker.
+    peak_mb: AtomicU64,
 }
 
 impl Pool {
     /// Starts `count` workers of the executable `exe`.
-    pub(crate) fn start(exe: PathBuf, count: usize) -> Self {
+    pub(crate) fn start(exe: PathBuf, count: usize, recycle_mb: u64) -> Self {
         let mut idle = Vec::new();
         for _ in 0..count {
             match Worker::spawn(&exe) {
@@ -94,7 +101,20 @@ impl Pool {
             available: Condvar::new(),
             busy: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
+            recycle_mb,
+            recycled: AtomicUsize::new(0),
+            peak_mb: AtomicU64::new(0),
         }
+    }
+
+    /// Workers recycled since the start, for `/status` (AG-PF-03).
+    pub(crate) fn recycled(&self) -> usize {
+        self.recycled.load(Ordering::SeqCst)
+    }
+
+    /// Largest resident memory (MB) polled at a busy worker (AG-PF-06).
+    pub(crate) fn peak_mb(&self) -> u64 {
+        self.peak_mb.load(Ordering::SeqCst)
     }
 
     /// `(count, busy)` for `/status`.
@@ -124,7 +144,15 @@ impl Pool {
         loop {
             match worker.answers.recv_timeout(POLL) {
                 Ok(answer) if answer.job == request.job => {
-                    self.give(worker);
+                    let rss = resident_mb(worker.child.id()).unwrap_or(0);
+                    self.peak_mb.fetch_max(rss, Ordering::SeqCst);
+                    if rss > self.recycle_mb {
+                        tracing::info!(rss, limit = self.recycle_mb, "recycling a worker");
+                        self.recycled.fetch_add(1, Ordering::SeqCst);
+                        self.retire(worker);
+                    } else {
+                        self.give(worker);
+                    }
                     return Ok(answer);
                 }
                 Ok(_) => continue,
@@ -134,12 +162,14 @@ impl Pool {
                 }
                 Err(RecvTimeoutError::Timeout) => {}
             }
+            let rss = resident_mb(worker.child.id());
+            self.peak_mb.fetch_max(rss.unwrap_or(0), Ordering::SeqCst);
             let error = if cancel.load(Ordering::SeqCst) {
                 PartError::new(ErrorKind::Cancelled, "cancelled")
             } else if start.elapsed() >= time_limit {
                 let message = format!("time limit of {} s exceeded, worker killed", limits.time_s);
                 PartError::new(ErrorKind::TimeLimit, message)
-            } else if let Some(rss) = resident_mb(worker.child.id())
+            } else if let Some(rss) = rss
                 && rss > limits.memory_mb
             {
                 let message = format!(

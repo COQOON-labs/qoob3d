@@ -40,7 +40,8 @@ Document model and shared pure data types. Used by all other crates.
   checks sizes against the input before allocating.
 - `src/stl.rs`: binary STL import (WA-LV-03): exact welding, normals from the winding,
   feature edges > 30° plus open edges.
-- `src/project/`: script project folder (AG-PJ-01..04, ADR-0053): `qoob3d.toml`, `values/*.toml`
+- `src/project/`: script project folder (AG-PJ-01..04, ADR-0053): `qoob3d.toml` (limits, workers
+  with `recycle_mb`, `[cache] keep`, `[mesh]`; AG-PF-03..05), `values/*.toml`
   with mandatory source/status, imports (never outside the project), build graph, cache key.
 - `src/tasks/`: task inbox (AG-TK-01..04, ADR-0054): `tasks/NNNN-slug.md` with TOML header, body
   and `## Log`; `create`/`update` (byte-preserving, atomic), role transitions, review gate

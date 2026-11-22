@@ -11,10 +11,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use qoob3d_core::project::{self, Config, Graph, KeyInputs, PartDecl, Values};
-use qoob3d_kernel::script::{self, DeclaredPart, PartMode, RunOptions};
+use qoob3d_kernel::script::{self, DeclaredPart, PartMode, RunOptions, RunOutput};
 use serde_json::Value;
 
-use crate::worker::{PROGRAM_VERSION, PartError};
+use crate::worker::{PartError, key_version};
 
 /// Rhai operations allowed for declaring the parts of one file: top-level
 /// code is meant to be declarations, not computations.
@@ -30,13 +30,22 @@ pub(crate) fn cache_dir(dir: &Path, part: &str) -> PathBuf {
 /// # Errors
 /// The script fails; the message names the file.
 pub(crate) fn declare(dir: &Path, file: &Path, text: &str) -> Result<Vec<DeclaredPart>, String> {
+    declarations(dir, file, text).map(|o| o.parts)
+}
+
+/// What `text` (the part or check file `file`) declares, without running
+/// any closure.
+///
+/// # Errors
+/// The script fails; the message names the file.
+pub(crate) fn declarations(dir: &Path, file: &Path, text: &str) -> Result<RunOutput, String> {
     let options = RunOptions {
         max_operations: DECLARE_MAX_OPERATIONS,
         project_dir: Some(dir.to_owned()),
         parts: PartMode::Declare,
         ..RunOptions::default()
     };
-    script::run(text, &options).map(|o| o.parts).map_err(|e| format!("{}: {e}", file.display()))
+    script::run(text, &options).map_err(|e| format!("{}: {e}", file.display()))
 }
 
 /// Declarations by file, valid while the file and module bytes are unchanged.
@@ -128,7 +137,7 @@ impl Snapshot {
             .map(|id| (id.clone(), self.values.get(id).map_or(Value::Null, |v| v.value.clone())))
             .collect();
         project::cache_key(&KeyInputs {
-            program_version: PROGRAM_VERSION.to_owned(),
+            program_version: key_version(&self.config.mesh),
             part_file: part.source.clone(),
             modules: part.modules.clone(),
             values_read,
@@ -231,6 +240,32 @@ pub(crate) fn cached(dir: &Path, part: &str, key: &str) -> Option<Value> {
     }
     let text = std::fs::read_to_string(base.with_extension("json")).ok()?;
     serde_json::from_str(&text).ok().filter(Value::is_object)
+}
+
+/// Removes all but the newest `keep` cache entries of `part` (by the
+/// modification time of the `.json`), never the entry `current` (AG-PF-04).
+pub(crate) fn evict(dir: &Path, part: &str, current: &str, keep: usize) {
+    let folder = cache_dir(dir, part);
+    let Ok(entries) = std::fs::read_dir(&folder) else {
+        return;
+    };
+    let mut others: Vec<(std::time::SystemTime, String)> = entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| {
+            let key = e.path().file_stem()?.to_string_lossy().into_owned();
+            Some((e.metadata().ok()?.modified().ok()?, key))
+        })
+        .filter(|(_, key)| key != current)
+        .collect();
+    others.sort();
+    let excess = (others.len() + 1).saturating_sub(keep);
+    for (_, key) in others.iter().take(excess) {
+        // The `.json` first: without it the entry no longer counts as complete.
+        for extension in ["json", "brep", "qmsh"] {
+            std::fs::remove_file(folder.join(key).with_extension(extension)).ok();
+        }
+    }
 }
 
 /// The newest complete cache entry of `part`: the last build of an earlier

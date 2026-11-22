@@ -5,10 +5,15 @@
 //! in this process. One service per folder: `.qoob3d/service.lock` is held
 //! with an OS file lock, which also makes a stale `service.json` harmless.
 
+mod bench;
+mod checks;
 mod http;
 mod jobs;
 mod pool;
+mod probe;
+mod save;
 pub(crate) mod snapshot;
+mod tasks;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -19,11 +24,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
 use qoob3d_core::export::{self, ExportObject};
-use qoob3d_core::project::{Config, Limits, ValueStatus, Values, Workers};
+use qoob3d_core::project::{Config, Limits, Mesh, ValueStatus, Values, Workers};
 use qoob3d_core::qmesh;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use self::checks::{CheckFiles, CheckRecord};
 use self::http::Reply;
 use self::jobs::Job;
 use self::pool::Pool;
@@ -41,6 +47,7 @@ pub(crate) struct Service {
     port: u16,
     pool: Pool,
     declarations: Declarations,
+    check_files: CheckFiles,
     state: Mutex<State>,
     /// Signalled on every job change.
     changed: Condvar,
@@ -55,6 +62,8 @@ struct State {
     queue: VecDeque<u64>,
     next_job: u64,
     records: HashMap<String, Record>,
+    /// Last run of every check, by name.
+    checks: HashMap<String, CheckRecord>,
 }
 
 /// Writes `bytes` to `path` through a temporary file and a rename, so
@@ -93,13 +102,15 @@ pub fn serve(dir: &Path) -> anyhow::Result<()> {
     }
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).context("binding a port")?;
     let port = listener.local_addr()?.port();
-    let count = Config::load(&dir).map_or(Workers::default().count, |c| c.workers.count);
+    // Read once at the start (AG-PF-06); a broken file is reported by `/status`.
+    let workers = Config::load(&dir).map_or_else(|_| Workers::default(), |c| c.workers);
     let exe = std::env::current_exe().context("locating the qoob3d executable")?;
     let service = Arc::new(Service {
-        pool: Pool::start(exe, count),
+        pool: Pool::start(exe, workers.count, workers.recycle_mb),
         dir,
         port,
         declarations: Declarations::default(),
+        check_files: CheckFiles::default(),
         state: Mutex::new(State::default()),
         changed: Condvar::new(),
         stopping: AtomicBool::new(false),
@@ -220,6 +231,14 @@ impl Service {
             },
             ("POST", ["export"]) => self.export(&request.body),
             ("GET", ["values"]) => self.values(),
+            ("POST", ["check"]) => self.check(&request.body),
+            ("POST", ["run"]) => self.run(&request.body),
+            ("POST", ["measure"]) => self.measure(&request.body),
+            ("POST", ["save"]) => self.save(&request.body),
+            ("GET", ["tasks"]) => self.tasks(),
+            ("GET", ["task", id]) => self.task(id),
+            ("POST", ["task"]) => self.task_create(&request.body),
+            ("POST", ["task", id]) => self.task_update(id, &request.body),
             ("POST", ["shutdown"]) => {
                 self.stopping.store(true, Ordering::SeqCst);
                 self.changed.notify_all();
@@ -237,14 +256,16 @@ impl Service {
     fn status(&self) -> Value {
         let (count, busy) = self.pool.counts();
         let snapshot = Snapshot::load(&self.dir, &self.declarations);
+        let declared = checks::load(&self.dir, &self.check_files);
         let mut st = self.lock();
         let jobs: Vec<Value> =
             st.jobs.iter().map(|(id, j)| json!({"id": id, "state": j.state})).collect();
         let mut result = json!({
             "project": Value::Null,
             "parts": [],
+            "checks": [],
             "jobs": jobs,
-            "workers": {"count": count, "busy": busy},
+            "workers": {"count": count, "busy": busy, "recycled": self.pool.recycled()},
         });
         match snapshot {
             Ok(s) => {
@@ -256,6 +277,13 @@ impl Service {
                 result["error"] = json!(PartError::new(ErrorKind::Load, message));
             }
         }
+        match declared {
+            Ok(sources) => result["checks"] = json!(checks::status(&sources, &st)),
+            Err(message) if result.get("error").is_none() => {
+                result["error"] = json!(PartError::new(ErrorKind::Load, message));
+            }
+            Err(_) => {}
+        }
         result
     }
 
@@ -263,7 +291,13 @@ impl Service {
     fn build(&self, bytes: &[u8]) -> Answer {
         let request: BuildBody = body(bytes)?;
         let id = self.submit(request.parts)?;
-        let wait = Duration::try_from_secs_f64(request.wait_s).unwrap_or(Duration::ZERO);
+        self.answer_job(id, request.wait_s)
+    }
+
+    /// Waits up to `wait_s` for job `id`: its result or error if finished,
+    /// else `{"job": id, "state": …}` (§3.1).
+    fn answer_job(&self, id: u64, wait_s: f64) -> Answer {
+        let wait = Duration::try_from_secs_f64(wait_s).unwrap_or(Duration::ZERO);
         self.wait(id, Some(wait));
         let st = self.lock();
         let job = st.jobs.get(&id).ok_or_else(|| unknown_job(id))?;
@@ -300,8 +334,8 @@ impl Service {
     }
 
     /// `POST /export` (§3.1): builds the parts if needed, then writes
-    /// `out/<part>.<format>`; STL and 3MF from the cached 0.01 mm mesh, STEP
-    /// from the BREP in a worker.
+    /// `out/<part>.<format>`; STL and 3MF from the cached mesh (`[mesh]`
+    /// settings, AG-PF-05), STEP from the BREP in a worker.
     fn export(&self, bytes: &[u8]) -> Answer {
         let request: ExportBody = body(bytes)?;
         let format = request.format.as_str();
@@ -357,6 +391,9 @@ impl Service {
             file: None,
             deps: BTreeMap::from([(part.to_owned(), brep.to_owned())]),
             step: Some(PathBuf::from(file)),
+            mesh: Mesh::default(),
+            cache: None,
+            probe: None,
         };
         let answer = self.pool.run(&request, &limits, &AtomicBool::new(false))?;
         match answer.error {
@@ -411,10 +448,24 @@ fn unknown_job(id: u64) -> Failure {
     Failure::not_found(format!("unknown job {id}"))
 }
 
-/// The JSON envelope of every answer (project-app.md §1).
+/// `qoob3d bench <DIR>` (AG-PF-06): prints the envelope with the measures
+/// per part; the process exit code.
+pub fn bench(dir: &Path) -> i32 {
+    let start = Instant::now();
+    let (code, body) = envelope_json(bench::run(dir), start);
+    println!("{body}");
+    i32::from(code != 200)
+}
+
 fn envelope(answer: Answer, start: Instant) -> Reply {
+    let (code, body) = envelope_json(answer, start);
+    Reply::Json { code, body: body.to_string() }
+}
+
+/// HTTP code and the JSON envelope of every answer (project-app.md §1).
+fn envelope_json(answer: Answer, start: Instant) -> (u16, Value) {
     let duration_s = start.elapsed().as_secs_f64();
-    let (code, body) = match answer {
+    match answer {
         Ok(result) => {
             (200, json!({"ok": true, "duration_s": duration_s, "warnings": [], "result": result}))
         }
@@ -428,6 +479,5 @@ fn envelope(answer: Answer, start: Instant) -> Reply {
                 "error": f.error,
             }),
         ),
-    };
-    Reply::Json { code, body: body.to_string() }
+    }
 }

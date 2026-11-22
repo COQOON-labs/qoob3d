@@ -32,9 +32,13 @@ OpenCascade connection. Runs entirely in its own worker thread.
 - `src/tessellate.rs`: call of the C++ mesher → `ShapeMesh`, structure check, demo part.
 - `src/script.rs` + `src/script/`: script kernel (ADR-0053): `run`, `ScriptError`, `Shape`,
   sandboxed imports, STL/3MF/STEP export; `api.rs` solids, booleans (batched, plausibility
-  AG-SC-12), transforms, measures; `profile.rs` profiles, extrude/revolve/loft, pipe;
+  AG-SC-12), transforms, measures; `profile.rs` profiles, profile algebra (AG-PF-02),
+  extrude/revolve/loft, pipe;
   `select.rs` edge/face selectors, fillet, chamfer, shell; `project.rs` `part()`/`value()` with
-  `PartMode` (all, declare without the CAD API, one part from dependency BREPs); BREP
+  `PartMode` (all, declare without the CAD API, one part from dependency BREPs); `check.rs`
+  `check()`/`expect…` and `part(name)` (AG-CK-01/02, `RunOptions::check`, results in
+  `RunOutput::checks`; closures run only in `PartMode::All`); `measure.rs` area, center,
+  distance, common volume for callers in Rust; BREP
   read/write and `Shape::mesh` for the cache. Runs on the calling thread, not
   the worker. Every API change updates `docs/script-api.md` (its examples run in
   `tests/script.rs`).
@@ -60,6 +64,17 @@ OpenCascade connection. Runs entirely in its own worker thread.
 - The rotation for placing into a plane: `gp_Trsf::SetDisplacement(gp_Ax3(), target)`.
 - `qoob3d_boolean` flattens compounds into argument lists: a compound of overlapping solids
   must never be one BOP argument (self-interference).
+- `qoob3d_boolean` runs the BOP in parallel mode (AG-PF-01, `OSD_ThreadPool`, no TBB). On
+  four cores the 1000-hole solid cut gained only ~10 %; most of a big BOP is serial.
+- Profile algebra (`qoob3d_profile_boolean`): a cut whose tools are hole-free faces strictly
+  inside one base face, clear of its holes and of each other, adds them as inner wires
+  (`punch`) instead of running a BOP; everything else is a planar BOP. `punch` stores the
+  2D curves of the edges, otherwise `BRepCheck_Analyzer` projects every edge again.
+- `qoob3d_outline_face` trusts its input (closed, not self-intersecting, counter-clockwise):
+  only for `rect`/`circle`/`slot`. `polygon` goes through the region search, which finds
+  self-intersections.
+- `BRepCheck_Analyzer` and `BRepGProp::SurfaceProperties` are slow on faces with very many
+  wires (plate with 1000 holes: validity seconds, area ~0.1 s), whichever way it was built.
 - STEP read/write share static OCCT settings; the wrappers serialise them with a mutex.
   OCCT's STEP translator prints progress to stdout.
 - OCCT normals follow the surface, not the face orientation → for `TopAbs_REVERSED`

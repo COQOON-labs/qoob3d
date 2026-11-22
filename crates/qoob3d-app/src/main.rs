@@ -1,7 +1,10 @@
 //! QOOB3D – parametric CAD for FDM printing.
 
 use clap::Parser as _;
-use qoob3d_app::{app, batch, cli, headless_render, live, service, service_cli, smoke, worker};
+use qoob3d_app::{
+    app, batch, cli, headless_render, init, live, mcp, project_render, service, service_cli, smoke,
+    worker,
+};
 
 fn main() -> anyhow::Result<()> {
     // Logs go to stderr: stdout carries the worker protocol and CLI envelopes.
@@ -17,6 +20,12 @@ fn main() -> anyhow::Result<()> {
     match &cli.command {
         Some(cli::Command::Serve { dir }) => return service::serve(dir),
         Some(cli::Command::Worker) => return worker::run(),
+        Some(cli::Command::Bench { dir }) => std::process::exit(service::bench(dir)),
+        Some(cli::Command::Init { dir }) => return init::run(dir),
+        Some(cli::Command::RenderProject { dir, out, view, size, parts }) => {
+            return project_render::run(dir, out, (*view).into(), *size, parts);
+        }
+        Some(cli::Command::Mcp { dir }) => return mcp::run(dir.as_deref()),
         Some(cli::Command::Project(command)) => std::process::exit(service_cli::run(command)),
         None => {}
     }

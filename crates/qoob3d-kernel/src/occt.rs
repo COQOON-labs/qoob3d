@@ -75,6 +75,7 @@ pub(crate) mod ffi {
             key_starts: &[u32],
             frame: &[f64],
         ) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_outline_face(curves: &Qoob3dCurves) -> Result<UniquePtr<TopoDS_Shape>>;
         fn qoob3d_extrude(
             faces: &TopoDS_Shape,
             vector: &[f64],
@@ -91,6 +92,11 @@ pub(crate) mod ffi {
             end_point: &[f64],
         ) -> Result<UniquePtr<TopoDS_Shape>>;
         fn qoob3d_boolean(
+            a: &TopoDS_Shape,
+            b: &TopoDS_Shape,
+            op: u32,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_profile_boolean(
             a: &TopoDS_Shape,
             b: &TopoDS_Shape,
             op: u32,

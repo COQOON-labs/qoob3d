@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::Service;
-use super::snapshot::{PartSource, Snapshot, cache_dir, cached, record};
+use super::snapshot::{PartSource, Snapshot, cache_dir, cached, evict, record};
 use crate::worker::{Answer, ErrorKind, PartError, Request};
 
 /// Finished jobs kept for `/job/<id>`.
@@ -34,15 +34,27 @@ impl JobState {
     }
 }
 
+/// What a job does.
+#[derive(Clone)]
+pub(crate) enum Work {
+    /// Builds the parts and their dependencies; `None` = all.
+    Build(Option<Vec<String>>),
+    /// Builds all parts, then runs the checks; `None` = all (AG-CK-03).
+    Check(Option<Vec<String>>),
+    /// Runs a throwaway script (AG-SV-05).
+    Run(String),
+}
+
 pub(crate) struct Job {
     pub(crate) state: JobState,
-    /// Requested parts; `None` = all.
-    requested: Option<Vec<String>>,
+    work: Work,
     /// Parts to build including dependencies.
     total: usize,
     /// Result per finished part (§3.1).
     results: BTreeMap<String, Value>,
-    /// Load error that stopped the job.
+    /// Result of the checks or of the script.
+    output: Option<Value>,
+    /// Load, limit or script error that stopped the job.
     pub(crate) error: Option<PartError>,
     cancel: Arc<AtomicBool>,
 }
@@ -64,8 +76,12 @@ impl Job {
         j
     }
 
-    /// The build result: per part, and the names built, cached and failed.
+    /// The output of checks or a script; otherwise the build result: per
+    /// part, and the names built, cached and failed.
     pub(crate) fn result(&self) -> Value {
+        if let Some(output) = &self.output {
+            return output.clone();
+        }
         let named = |state: &str| -> Vec<&String> {
             self.results.iter().filter(|(_, r)| r["state"] == state).map(|(n, _)| n).collect()
         };
@@ -126,6 +142,11 @@ impl Service {
             .closure(parts.as_deref())
             .map_err(|m| PartError::new(ErrorKind::BadRequest, m))?
             .len();
+        Ok(self.enqueue(Work::Build(parts), total))
+    }
+
+    /// Queues `work` and returns the job id.
+    pub(crate) fn enqueue(&self, work: Work, total: usize) -> u64 {
         let mut st = self.lock();
         st.next_job += 1;
         let id = st.next_job;
@@ -136,16 +157,17 @@ impl Service {
         }
         let job = Job {
             state: JobState::Queued,
-            requested: parts,
+            work,
             total,
             results: BTreeMap::new(),
+            output: None,
             error: None,
             cancel: Arc::new(AtomicBool::new(false)),
         };
         st.jobs.insert(id, job);
         st.queue.push_back(id);
         self.changed.notify_all();
-        Ok(id)
+        id
     }
 
     /// Waits until job `id` is finished or `timeout` passed (`None` = no
@@ -214,39 +236,54 @@ impl Service {
     }
 
     fn run_job(&self, id: u64) {
-        let Some((requested, cancel)) =
-            self.lock().jobs.get(&id).map(|j| (j.requested.clone(), Arc::clone(&j.cancel)))
+        let Some((work, cancel)) =
+            self.lock().jobs.get(&id).map(|j| (j.work.clone(), Arc::clone(&j.cancel)))
         else {
             return;
         };
-        let loaded = Snapshot::load(&self.dir, &self.declarations).and_then(|s| {
-            let names = s.closure(requested.as_deref())?;
-            Ok((s, names))
-        });
-        match loaded {
-            Ok((snapshot, names)) => {
-                if let Some(job) = self.lock().jobs.get_mut(&id) {
-                    job.total = names.len();
-                }
-                self.build_parts(id, &snapshot, &names, &cancel);
-            }
-            Err(message) => {
-                if let Some(job) = self.lock().jobs.get_mut(&id) {
-                    job.error = Some(PartError::new(ErrorKind::Load, message));
-                }
-            }
-        }
+        let output = match &work {
+            Work::Run(source) => self.run_script(source, &cancel).map(Some),
+            Work::Build(parts) => self.build_job(id, parts.as_deref(), &cancel).map(|_| None),
+            Work::Check(names) => self
+                .build_job(id, None, &cancel)
+                .and_then(|snapshot| self.run_checks(&snapshot, names.as_deref(), &cancel))
+                .map(Some),
+        };
         let mut st = self.lock();
         if let Some(job) = st.jobs.get_mut(&id) {
+            match output {
+                Ok(output) => job.output = output,
+                Err(e) => job.error = Some(e),
+            }
+            let red = job.results.values().any(|r| r["state"] == "failed")
+                || job.output.as_ref().is_some_and(|o| o["failed"].as_u64() > Some(0));
             job.state = if cancel.load(Ordering::SeqCst) {
                 JobState::Cancelled
-            } else if job.error.is_some() || job.results.values().any(|r| r["state"] == "failed") {
+            } else if job.error.is_some() || red {
                 JobState::Failed
             } else {
                 JobState::Done
             };
         }
         self.changed.notify_all();
+    }
+
+    /// Loads the project and builds `requested` (`None` = all) with their
+    /// dependencies; the snapshot that was built.
+    fn build_job(
+        &self,
+        id: u64,
+        requested: Option<&[String]>,
+        cancel: &AtomicBool,
+    ) -> Result<Snapshot, PartError> {
+        let load = |m| PartError::new(ErrorKind::Load, m);
+        let snapshot = Snapshot::load(&self.dir, &self.declarations).map_err(load)?;
+        let names = snapshot.closure(requested).map_err(load)?;
+        if let Some(job) = self.lock().jobs.get_mut(&id) {
+            job.total = names.len();
+        }
+        self.build_parts(id, &snapshot, &names, cancel);
+        Ok(snapshot)
     }
 
     /// Builds `names` (build order) of `snapshot`, in parallel where the
@@ -294,11 +331,19 @@ impl Service {
                             file: Some(part.file.clone()),
                             deps,
                             step: None,
+                            mesh: snapshot.config.mesh,
+                            cache: None,
+                            probe: None,
                         };
                         let tx = tx.clone();
                         scope.spawn(move || {
-                            let answer = self.pool.run(&request, limits, cancel);
-                            tx.send((part, key, Outcome::from_worker(answer))).ok();
+                            let outcome =
+                                Outcome::from_worker(self.pool.run(&request, limits, cancel));
+                            if let Outcome::Built { key, .. } = &outcome {
+                                let keep = snapshot.config.cache.keep;
+                                evict(&self.dir, &part.name, key, keep);
+                            }
+                            tx.send((part, key, outcome)).ok();
                         });
                         running += 1;
                         continue;
