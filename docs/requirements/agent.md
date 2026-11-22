@@ -45,7 +45,45 @@ layer where OCCT has it.
 | AG-PJ-04 | Build graph and cache: a part is rebuilt iff its file, an imported module (`import "lib/x"`), a value it read, a dependency key or the program version changed. Cache in `.qoob3d/cache/<part>/<key>.{brep,qmsh,json}`. |
 | AG-PJ-05 | Worker processes `qoob3d worker`: every build runs in a child process with time limit (kill) and memory limit (RSS polled every 0.2 s); crash, limit or kill replaces the worker; the error kind is `time_limit`, `memory_limit`, `crash` or `script` (with file, line, column). |
 
+### 2.1 Details for R2
+
+- Crate placement (ADR-0053): parsing `qoob3d.toml`, `values/*.toml`, part declarations
+  discovery, build graph and cache keys are pure logic in `qoob3d-core` (module
+  `project`, must not depend on OCCT); evaluating parts uses `qoob3d_kernel::script` inside
+  the worker; workers and the job runner live in `qoob3d-app`.
+- Part declaration is found without running OCCT: the script is evaluated with a stub
+  `part()` that only records name, options and the closure; `deps` passed to the closure is
+  a map name → shape of the built dependencies.
+- Cache key: SHA-256 (hex) over, in order: program version, part file bytes, bytes of every
+  transitively imported module, the sorted list of `(value id, canonical value)` read in the
+  last build, and the keys of the dependencies. Before the first build the key is computed
+  without values; after a build the recorded reads are part of the key, so changing a read
+  value invalidates, changing an unread value does not.
+- Cache entry files: `<key>.brep` (OCCT BREP), `<key>.qmsh` (tessellated, 0.01 mm linear
+  deflection, edges included), `<key>.json` with `volume`, `bbox` `{min,max,size}`,
+  `valid`, `solids`, `duration_s`, `values_read`, `warnings`.
+- Worker protocol: the parent starts `qoob3d worker` with stdin/stdout pipes, sends one JSON
+  request per line (`{"job": id, "dir": …, "part": …, "deps": {name: brep_path}}`), the
+  worker answers one JSON line per job. Workers stay warm between jobs.
+- Limits: `time_s` per job (wall clock, kill + replace), `memory_mb` resident set size
+  (polled every 0.2 s; Linux `/proc/<pid>/statm`, macOS via `ps -o rss=` or an equivalent
+  without new heavy dependencies), kill + replace.
+
 ## 3. Service, CLI, MCP (R3)
+
+### 3.1 HTTP details (envelope as in `project-app.md`)
+
+- `GET /status` → `result`: `{"project": name, "parts": [{name, file, state, key, error?}],
+  "jobs": [{id, state}], "workers": {count, busy}}` (superset of WA-PR-01).
+- `POST /build {"parts": [..]|null, "wait_s": f64}` → if finished within `wait_s`:
+  `result` = build result; else `{"job": id, "state": "running"}`. Build result:
+  `{"parts": {name: {state: "built"|"cached"|"failed", volume, bbox, valid, duration_s,
+  error?: {kind, message, file?, line?, column?}}}, "built": [..], "cached": [..]}`.
+- `GET /job/<id>` → `{id, state: "queued"|"running"|"done"|"failed"|"cancelled",
+  progress: {done, total}, result?}`; `POST /job/<id>/cancel`.
+- `GET /mesh/<part>` as WA-PR-02; `POST /export {"parts": [..], "format": "stl"|"3mf"|"step"}`
+  writes `out/<part>.<ext>` (3MF: one object per part).
+- `POST /shutdown` stops service and workers; `qoob3d serve` removes `service.json` on exit.
 
 | ID | Requirement |
 | --- | --- |
