@@ -137,7 +137,22 @@ layer where OCCT has it.
 | AG-MC-05 | Resources: `qoob3d://script-api` (Markdown), `qoob3d://guide`, and one per example script `qoob3d://examples/<name>.rhai`. The API reference and examples are embedded in the binary, so they match its version. |
 | AG-MC-06 | The workflow guide (also tool `guide`) tells an agent in at most 60 lines: project layout, the loop (task_list → task_update in_progress → read API reference → write part and check → build → check → render and look → task_update review), the rules (values need sources; never guess a dimension, ask via `blocked`; booleans batched; units mm), and how errors are reported. |
 
-## 5. Acceptance
+## 5. Performance and memory (P1)
+
+Measured on 2026-11-22 (debug app, 4 cores, hands-on project): service 25 MB resident, idle
+worker 35 MB; a plate with 1000 holes as one batched cut takes 12.5 s, leaves the worker at
+196 MB and a 6.2 MB mesh; the cache never shrinks.
+
+| ID | Requirement |
+| --- | --- |
+| AG-PF-01 | Batched booleans (`union(array)`, `cut(a, array)`, operators) run OCCT in parallel mode. Results stay identical to 1e-9 relative volume. |
+| AG-PF-02 | Profile algebra: `p1 + p2`, `p1 - p2`, `p1 & p2` and `profile_cut(p, array)`, `profile_union(array)` on 2D profiles (holes allowed), then `extrude`/`revolve`. A plate 164 x 104 x 3 with 1000 holes of diameter 2 built as `extrude(profile_cut(rect, circles), 3)` has the analytic volume to 1e-6 relative and builds at least 10 times faster than the same part as a batched solid cut (both measured in the same test run). |
+| AG-PF-03 | Worker recycling: after a job, a worker whose resident memory exceeds `[workers] recycle_mb` (default 512) is replaced by a fresh one before the next job; `/status` reports `workers.recycled` (count since start). |
+| AG-PF-04 | Cache eviction: per part at most `[cache] keep` entries (default 5, newest by modification time, the current key always kept); eviction runs after each successful build of that part and removes `.brep`, `.qmsh` and `.json` together. |
+| AG-PF-05 | Tessellation quality is configurable: `[mesh] deflection_mm` (default 0.01) and `angle_deg` (default 20); both are part of the cache key. |
+| AG-PF-06 | `qoob3d bench <DIR>` builds all parts uncached twice and prints per part: build seconds, peak worker memory (MB), triangles, mesh bytes – as JSON envelope; used to track performance over time. |
+
+## 6. Acceptance
 
 - R1: the three M0 probe parts written as scripts reproduce the analytic volumes from
   `werft/m0/teile.py` to < 1e-6 relative; build times as AG-SC-15.
