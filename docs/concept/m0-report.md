@@ -3,6 +3,12 @@
 > English translation; German original in Git history (commit 43c7bc3). Measured with
 > Python/build123d before the decision for an all-Rust core (ADR-0053).
 >
+> **Note of 2026-11-22:** the Python probe scripts (`werft/m0/*.py`) and the raw JSON data
+> (`m0/*.json`) named below were removed from the working tree because the repository is
+> English (ADR-0045) and the architecture moved to Rust (ADR-0053). They remain in Git history
+> (last present in commit 82e4ec6). The analytic volume formulas live on in
+> `crates/qoob3d-kernel/tests/script_m0.rs`.
+>
 > Translation notes: the concept is [`werft-concept.md`](werft-concept.md) (originally
 > `werft/docs/konzept.md`). The raw data and the image moved with this report and are linked
 > relative to it (`m0/…` = `docs/concept/m0/…`, originally `werft/docs/m0/…`); the scripts
@@ -20,7 +26,7 @@ Apple Silicon. The times are therefore guide values. To repeat on the Mac (from 
 
 Versions: build123d 0.13.0, OCP 8.0.1.1 (**OCCT 8.0.1**), build123d-mcp 0.3.91.
 
-![Sample parts](m0/probeteile.png)
+![Sample parts](m0/probe-parts.png)
 
 ## 1. Acceptance M0 – result
 
@@ -153,7 +159,7 @@ Observed weaknesses:
   a "documented no-op" according to its own source comment.
 - The default iso view of `render_view` did not show the pocket at the top of the
   crane column; with explicitly set `azimuth`/`elevation` it was
-  visible (`m0/probeteile.png`). I have not clarified the cause.
+  visible (`m0/probe-parts.png`). I have not clarified the cause.
   Conclusion: Werft renders only with fixed, named cameras.
 - Size and pace: around 21,800 lines in version 0.3.x, much of it for
   drawings (non-goal). Answers are mixed text and JSON.

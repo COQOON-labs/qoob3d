@@ -208,7 +208,8 @@ bind them.
 ## 7. Acceptance
 
 - R1: the three M0 probe parts written as scripts reproduce the analytic volumes from
-  `werft/m0/teile.py` to < 1e-6 relative; build times as AG-SC-15.
+  the M0 probe (`docs/concept/m0-report.md`, formulas in
+  `crates/qoob3d-kernel/tests/script_m0.rs`) to < 1e-6 relative; build times as AG-SC-15.
 - R2: an endless script is killed after the time limit while the service answers; changing
   one part rebuilds only it and its dependents.
 - R3: CLI and service pass `crates/qoob3d-app/tests/service.rs`.

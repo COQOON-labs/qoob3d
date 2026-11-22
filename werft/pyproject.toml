@@ -1,9 +1,0 @@
-[project]
-name = "werft"
-version = "0.1.0"
-description = "Werft: Konstruktionsumgebung, in der 3D-Modelle Python-Code sind (build123d)"
-requires-python = ">=3.12"
-dependencies = [
-    "build123d>=0.13.0",
-    "build123d-mcp>=0.3.91",
-]
