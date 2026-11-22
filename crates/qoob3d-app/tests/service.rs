@@ -664,11 +664,30 @@ fn qmesh_bbox(bytes: &[u8]) -> ([f64; 3], [f64; 3]) {
     (lo, hi)
 }
 
-fn assert_box(got: ([f64; 3], [f64; 3]), want: ([f64; 3], [f64; 3]), what: &str) {
-    for i in 0..3 {
+/// Linear deflection of the cached/served meshes (§2.1: 0.01 mm).
+const DEFLECTION: f64 = 0.01;
+/// Axes along which a part's surface is curved; planar axes need no deflection allowance.
+const FLAT: [bool; 3] = [false; 3];
+/// Cylinder with axis Z: curved in x and y, planar caps in z.
+const CYL_Z: [bool; 3] = [true, true, false];
+
+/// Mesh bbox against the exact bbox. Vertices lie on the exact surface, so
+/// the mesh bbox lies inside the exact one (up to f32 rounding, `F32_POS`).
+/// On planar axes the extremes are vertices, so both sides match to
+/// `F32_POS`; on curved axes the extreme may fall between vertices, and the
+/// chord there is at most the deflection away from the surface.
+fn assert_box(
+    got: ([f64; 3], [f64; 3]),
+    want: ([f64; 3], [f64; 3]),
+    curved: [bool; 3],
+    what: &str,
+) {
+    for (i, is_curved) in curved.into_iter().enumerate() {
+        let inward = if is_curved { DEFLECTION + F32_POS } else { F32_POS };
+        let (lo, hi) = (got.0[i] - want.0[i], want.1[i] - got.1[i]);
         assert!(
-            (got.0[i] - want.0[i]).abs() < F32_POS && (got.1[i] - want.1[i]).abs() < F32_POS,
-            "{what}: bbox {got:?}, expected {want:?}"
+            lo > -F32_POS && lo < inward && hi > -F32_POS && hi < inward,
+            "{what}: bbox {got:?}, expected {want:?} (axis {i}, inward tolerance {inward})"
         );
     }
 }
@@ -996,15 +1015,18 @@ fn check_status_shape(st: &Value) {
 
 /// §2.1: `.qoob3d/cache/<part>/<key>.{brep,qmsh,json}` with the listed JSON keys.
 fn check_cache_files(p: &Project, st: &Value) {
-    for (part, volume, bbox) in
-        [("A", 2000.0, A_BOX), ("B", 2000.0, B_BOX), ("C", 64.0, C_BOX), ("D", D_VOLUME, D_BOX)]
-    {
+    for (part, volume, bbox, curved) in [
+        ("A", 2000.0, A_BOX, FLAT),
+        ("B", 2000.0, B_BOX, FLAT),
+        ("C", 64.0, C_BOX, FLAT),
+        ("D", D_VOLUME, D_BOX, CYL_Z),
+    ] {
         let key = key_of(st, part);
         let base = p.path(&format!(".qoob3d/cache/{part}/{key}"));
         let brep = std::fs::read(base.with_extension("brep")).expect("cache .brep");
         assert!(!brep.is_empty(), "{part}.brep is empty");
         let qmsh = std::fs::read(base.with_extension("qmsh")).expect("cache .qmsh");
-        assert_box(qmesh_bbox(&qmsh), bbox, &format!("cached mesh of {part}"));
+        assert_box(qmesh_bbox(&qmsh), bbox, curved, &format!("cached mesh of {part}"));
         let text = std::fs::read_to_string(base.with_extension("json")).expect("cache .json");
         let j: Value = serde_json::from_str(&text).expect("cache json");
         assert_rel(
@@ -1030,13 +1052,15 @@ fn check_cache_files(p: &Project, st: &Value) {
 
 /// WA-PR-02: qmesh body, `application/octet-stream`, `X-Qoob3d-Key` = status key.
 fn check_mesh_endpoint(s: &Service, st: &Value) {
-    for (part, bbox) in [("A", A_BOX), ("B", B_BOX), ("C", C_BOX), ("D", D_BOX)] {
+    for (part, bbox, curved) in
+        [("A", A_BOX, FLAT), ("B", B_BOX, FLAT), ("C", C_BOX, FLAT), ("D", D_BOX, CYL_Z)]
+    {
         let r = s.get(&format!("/mesh/{part}"));
         assert_eq!(r.code, 200, "/mesh/{part}: {}", r.text());
         let ct = r.header("content-type").unwrap_or_default();
         assert!(ct.starts_with("application/octet-stream"), "{part}: {ct}");
         assert_eq!(r.header("x-qoob3d-key"), Some(key_of(st, part)), "{part}");
-        assert_box(qmesh_bbox(&r.body), bbox, &format!("mesh of {part}"));
+        assert_box(qmesh_bbox(&r.body), bbox, curved, &format!("mesh of {part}"));
     }
     // The cylinder D is tessellated to 0.01 mm: no vertex is outside r = 5.
     let mesh = qmesh::read(&s.get("/mesh/D").body).expect("qmesh of D");
@@ -1075,7 +1099,7 @@ fn check_export(s: &Service, p: &Project) {
     let (vol, lo, hi) = stl_volume_bbox(&std::fs::read(p.path("out/A.stl")).expect("out/A.stl"));
     // f32 vertices of a planar box: rel. error ~1e-7 per coordinate.
     assert_rel(vol, 2000.0, 1e-5, "STL volume of A");
-    assert_box((lo, hi), A_BOX, "STL bbox of A");
+    assert_box((lo, hi), A_BOX, FLAT, "STL bbox of A");
     let (vol, ..) = stl_volume_bbox(&std::fs::read(p.path("out/C.stl")).expect("out/C.stl"));
     assert_rel(vol, 64.0, 1e-5, "STL volume of C");
 
