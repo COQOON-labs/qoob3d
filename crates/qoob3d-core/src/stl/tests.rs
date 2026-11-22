@@ -215,7 +215,7 @@ fn normals_are_unit_and_outward_even_if_the_file_stores_zero() {
     let zeros = vec![[0.0f32; 3]; tris.len()];
     let mesh = read_binary(&stl(b"", &tris, Some(&zeros), 0)).expect("valid STL");
     let f = &mesh.faces;
-    for t in f.indices.chunks_exact(3) {
+    for t in f.indices.as_chunks::<3>().0 {
         let [a, b, c] = [t[0], t[1], t[2]].map(|i| f.positions[i as usize]);
         let centroid: [f32; 3] = std::array::from_fn(|k| (a[k] + b[k] + c[k]) / 3.0);
         for &i in t {

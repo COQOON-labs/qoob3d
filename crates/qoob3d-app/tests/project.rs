@@ -62,7 +62,7 @@ fn project_opens_a_folder_with_qoob3d_toml() {
 fn project_without_qoob3d_toml_is_an_error_naming_the_folder() {
     let project = TempProject::new("no-toml");
     let dir = project.not_a_project();
-    let err = ProjectDir::open(&dir).err().expect("not a project");
+    let err = ProjectDir::open(&dir).expect_err("not a project");
     let msg = err.to_string();
     assert!(msg.contains(&dir.display().to_string()), "message does not name the folder: {msg}");
 }
@@ -72,7 +72,7 @@ fn project_without_qoob3d_toml_is_an_error_naming_the_folder() {
 fn project_in_missing_folder_is_an_error() {
     let project = TempProject::new("missing");
     let dir = project.root.join("does-not-exist");
-    let err = ProjectDir::open(&dir).err().expect("missing folder");
+    let err = ProjectDir::open(&dir).expect_err("missing folder");
     assert!(err.to_string().contains(&dir.display().to_string()), "{err}");
 }
 
