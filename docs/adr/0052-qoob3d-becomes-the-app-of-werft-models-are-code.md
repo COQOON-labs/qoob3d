@@ -1,12 +1,12 @@
 ---
 id: ADR-0052
 title: QOOB3D becomes the app of Werft – models are build123d code, agents come first
-status: accepted
+status: superseded
 date: 2026-11-22
 crates: [qoob3d-app, qoob3d-core]
 tags: [architecture, ai-first, werft]
 supersedes: []
-superseded_by: null
+superseded_by: ADR-0053
 ---
 
 ## Context
