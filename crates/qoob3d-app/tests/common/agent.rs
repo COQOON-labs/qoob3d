@@ -253,7 +253,8 @@ impl Service {
         Self::wait_ready(p, Some(child), log)
     }
 
-    /// Handle for a service started by someone else (CLI or MCP, on demand).
+    /// Handle for a service started by someone else (CLI or MCP, on demand);
+    /// dropping it leaves that service running.
     pub(crate) fn attach(p: &Project) -> Self {
         Self::wait_ready(p, None, p.root.join("serve.log"))
     }
@@ -294,9 +295,12 @@ impl Service {
 }
 
 impl Drop for Service {
+    /// Stops only a service this handle spawned. An attached handle is a
+    /// view: its service (and an MCP server that names the folder) must
+    /// outlive it and is stopped by [`Project`]'s drop.
     fn drop(&mut self) {
-        stop_service(&self.dir);
         if let Some(c) = self.child.as_mut() {
+            stop_service(&self.dir);
             c.kill().ok();
             c.wait().ok();
         }
