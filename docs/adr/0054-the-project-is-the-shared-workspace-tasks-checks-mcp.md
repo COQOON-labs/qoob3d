@@ -77,5 +77,5 @@ as finished; an agent cannot see its result; MCP clients without file tools cann
 ## References
 
 - `docs/requirements/agent.md` (R4), `docs/requirements/project-app.md`
-- `werft/docs/konzept.md` sections 2, 5, 6, 7
+- `docs/concept/werft-concept.md` sections 2, 5, 6, 7
 - Related: ADR-0013, ADR-0053

@@ -11,13 +11,14 @@ superseded_by: ADR-0053
 
 ## Context
 
-The user brought in the concept "Werft" (`werft/docs/konzept.md`, German): a CAD environment
+The user brought in the concept "Werft" (`docs/concept/werft-concept.md`, English translation
+of the German original): a CAD environment
 in which a model is Python code (build123d on OCCT) in a Git folder, an AI agent is the main
 user (MCP tools, background jobs, cache, values with sources, checks as pytest, photo
 measurement), and a human can additionally model with the mouse. The concept planned a new
 SwiftUI app from milestone 5.
 
-Milestone 0 (`werft/docs/m0_bericht.md`) measured build123d: build time 0.009–0.675 s per
+Milestone 0 (`docs/concept/m0-report.md`) measured build123d: build time 0.009–0.675 s per
 probe part, STEP import 0.42 s (1.15 MB), cache read 0.015 s, but 1.6–1.7 s for importing
 build123d in a fresh process. QOOB3D already has what the Werft app needs on the human side:
 Fusion navigation, ViewCube, sketches with value HUD and snapping, extrude/revolve/loft,
@@ -62,5 +63,5 @@ combine the best concepts of both, AI first.
 
 ## References
 
-- `werft/docs/konzept.md`, `werft/docs/m0_bericht.md`, `werft/docs/m1_spec.md`
+- `docs/concept/werft-concept.md`, `docs/concept/m0-report.md`, `werft/docs/m1_spec.md`
 - Related: ADR-0030, ADR-0033, ADR-0045

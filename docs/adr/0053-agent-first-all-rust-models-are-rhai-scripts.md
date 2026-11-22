@@ -11,12 +11,12 @@ superseded_by: null
 
 ## Context
 
-ADR-0052 kept the model core of the Werft concept (`werft/docs/konzept.md`) in Python
+ADR-0052 kept the model core of the Werft concept (`docs/concept/werft-concept.md`) in Python
 (build123d) and made QOOB3D its app. The user then decided: everything in Rust, with an
 embedded script language for models, because performance and memory matter most ("many
 polygons, many 3D computations, memory must not blow up").
 
-Facts from M0 (`werft/docs/m0_bericht.md`): in build123d all geometry runs in OCCT (C++);
+Facts from M0 (`docs/concept/m0-report.md`): in build123d all geometry runs in OCCT (C++);
 Python is only glue. Importing build123d costs 1.6–1.7 s per process. OCCT can fail
 silently (a "valid" shell with volume 0) and hang or eat memory on hard operations, so the
 only real protection is a separate process with time and memory limits. QOOB3D already
@@ -77,6 +77,6 @@ so new crates need a human unlock; until then everything lives in the existing c
 
 ## References
 
-- `werft/docs/konzept.md`, `werft/docs/m0_bericht.md`
+- `docs/concept/werft-concept.md`, `docs/concept/m0-report.md`
 - `docs/requirements/agent.md`, `docs/requirements/project-app.md`
 - Related: ADR-0004, ADR-0005, ADR-0014, ADR-0030, ADR-0036

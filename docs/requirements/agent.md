@@ -1,7 +1,7 @@
 # Requirements: agent-first modelling with Rhai scripts
 
 As of: 2026-11-22 · Status: **R1 specified** · Decision: ADR-0053 · Background: Werft concept
-`werft/docs/konzept.md` (German), M0 measurements `werft/docs/m0_bericht.md`
+`docs/concept/werft-concept.md`, M0 measurements `docs/concept/m0-report.md`
 
 Goal: an AI agent builds a model completely as code, checks, renders and exports it for FDM
 printing without a UI; no run can block the environment or lose work; a human sees the state
