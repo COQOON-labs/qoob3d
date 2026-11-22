@@ -12,11 +12,14 @@ pub mod live;
 mod navigation;
 mod panels;
 pub mod project;
+pub mod service;
+pub mod service_cli;
 pub mod settings;
 pub mod sketch_ui;
 pub mod smoke;
 mod theme;
 pub mod viewcube;
 pub mod viewport;
+pub mod worker;
 
 pub use app::{Mode, QoobApp, StartOptions};

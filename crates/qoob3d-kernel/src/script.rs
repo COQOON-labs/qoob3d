@@ -4,17 +4,21 @@
 //! The API reference for scripts is `docs/script-api.md` (AG-SC-16).
 //!
 //! Shapes live on the thread that runs the script (OCCT handles are not
-//! `Send`); R2 runs scripts in worker processes.
+//! `Send`); R2 runs scripts in worker processes. Project parts and target
+//! values (`part`, `value`, agent.md §2.1) are in `project.rs`.
 
 mod api;
 mod profile;
+mod project;
 mod select;
 
 use std::cell::{OnceCell, RefCell};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
+use qoob3d_core::ShapeMesh;
 use qoob3d_core::export::{self, ExportObject};
 use rhai::module_resolvers::{DummyModuleResolver, FileModuleResolver};
 use rhai::{Engine, EvalAltResult, Module, ModuleResolver, Position, Shared};
@@ -23,6 +27,8 @@ use crate::model::{self, occ};
 use crate::occt::ffi;
 use crate::tessellate::tessellate_raw;
 use crate::{EXPORT_TESSELLATION_TOLERANCE_MM, KernelError};
+
+pub use project::{DeclaredPart, PartMode};
 
 /// Call depth limit (AG-SC-02). Rhai's own default differs between debug
 /// and release builds; scripts must behave the same in both.
@@ -36,11 +42,20 @@ pub struct RunOptions {
     /// Project folder: `import` and `import_step` resolve inside it only.
     /// Without a project, scripts cannot read any file.
     pub project_dir: Option<PathBuf>,
+    /// Target values `value(id)` returns (AG-PJ-03); other ids are errors.
+    pub values: BTreeMap<String, serde_json::Value>,
+    /// What `part(...)` does (AG-PJ-02).
+    pub parts: PartMode,
 }
 
 impl Default for RunOptions {
     fn default() -> Self {
-        Self { max_operations: 50_000_000, project_dir: None }
+        Self {
+            max_operations: 50_000_000,
+            project_dir: None,
+            values: BTreeMap::new(),
+            parts: PartMode::All,
+        }
     }
 }
 
@@ -51,6 +66,10 @@ pub struct RunOutput {
     pub shapes: Vec<(String, Shape)>,
     /// Lines printed with `print`.
     pub printed: Vec<String>,
+    /// Parts declared with `part(...)`, in call order.
+    pub parts: Vec<DeclaredPart>,
+    /// Values read with `value(id)`, the inputs of the cache key (§2.1).
+    pub values_read: BTreeMap<String, serde_json::Value>,
 }
 
 /// A failed script run (AG-SC-03). Lines and columns are 1-based; 0 means
@@ -132,6 +151,16 @@ impl Shape {
         self.bounds().unwrap_or(([f64::NAN; 3], [f64::NAN; 3]))
     }
 
+    /// Triangles and feature edges with chordal deviation `tolerance_mm`.
+    pub fn mesh(&self, tolerance_mm: f64) -> Result<ShapeMesh, KernelError> {
+        tessellate_raw(self.get(), tolerance_mm)
+    }
+
+    /// Writes the shape as an OCCT BREP file (cache entry, AG-PJ-04).
+    pub fn write_brep(&self, path: &Path) -> Result<(), KernelError> {
+        occ(ffi::qoob3d_write_brep(self.get(), utf8(path)?))
+    }
+
     fn bounds(&self) -> Result<([f64; 3], [f64; 3]), KernelError> {
         let b = occ(ffi::qoob3d_bbox(self.get()))?;
         Ok(([b[0], b[1], b[2]], [b[3], b[4], b[5]]))
@@ -142,6 +171,15 @@ impl fmt::Debug for Shape {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Shape")
     }
+}
+
+/// Reads a BREP file written by [`Shape::write_brep`].
+pub fn read_brep(path: &Path) -> Result<Shape, KernelError> {
+    model::shape(ffi::qoob3d_read_brep(utf8(path)?)).map(Shape::new)
+}
+
+fn utf8(path: &Path) -> Result<&str, KernelError> {
+    path.to_str().ok_or_else(|| KernelError::Io(format!("{}: not UTF-8", path.display())))
 }
 
 /// One compound of `parts` (nested compounds flattened), e.g. the tools of
@@ -176,7 +214,12 @@ pub fn run(source: &str, options: &RunOptions) -> Result<RunOutput, ScriptError>
     let printed = Rc::clone(&output);
     engine.on_print(move |line| printed.borrow_mut().printed.push(line.to_string()));
     engine.on_debug(|line, _, pos| tracing::debug!(%pos, "script: {line}"));
-    api::register(&mut engine, &output, project);
+    // Declaring parts must not reach OCCT (§2.1): without the CAD API a
+    // geometry call outside a part closure is an error, not a computation.
+    if options.parts != PartMode::Declare {
+        api::register(&mut engine, &output, project);
+    }
+    project::register(&mut engine, &output, options);
 
     let result = engine.run(source);
     // The engine's closures hold clones of `output`.
@@ -281,9 +324,7 @@ pub fn export_3mf(shapes: &[(String, Shape)], path: &Path) -> Result<(), KernelE
 /// STEP (AP214) of all shapes as one compound.
 pub fn export_step(shapes: &[(String, Shape)], path: &Path) -> Result<(), KernelError> {
     let all = compound(shapes.iter().map(|(_, s)| s))?;
-    let file =
-        path.to_str().ok_or_else(|| KernelError::Io(format!("{}: not UTF-8", path.display())))?;
-    occ(ffi::qoob3d_write_step(all.get(), file))
+    occ(ffi::qoob3d_write_step(all.get(), utf8(path)?))
 }
 
 fn write_meshes(

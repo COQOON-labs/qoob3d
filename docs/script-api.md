@@ -473,6 +473,44 @@ show(fdm::plate_with_hole(30, 4, 0.2), "plate");
 print(fdm::CLEARANCE);
 ```
 
+## Project parts and values
+
+In a project folder (`docs/requirements/agent.md` §2) the files `parts/*.rhai` declare parts;
+`qoob3d serve` builds each part in a worker process and caches it.
+
+### `part(name, options, |deps| shape)`
+
+Declares the part `name` (unique in the project). `options` is a map; `depends` lists the
+parts this one needs (other keys such as `material` and `color` are free). The closure gets
+`deps`, a map from each dependency name to its built shape, and returns the part's shape.
+Several parts per file are fine. The service finds the declarations without running the
+closures and without any geometry: code outside the closures must not call CAD functions.
+Run as a plain script, every part is built in order and shown under its name.
+
+```rhai
+part("Base", #{ material: "PLA" }, |deps| box(40, 40, 5));
+part("Peg", #{ depends: ["Base"] }, |deps| {
+    let top = deps["Base"].bbox().max[2];
+    cylinder(6, 10).move(0, 0, top)
+});
+```
+
+### `value(id) -> value`
+
+The target value `id` from `values/*.toml` (int, float, string, bool or array). Every read is
+recorded: changing a value rebuilds exactly the parts that read it. An unknown id is a
+`Runtime` error naming it. Outside a project there are no values.
+
+```toml
+# values/dims.toml
+[wall]
+value = 1.2
+source = "caliper, 2026-11-20"
+status = "measured"   # measured | one_source | assumption
+```
+
+`part("Shell", #{}, |deps| box(20, 20, 10) - box(20 - 2 * value("wall"), 20 - 2 * value("wall"), 10).move(0, 0, value("wall")))`
+
 ## Errors and limits
 
 A failed run returns one error with line and column of the script position:

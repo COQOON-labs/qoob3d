@@ -147,5 +147,7 @@ pub(crate) mod ffi {
         ) -> Result<UniquePtr<TopoDS_Shape>>;
         fn qoob3d_write_step(shape: &TopoDS_Shape, path: &str) -> Result<()>;
         fn qoob3d_read_step(path: &str) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_write_brep(shape: &TopoDS_Shape, path: &str) -> Result<()>;
+        fn qoob3d_read_brep(path: &str) -> Result<UniquePtr<TopoDS_Shape>>;
     }
 }

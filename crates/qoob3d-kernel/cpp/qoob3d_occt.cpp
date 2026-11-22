@@ -1138,3 +1138,22 @@ std::unique_ptr<TopoDS_Shape> qoob3d_read_step(rust::Str path) {
     return own(reader.OneShape());
   });
 }
+
+void qoob3d_write_brep(const TopoDS_Shape &shape, rust::Str path) {
+  guarded("write_brep", [&] {
+    if (!BRepTools::Write(shape, std::string(path).c_str())) {
+      throw std::runtime_error("BREP file could not be written");
+    }
+  });
+}
+
+std::unique_ptr<TopoDS_Shape> qoob3d_read_brep(rust::Str path) {
+  return guarded("read_brep", [&] {
+    TopoDS_Shape shape;
+    BRep_Builder builder;
+    if (!BRepTools::Read(shape, std::string(path).c_str(), builder) || shape.IsNull()) {
+      throw std::runtime_error("BREP file could not be read");
+    }
+    return own(shape);
+  });
+}

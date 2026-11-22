@@ -3,12 +3,16 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use qoob3d_render::ViewPreset;
 
 #[derive(Debug, Parser)]
 #[command(name = "qoob3d", version, about = "QOOB3D – parametric CAD for FDM printing")]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// `.qbd` file to open.
     pub file: Option<PathBuf>,
 
@@ -63,6 +67,43 @@ pub struct Cli {
     /// and exit with code 0 (ok) or 1 (failure). A watchdog catches hangs.
     #[arg(long, conflicts_with = "render")]
     pub smoke_test: bool,
+}
+
+/// Script project commands (ADR-0053, docs/requirements/agent.md §2–3).
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Run the project service for DIR (HTTP on 127.0.0.1, AG-SV-01).
+    Serve { dir: PathBuf },
+    /// Build worker process of the service (AG-PJ-05); talks JSON lines on stdin/stdout.
+    #[command(hide = true)]
+    Worker,
+    #[command(flatten)]
+    Project(ProjectCommand),
+}
+
+/// Clients of the service of the project in the working directory
+/// (AG-SV-02): they print the JSON envelope and exit with 1 on failure.
+#[derive(Debug, Subcommand)]
+pub enum ProjectCommand {
+    /// Build parts (all without names) and their dependencies.
+    Build {
+        parts: Vec<String>,
+        /// Seconds to wait for the result; afterwards the job id is printed.
+        #[arg(long, default_value_t = 300.0)]
+        wait: f64,
+    },
+    /// Parts with build state and cache key, jobs, workers.
+    Status,
+    /// Write out/<part>.<format> (built first if needed).
+    Export {
+        #[arg(required = true)]
+        parts: Vec<String>,
+        /// stl, 3mf (one object per part) or step.
+        #[arg(long)]
+        format: String,
+    },
+    /// Target values with source and status, and the assumptions.
+    Values,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

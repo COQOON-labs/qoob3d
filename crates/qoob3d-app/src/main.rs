@@ -1,10 +1,12 @@
 //! QOOB3D – parametric CAD for FDM printing.
 
 use clap::Parser as _;
-use qoob3d_app::{app, batch, cli, headless_render, live, smoke};
+use qoob3d_app::{app, batch, cli, headless_render, live, service, service_cli, smoke, worker};
 
 fn main() -> anyhow::Result<()> {
+    // Logs go to stderr: stdout carries the worker protocol and CLI envelopes.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,wgpu_core=warn,wgpu_hal=warn,naga=warn".into()),
@@ -12,6 +14,12 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = cli::Cli::parse();
+    match &cli.command {
+        Some(cli::Command::Serve { dir }) => return service::serve(dir),
+        Some(cli::Command::Worker) => return worker::run(),
+        Some(cli::Command::Project(command)) => std::process::exit(service_cli::run(command)),
+        None => {}
+    }
 
     // WA-OP-01: a folder that is no project ends the app before any window.
     let project = match cli.project.as_deref().map(live::ProjectDir::open).transpose() {

@@ -33,7 +33,9 @@ OpenCascade connection. Runs entirely in its own worker thread.
 - `src/script.rs` + `src/script/`: script kernel (ADR-0053): `run`, `ScriptError`, `Shape`,
   sandboxed imports, STL/3MF/STEP export; `api.rs` solids, booleans (batched, plausibility
   AG-SC-12), transforms, measures; `profile.rs` profiles, extrude/revolve/loft, pipe;
-  `select.rs` edge/face selectors, fillet, chamfer, shell. Runs on the calling thread, not
+  `select.rs` edge/face selectors, fillet, chamfer, shell; `project.rs` `part()`/`value()` with
+  `PartMode` (all, declare without the CAD API, one part from dependency BREPs); BREP
+  read/write and `Shape::mesh` for the cache. Runs on the calling thread, not
   the worker. Every API change updates `docs/script-api.md` (its examples run in
   `tests/script.rs`).
 - `src/occt.rs` + `cpp/`: own cxx bridge. `build.rs` compiles it against the OCCT headers

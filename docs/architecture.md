@@ -56,6 +56,13 @@ flowchart LR
    (ADR-0035). Export STL/3MF (ADR-0034). CLI: `--report`, `--export`, `--render` for
    `.qbd` files (ADR-0033). All texts via Fluent (English base, ADR-0020),
    saved `Settings`.
+   **Script projects** (ADR-0053, `docs/requirements/agent.md`): the same binary is
+   `qoob3d serve <DIR>` (HTTP service on 127.0.0.1: job queue, cache index, part states),
+   `qoob3d worker` (the only process that runs OCCT for project builds; JSON lines on
+   stdin/stdout, killed and replaced on time or memory limit or crash) and the CLI clients
+   `qoob3d build|status|export|values`. Parts are declared without OCCT (`part()` only
+   records); cache entries `.qoob3d/cache/<part>/<key>.{brep,qmsh,json}` are written by the
+   worker; the app (`--project`) only polls `/status` and loads changed meshes.
 6. **Printer database** (`qoob3d-core/src/printer/`): 441 models, generated from
    OrcaSlicer profiles (ADR-0021).
 
@@ -65,6 +72,8 @@ flowchart LR
 | --- | --- | --- |
 | Main/UI (winit, eframe) | egui context, `Viewport` (Camera, Renderer), document | wait for the kernel |
 | `qoob3d-kernel` | all OCCT objects, rebuild cache | touch UI or GPU types |
+| `qoob3d serve`: connection threads, `qoob3d-jobs` runner, one thread per running part | jobs, part records, worker pool | run OCCT, block `/status` behind a build |
+| `qoob3d worker` (process) | the OCCT shapes of one build | outlive its service (exits when stdin closes) |
 
 ## Crate dependencies (enforced by `cargo xtask check`, ADR-0036)
 
@@ -103,6 +112,10 @@ flowchart TD
 | Feature dialogs, selection in the viewport | `crates/qoob3d-app/src/commands.rs` |
 | CLI batch (`--report`, `--export`) | `crates/qoob3d-app/src/batch.rs` |
 | Script project shown live (`--project`, service client, poller; W1) | `crates/qoob3d-app/src/live.rs` |
+| Project service, jobs, worker pool and limits, part states (R2/R3) | `crates/qoob3d-app/src/service.rs`, `src/service/` |
+| Worker process (build a part, cache entry, STEP) | `crates/qoob3d-app/src/worker.rs` |
+| CLI clients `build`, `status`, `export`, `values` | `crates/qoob3d-app/src/service_cli.rs` |
+| Project folder, values, build graph, cache key | `crates/qoob3d-core/src/project/` |
 | Mesh transfer format, STL import | `crates/qoob3d-core/src/{qmesh,stl}.rs` |
 | E2E modeling through the UI | `crates/qoob3d-app/tests/modeling.rs` |
 | Reference model gate | `xtask/src/models.rs` |

@@ -111,3 +111,6 @@ std::unique_ptr<TopoDS_Shape> qoob3d_pipe(rust::Slice<const double> points, doub
                                           double bend_radius);
 void qoob3d_write_step(const TopoDS_Shape &shape, rust::Str path);
 std::unique_ptr<TopoDS_Shape> qoob3d_read_step(rust::Str path);
+// OCCT's native BREP text format (cache entries, AG-PJ-04).
+void qoob3d_write_brep(const TopoDS_Shape &shape, rust::Str path);
+std::unique_ptr<TopoDS_Shape> qoob3d_read_brep(rust::Str path);

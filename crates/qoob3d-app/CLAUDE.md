@@ -38,7 +38,17 @@ kernel connection come together.
 
 - `src/main.rs`: entry point, CLI switch. `src/lib.rs`: modules for tests.
 - `src/cli.rs`: arguments (file, `--project`, `--demo`, `--render`, `--view`, `--size`, `--ortho`,
-  `--zoom`, `--printer`, `--volume`, `--smoke-test`).
+  `--zoom`, `--printer`, `--volume`, `--smoke-test`) and the subcommands `serve`, `worker`,
+  `build`, `status`, `export`, `values`.
+- `src/service.rs` + `src/service/`: `qoob3d serve` (AG-SV-01, ADR-0053): routes and envelope,
+  single instance via `.qoob3d/service.lock`; `http.rs` minimal server side HTTP; `jobs.rs` job
+  queue and parallel part scheduling, cache hits; `pool.rs` warm workers, time/memory/crash
+  limits, replacement; `snapshot.rs` part discovery (`PartMode::Declare`, no OCCT), keys, states.
+  The service never runs OCCT.
+- `src/worker.rs`: `qoob3d worker` (AG-PJ-05): request/answer types of the JSON-line protocol
+  (answers start with `{"job":`, foreign stdout lines from OCCT are skipped), builds one part and
+  writes its cache entry, writes STEP. Exits when stdin closes.
+- `src/service_cli.rs`: CLI clients against the service of the working directory (AG-SV-02).
 - `src/live.rs`: script project shown live (W1, ADR-0053, docs/requirements/project-app.md):
   `ProjectDir`, minimal std::net HTTP `Client` (service start via `QOOB3D_SERVICE_CMD`), `Poller`
   thread (HTTP never on the UI thread), view model `Live`, headless `build_and_load`.
@@ -64,9 +74,10 @@ kernel connection come together.
 - `src/headless_render.rs`: `--render`, kernel + renderer without a window → PNG.
 - `tests/ui.rs`: UI tests of the real app, screenshot on request.
 - `tests/project.rs` (+ `tests/common/`): live project view against a fake service.
+- `tests/service.rs`: service, workers, cache and CLI against the real binary (R2/R3).
 - `tests/modeling.rs`: every shape end to end through the UI, export, editing; screenshots
   of dialog and model (60 Hz steps for double-clicks).
 
 ## Relevant ADRs
 
-ADR-0005, ADR-0008, ADR-0013, ADR-0015, ADR-0017, ADR-0018, ADR-0019, ADR-0020, ADR-0021, ADR-0022, ADR-0023, ADR-0027, ADR-0029, ADR-0033, ADR-0034, ADR-0035
+ADR-0005, ADR-0008, ADR-0013, ADR-0015, ADR-0017, ADR-0018, ADR-0019, ADR-0020, ADR-0021, ADR-0022, ADR-0023, ADR-0027, ADR-0029, ADR-0033, ADR-0034, ADR-0035, ADR-0053

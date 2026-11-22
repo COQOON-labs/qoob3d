@@ -70,6 +70,11 @@ impl Values {
         self.by_id.get(id)
     }
 
+    /// All values, sorted by id.
+    pub fn iter(&self) -> impl Iterator<Item = &Value> {
+        self.by_id.values()
+    }
+
     /// The values with status assumption, sorted by id (the assumption report).
     #[must_use]
     pub fn assumptions(&self) -> Vec<&Value> {

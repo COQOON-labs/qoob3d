@@ -176,6 +176,20 @@ impl Client {
         envelope::<serde_json::Value>(&response).map(drop)
     }
 
+    /// Any request; the JSON envelope whatever the HTTP status (CLI, AG-SV-02).
+    pub fn call(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        timeout: Duration,
+    ) -> anyhow::Result<serde_json::Value> {
+        let body = body.map(serde_json::Value::to_string);
+        let response = self.request(method, path, body.as_ref().map(String::as_bytes), timeout)?;
+        serde_json::from_slice(&response.body)
+            .with_context(|| format!("invalid service answer (HTTP {})", response.code))
+    }
+
     fn request(
         &self,
         method: &str,
