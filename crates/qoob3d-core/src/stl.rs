@@ -152,8 +152,7 @@ fn shaded_faces(
         }
     }
 
-    let mut out =
-        TriMesh { indices: Vec::with_capacity(3 * triangles.len()), ..TriMesh::default() };
+    let mut out = TriMesh::default();
     let mut vertex: Vec<Option<u32>> = vec![None; groups.len()];
     for (&i, &slot) in triangles.iter().flatten().zip(&slot_of) {
         let group = group_of[slot as usize] as usize;
