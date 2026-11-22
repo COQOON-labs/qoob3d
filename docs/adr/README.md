@@ -61,4 +61,5 @@ Accepted ADRs are not rewritten but superseded by a new ADR.
 | [ADR-0049](0049-guard-checks-shell-commands-textually.md) | The guard checks shell commands as text at three anchors; heredoc bodies are data only in exact message forms | accepted | 2026-10-14 | xtask |
 | [ADR-0050](0050-ci-caches-the-occt-install-by-version.md) | CI caches the OCCT install by OCCT version; the opencascade-sys fork skips the OCCT build when the pinned install exists | accepted | 2026-10-15 | qoob3d-kernel |
 | [ADR-0051](0051-hooks-strip-the-macos-quarantine-from-xtask.md) | The git hooks run an un-quarantined xtask directly, pre-push stops under a quarantining client | accepted | 2026-10-15 | – |
+| [ADR-0052](0052-qoob3d-becomes-the-app-of-werft-models-are-code.md) | QOOB3D becomes the app of Werft – models are build123d code, agents come first | accepted | 2026-11-22 | qoob3d-app, qoob3d-core |
 <!-- adr-index:end -->
