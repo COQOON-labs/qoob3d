@@ -1,6 +1,6 @@
 # Requirements: agent-first modelling with Rhai scripts
 
-As of: 2026-11-22 · Status: **R1 specified** · Decision: ADR-0053 · Background: Werft concept
+As of: 2026-11-22 · Status: **R1–R4 and P1 implemented**, R5 specified · Decision: ADR-0053 · Background: Werft concept
 `docs/concept/werft-concept.md`, M0 measurements `docs/concept/m0-report.md`
 
 Goal: an AI agent builds a model completely as code, checks, renders and exports it for FDM
@@ -153,7 +153,59 @@ worker 35 MB; a plate with 1000 holes as one batched cut takes 12.5 s, leaves th
 | AG-PF-05 | Tessellation quality is configurable: `[mesh] deflection_mm` (default 0.01) and `angle_deg` (default 20); both are part of the cache key. |
 | AG-PF-06 | `qoob3d bench <DIR>` builds all parts uncached twice and prints per part: build seconds, peak worker memory (MB), triangles, mesh bytes – as JSON envelope; used to track performance over time. `result.parts` maps name → `{build_s, peak_memory_mb, triangles, mesh_bytes}` (the faster of the two runs); a folder without a project gives exit 1 with `ok: false`. Settings in `qoob3d.toml` are read at service start. |
 
-## 6. Acceptance
+## 6. Hardening and agent feedback (R5)
+
+Sources: critic review of 2026-11-22 (verified findings) and the first run of a fresh agent
+that worked a free-text task ("wall hook for a bicycle helmet") over MCP only: 29 tool
+calls, build and four checks green at the first attempt, no server error – and the review
+gate proved nothing, because the task had no parts and checks bound and the agent could not
+bind them.
+
+### 6.1 Service hardening (critic)
+
+| ID | Requirement |
+| --- | --- |
+| AG-HD-01 | Config: `[limits] time_s` must be finite and at most 86400; `memory_mb`, `recycle_mb` at most 1048576; violations are config errors naming the field. No config value can panic the service or a job thread; a panic in a job thread fails that job with kind `crash` and returns the worker to the pool. |
+| AG-HD-02 | Script size limits in every run: string 16 MiB, array 1000000 elements, map 100000 entries; exceeding one is `ScriptError::Limit`. Declaration discovery in the service additionally runs with `max_operations` 1000000. A part file whose top level tries to allocate a terabyte leaves the service answering `/status` with that file's load error. |
+| AG-HD-03 | The service writes a random token (32 hex characters) into `service.json` and requires it in the header `X-Qoob3d-Token` on every request; requests carrying an `Origin` header, or whose `Host` is not `127.0.0.1:<port>` or `localhost:<port>`, are refused with 403 before routing. The app client, CLI and MCP send the token. `project-app.md` WA-PR gains the same rule. |
+| AG-HD-04 | Clients percent-encode every path segment they build from a name (`/mesh/<part>`, `/task/<id>`, `/job/<id>`); a part named `Crane column` builds, shows in the app client and renders. |
+| AG-HD-05 | The live poller re-reads `service.json` whenever the service does not answer and reconnects to a service restarted on another port; a failed first connection is retried every poll interval (WA-LV-05). |
+| AG-HD-06 | The modules that feed the cache key are the modules the engine actually resolved during the build (recorded like value reads), plus the literal imports found by the scan before the first build. `import` with a non-literal path is refused with a script error at its position. Changing any resolved module rebuilds the part. |
+| AG-HD-07 | Task create and update are serialised in the service (two simultaneous creates get two numbers; no lost log line). |
+| AG-HD-08 | `/save` commits only paths inside the project folder (pathspec on the commit as on the add) and refuses with kind `git` when the Git top level is not the project folder. |
+| AG-HD-09 | The gate reports load errors of part and check files as such instead of "part does not exist". |
+| AG-HD-10 | `/status` lists at most the 20 newest jobs, each with `kind` (`build`, `check`, `run`). |
+| AG-HD-11 | `bbox` is the same in the build result, `/measure` and scripts for the same key (one code path), tight to 1e-6 mm. |
+
+### 6.2 Tasks and gate (agent run)
+
+| ID | Requirement |
+| --- | --- |
+| AG-TK-05 | The agent can bind parts and checks to a task while it is `open` or `in_progress`: `POST /task/<id>` and MCP `task_update` accept `parts` and `checks` (replace the lists; the header lines are rewritten, the rest of the file stays byte-identical). Unknown names are accepted at binding time and fail the gate later. |
+| AG-TK-06 | Gate for kinds `task` and `requirement`: at least one part **and** at least one check bound; kind `idea` needs a note only. The log entry of a hand-over to review lists the bound parts and checks. |
+| AG-TK-07 | A state change is logged as `<old> -> <new>` followed by `: <note>` when a note is given; a note-only update logs the note. |
+
+### 6.3 Guide and reference (agent run)
+
+| ID | Requirement |
+| --- | --- |
+| AG-MC-07 | The guide (now at most 120 lines) states the dimension policy: dimensions the task or a measurement fixes are values with status `measured` or `one_source`; free design dimensions are values with status `assumption` and are listed in the review note; a missing **interface** dimension (something the part must fit to) or contradictory text is a question via `blocked`. It contains one complete minimal project (a values file, a part, a check), the TOML rules for values (ids, optional `unit` key), a table of the render views (direction the camera looks along, which axis is up), and an FDM section (model in print orientation or say so, fillet on top and chamfer on the bed face, overhang rule 45 degrees, holes). |
+| AG-MC-08 | `api_reference` and `qoob3d://script-api` serve an agent edition of the reference: no repository paths, requirement IDs, ADR numbers or Rust notes; every example runs in a fresh project as written (files it imports are created by `qoob3d init` under `lib/examples/` or the example is self-contained). |
+| AG-MC-09 | `render` accepts `views: [..]` (2 to 6 named views) and returns one contact sheet image with a label per view; the JSON result carries `bbox` of the rendered selection and the view table entry of each view. |
+| AG-MC-10 | `task_get` returns, besides the task, `project`: the part and check names with states, so a new task needs no separate status call. |
+
+### 6.4 Script API additions (agent run)
+
+| ID | Requirement |
+| --- | --- |
+| AG-SC-17 | Profiles: `rounded_rect(w, h, r)`, `profile.rotate(deg)` about the profile origin, `offset(profile, d)` (positive outward, round corners; a negative offset that removes everything is a Geometry error). |
+| AG-SC-18 | `countersink(d, head_d, angle_deg, l)`: tool body for a countersunk screw hole (clearance cylinder of length `l` downward from z = 0 plus the cone at the top); `counterbore(d, head_d, head_h, l)`. |
+| AG-SC-19 | Selection by position: `.in_box([x0,y0,z0], [x1,y1,z1])` for edges and faces (whole element inside), `.near([x,y,z], r)`; `faces(s)….area()` (sum) and `.len()`; `edges(s)….length()`. |
+| AG-SC-20 | `expect_eq(actual, expected, text)` records both values (ints, floats exactly, strings, bools). |
+| AG-SC-21 | `s.mass(density_g_cm3)` in grams; `section(s, plane, offset)` returns the cut profile (`"xy"`, `"xz"`, `"yz"` at the offset) with `.area()`. |
+| AG-SC-22 | Print analysis (first step of concept milestone 4): `overhangs(s, max_angle_deg)` returns the total area in mm^2 of faces whose downward normal is steeper than the limit, excluding faces on the bed plane z = min; `bed_area(s)` returns the area in contact with z = min. Both are exact on planar faces and within 1 % on curved ones. |
+
+## 7. Acceptance
 
 - R1: the three M0 probe parts written as scripts reproduce the analytic volumes from
   `werft/m0/teile.py` to < 1e-6 relative; build times as AG-SC-15.
@@ -163,3 +215,5 @@ worker 35 MB; a plate with 1000 holes as one batched cut takes 12.5 s, leaves th
 - R4: a fresh agent, given only the MCP server and a task file "box with lid and pin
   connection, 0.2 mm clearance", builds both parts with a check and hands the task over in
   state `review`; the human sets `done`.
+- R5: the fresh-agent run is repeated with a new free-text task; the task ends in `review`
+  with parts and checks bound, and the agent's friction list has no item of sections 6.2–6.3.

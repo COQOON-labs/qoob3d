@@ -1,6 +1,6 @@
 # Requirements: the app shows a script project live (W1)
 
-As of: 2026-11-22 · Status: **W1 specified** · Decision: ADR-0053
+As of: 2026-11-22 · Status: **W1 implemented** · Decision: ADR-0053
 
 Goal: QOOB3D opens a project folder whose parts are Rhai scripts (ADR-0053,
 `docs/requirements/agent.md`) and shows the parts live while an AI agent builds them.
