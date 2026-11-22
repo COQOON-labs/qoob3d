@@ -12,6 +12,7 @@ pub mod profile;
 pub mod project;
 pub mod qmesh;
 pub mod stl;
+pub mod tasks;
 
 pub use mesh::{Aabb, MeshReport, Polylines, RayHit, ShapeMesh, TriMesh};
 pub use printer::{BedGeometry, PRINTERS, PrinterProfile};

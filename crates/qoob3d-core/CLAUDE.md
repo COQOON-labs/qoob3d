@@ -42,6 +42,9 @@ Document model and shared pure data types. Used by all other crates.
   feature edges > 30° plus open edges.
 - `src/project/`: script project folder (AG-PJ-01..04, ADR-0053): `qoob3d.toml`, `values/*.toml`
   with mandatory source/status, imports (never outside the project), build graph, cache key.
+- `src/tasks/`: task inbox (AG-TK-01..04, ADR-0054): `tasks/NNNN-slug.md` with TOML header, body
+  and `## Log`; `create`/`update` (byte-preserving, atomic), role transitions, review gate
+  (`gate_problems`). `text.rs` holds the file layout.
 - `tests/fixtures/`: `format_v1.qbd`, `format_v2.qbd` (all feature and curve kinds).
 - `src/printer/mod.rs`: `PrinterProfile`, `BedGeometry` (ADR-0021).
 - `src/printer/data.rs`: **generated** by `cargo xtask printers` from OrcaSlicer profiles –
