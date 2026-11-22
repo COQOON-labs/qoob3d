@@ -2,7 +2,7 @@
 
 As of: 2026-11-22
 
-A QOOB3D model is a [Rhai](https://rhai.rs) script. The script is glue: every geometric
+A QOOB3D model is a Rhai script (an embedded, sandboxed script language similar to Rust and JavaScript). The script is glue: every geometric
 operation below is one call into OpenCascade. Every ```` ```rhai ```` example in this file
 runs as written in a new project; the two files that examples read are in `lib/examples/`,
 where `qoob3d init` puts them.
