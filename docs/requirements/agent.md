@@ -79,7 +79,15 @@ layer where OCCT has it.
   `recycled` as AG-PF-03). A part or check file that does not load is one entry of
   `load_errors` and never hides the parts of other files (ADR-0056); `error` repeats the
   first one, or is the load error of the whole project (configuration, values, dependency
-  graph) with an empty part list.
+  graph) with an empty part list. `/status` never waits for discovery: `"discovering":
+  [files]` lists the part and check files whose declarations are not known yet (their earlier
+  parts are `outdated`, a new file has no parts yet).
+- `POST /discover {"files": [..]|null, "wait_s": f64}` (ADR-0056) waits up to `wait_s` for
+  the discovery of those part and check files (`null` = all) → `{"files": [{file, state:
+  "declared"|"failed"|"discovering", parts?: [{name, depends}], checks?: [..], error?}],
+  "discovering": [..]}`. The MCP `file_write` of a part, check or `lib/` file uses it and
+  answers `declared: {parts, checks}` or `load_error` (a `lib/` file: `load_errors`);
+  `qoob3d status` waits up to 10 s for it before asking `/status`.
 - `POST /build {"parts": [..]|null, "wait_s": f64}` → if finished within `wait_s`:
   `result` = build result; else `{"job": id, "state": "running"}`. Build result:
   `{"parts": {name: {state: "built"|"cached"|"failed", volume, bbox, valid, duration_s,

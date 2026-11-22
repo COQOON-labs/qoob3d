@@ -49,9 +49,12 @@ kernel connection come together.
   limits, replacement, recycling above `[workers] recycle_mb` (AG-PF-03); `discovery.rs`
   declaration discovery (ADR-0056): every changed part or check file goes to a worker
   (`Probe::Declare`) on a thread of its own, answers and load errors cached by file and
-  literal-import bytes; `/status` waits at most `STATUS_WAIT` (50 ms) and then shows the last
-  known declarations (parts of a file under rediscovery `outdated`, of a broken file `failed`),
-  builds, checks and the gate wait for all files; `snapshot.rs` the project from those
+  literal-import bytes; `/status` and `/mesh` never wait for discovery and show the last
+  known declarations (parts of a file under rediscovery `outdated`, of a broken file `failed`,
+  a never discovered file no parts yet, `discovering` lists files not known yet), builds,
+  checks and the gate wait for all files, `POST /discover` waits for chosen files (MCP
+  `file_write` answers `declared`/`load_error` with it, `qoob3d status` settles up to 10 s);
+  the cache lock is never held while a worker runs; `snapshot.rs` the project from those
   declarations (per-file `load_errors`, a broken file never hides the others), keys, states,
   cache eviction (`evict`, AG-PF-04);
   `bench.rs` `qoob3d bench <DIR>` (AG-PF-06): a fresh worker per build, entries in

@@ -36,7 +36,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use self::checks::CheckRecord;
-use self::discovery::{Discovery, STATUS_WAIT};
+use self::discovery::{Discovery, discovering};
 use self::http::Reply;
 use self::jobs::Job;
 use self::pool::Pool;
@@ -260,6 +260,7 @@ impl Service {
         let answer = match (request.method.as_str(), path.as_slice()) {
             ("GET", ["status"]) => Ok(self.status()),
             ("POST", ["build"]) => self.build(&request.body),
+            ("POST", ["discover"]) => self.discover_request(&request.body),
             ("GET", ["job", id]) => self.job(id),
             ("POST", ["job", id, "cancel"]) => job_id(id).and_then(|n| {
                 self.cancel(n).ok_or_else(|| unknown_job(n))?;
@@ -291,14 +292,21 @@ impl Service {
         envelope(answer, start)
     }
 
-    /// `GET /status` (WA-PR-01, §3.1). It waits at most [`STATUS_WAIT`]
-    /// for discovery (ADR-0056): parts of a file under rediscovery are
-    /// `outdated`, those of a file that no longer loads `failed`. Every file
-    /// that does not load is in `load_errors`, the first one also in `error`;
-    /// a load error of the whole project gives an empty part list.
+    /// `GET /status` (WA-PR-01, §3.1). It never waits for discovery
+    /// (ADR-0056) and answers from the last known declarations: parts of a
+    /// file under rediscovery are `outdated`, those of a file that no longer
+    /// loads `failed`; `discovering` lists the files not known yet. Every
+    /// file that does not load is in `load_errors`, the first one also in
+    /// `error`; a load error of the whole project gives an empty part list.
     fn status(&self) -> Value {
         let (count, busy) = self.pool.counts();
-        let (part_files, check_files) = self.declarations(Some(STATUS_WAIT));
+        let (part_files, check_files) = self.declarations(Some(Duration::ZERO));
+        let pending: Vec<String> = [&part_files, &check_files]
+            .into_iter()
+            .flatten()
+            .flat_map(|files| discovering(files))
+            .map(|f| f.display().to_string())
+            .collect();
         let snapshot = part_files.and_then(|files| Snapshot::load(&self.dir, files));
         let declared = check_files.and_then(checks::load);
         let mut st = self.lock();
@@ -344,6 +352,7 @@ impl Service {
             result["error"] = json!(PartError::new(ErrorKind::Load, &first.message));
         }
         result["load_errors"] = json!(load_errors);
+        result["discovering"] = json!(pending);
         result
     }
 
@@ -377,7 +386,7 @@ impl Service {
 
     /// `GET /mesh/<part>` (WA-PR-02): the qmesh of the last successful build.
     fn mesh(&self, part: &str) -> Result<Reply, Failure> {
-        let snapshot = self.snapshot(Some(STATUS_WAIT)).map_err(Failure::not_found)?;
+        let snapshot = self.snapshot(Some(Duration::ZERO)).map_err(Failure::not_found)?;
         let key = {
             let mut st = self.lock();
             let views = views(&self.dir, &snapshot, &mut st.records);

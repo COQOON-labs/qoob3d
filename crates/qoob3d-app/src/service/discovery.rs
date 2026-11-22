@@ -5,9 +5,12 @@
 //! of its own. The answers, load errors included, are cached by those bytes,
 //! so a file that hits a limit is not evaluated on every poll.
 //!
-//! Callers say how long they wait: `/status` at most [`STATUS_WAIT`] and
-//! then answers from the last known declarations; builds, checks and the
-//! review gate wait until every file is known.
+//! Callers say how long they wait: `/status` and `/mesh` never wait and
+//! answer from the last known declarations (AG-SV-01: 100 ms); builds,
+//! checks and the review gate wait until every file is known; `POST
+//! /discover` waits for chosen files (the MCP `file_write` reports their
+//! declarations at once). The cache
+//! lock is never held while a worker runs or a thread starts.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -16,15 +19,13 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use qoob3d_core::project::{self, Config, Limits, Mesh};
+use serde::Deserialize;
+use serde_json::{Value, json};
 
-use super::Service;
 use super::jobs::caught;
 use super::snapshot::{Declared, FileDecl, Snapshot, load_error_of};
+use super::{Failure, Service, body};
 use crate::worker::{Answer, Declaration, ErrorKind, PartError, Probe, Request};
-
-/// How long `/status` waits for running discoveries: inside its 100 ms
-/// budget (AG-SV-01).
-pub(crate) const STATUS_WAIT: Duration = Duration::from_millis(50);
 
 /// Declarations by file, valid while the fingerprint is unchanged.
 #[derive(Default)]
@@ -94,7 +95,55 @@ fn declared(file: &Path, answer: Result<Answer, PartError>) -> Option<Declared> 
     }
 }
 
+/// `POST /discover`.
+#[derive(Deserialize)]
+struct DiscoverBody {
+    /// Part or check files relative to the project; `None` = all.
+    #[serde(default)]
+    files: Option<Vec<PathBuf>>,
+    #[serde(default)]
+    wait_s: f64,
+}
+
+/// The files still being discovered, for `/status` and `/discover`.
+pub(crate) fn discovering(files: &[FileDecl]) -> Vec<&Path> {
+    files.iter().filter(|f| f.declared.is_none()).map(|f| f.file.as_path()).collect()
+}
+
+/// One file of the `/discover` answer: `declared`, `failed` (with
+/// `error`) or `discovering`.
+fn file_json(f: &FileDecl) -> Value {
+    match &f.declared {
+        Some(Ok(d)) => json!({"file": f.file, "state": "declared", "parts": d.parts,
+            "checks": d.checks}),
+        Some(Err(e)) => json!({"file": f.file, "state": "failed", "error": e}),
+        None => json!({"file": f.file, "state": "discovering"}),
+    }
+}
+
 impl Service {
+    /// `POST /discover {"files": [..]|null, "wait_s": f64}` (ADR-0056):
+    /// waits up to `wait_s` for the discovery of those part and check files
+    /// (others are ignored) and answers `{"files": [{file, state, parts?,
+    /// checks?, error?}], "discovering": [..]}`.
+    pub(super) fn discover_request(&self, bytes: &[u8]) -> super::Answer {
+        let request: DiscoverBody = body(bytes)?;
+        let wait = Duration::try_from_secs_f64(request.wait_s).unwrap_or(Duration::ZERO);
+        let listed = |files: Result<Vec<PathBuf>, project::ProjectError>| {
+            files.map_err(|e| Failure::from(PartError::new(ErrorKind::Load, e)))
+        };
+        let mut files = listed(project::part_files(&self.dir))?;
+        files.extend(listed(project::check_files(&self.dir))?);
+        if let Some(wanted) = &request.files {
+            files.retain(|f| wanted.contains(f));
+        }
+        let known = self.discover(files, Some(wait));
+        Ok(json!({
+            "files": known.iter().map(file_json).collect::<Vec<_>>(),
+            "discovering": discovering(&known),
+        }))
+    }
+
     /// The part files and the check files of the project with what
     /// discovery knows of them, after waiting up to `wait` (`None`: until
     /// every file is known). An error lists a folder that cannot be read.
@@ -129,15 +178,23 @@ impl Service {
             files.into_iter().map(|f| FileDecl::read(&self.dir, f)).collect();
         let deadline = wait.map(|w| Instant::now() + w);
         let mut known = self.discovery.lock();
+        let mut new = Vec::new();
         for f in decls.iter().filter(|f| f.declared.is_none()) {
             if known.get(&f.file).is_some_and(|e| e.fingerprint == f.fingerprint) {
                 continue;
             }
             let last = known.remove(&f.file).and_then(|e| e.last);
-            let declared = self.start(f).err().map(Err);
-            let entry = Entry { fingerprint: f.fingerprint.clone(), declared, last };
+            let entry = Entry { fingerprint: f.fingerprint.clone(), declared: None, last };
             known.insert(f.file.clone(), entry);
+            new.push(f);
         }
+        drop(known);
+        for f in new {
+            if let Err(e) = self.start(f) {
+                self.discovery.store(&f.file, &f.fingerprint, Some(Err(e)));
+            }
+        }
+        let mut known = self.discovery.lock();
         loop {
             let running = decls.iter().any(|f| {
                 f.declared.is_none()

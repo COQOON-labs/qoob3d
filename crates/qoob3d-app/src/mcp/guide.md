@@ -10,8 +10,7 @@ service builds them. Units are mm, angles degrees, +Z is up, the print bed is z 
 - `lib/*.rhai` – shared functions, used with `import "lib/name" as name;`.
 - `values/*.toml` – target values, read in scripts with `value("id")`.
 - `checks/*.rhai` – checks: `check("name", || { expect_near(…); })`.
-- `tasks/NNNN-slug.md` – the task inbox of the human (read with `task_get`).
-- `out/` – exports and renders; `.qoob3d/` – cache. Both are not yours to edit.
+- `tasks/NNNN-slug.md` – the human's tasks; `out/`, `.qoob3d/` (cache) are not yours to edit.
 
 ## The loop
 
@@ -19,7 +18,8 @@ service builds them. Units are mm, angles degrees, +Z is up, the print bed is z 
    the parts and checks that exist with their states.
 2. `task_update {id, state: "in_progress"}`.
 3. `api_reference {search}` – read the script API before writing; do not guess functions.
-4. `file_write` the values, the part and a check that measures what the task asks for.
+4. `file_write` the values, the part and a check that measures what the task asks for;
+   for part, check and lib files it reports declarations or load errors immediately.
 5. `build` – fix every error it reports, then build again.
 6. `check` – every expectation lists actual and expected; fix the part, not the check.
 7. `render {views: ["iso", "front", "top"]}` and look at the image; `measure` and

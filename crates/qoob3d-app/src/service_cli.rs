@@ -13,6 +13,8 @@ use crate::live::{Client, ProjectDir, START_TIMEOUT, segment, service_command_fr
 
 /// Requests that do not wait for builds.
 const QUICK: Duration = Duration::from_secs(30);
+/// Seconds `qoob3d status` waits for the discovery of changed files.
+const SETTLE_S: f64 = 10.0;
 /// Margin over `--wait` for the answer of a build request.
 const WAIT_MARGIN: Duration = Duration::from_secs(30);
 /// An export builds first; its answer may take as long as the builds.
@@ -60,7 +62,13 @@ fn request(command: &Command) -> anyhow::Result<Value> {
     let project = ProjectDir::open(&dir)?;
     let client = Client::connect(&project, &service_command_from_env(), START_TIMEOUT)?;
     match command {
-        Command::Status => client.call("GET", "/status", None, QUICK),
+        Command::Status => {
+            // A settled state for humans: at most `SETTLE_S` for discovery
+            // (ADR-0056), then `/status` whatever it knows.
+            let body = json!({"files": null, "wait_s": SETTLE_S});
+            client.call("POST", "/discover", Some(&body), QUICK)?;
+            client.call("GET", "/status", None, QUICK)
+        }
         Command::Values => client.call("GET", "/values", None, QUICK),
         Command::Build { parts, wait } => {
             let parts = if parts.is_empty() { Value::Null } else { json!(parts) };

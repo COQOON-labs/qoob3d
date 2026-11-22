@@ -138,7 +138,9 @@ const TOOLS: [Tool; 19] = [
     (
         "file_write",
         "Create or replace a project file (at most 1 MiB): qoob3d.toml or a .rhai, .toml, .md \
-         file under parts/, lib/, values/, checks/. Task files are not writable.",
+         file under parts/, lib/, values/, checks/. Task files are not writable. A part or \
+         check file answers with what it declares (declared: parts, checks) or its load_error, \
+         a lib/ file with the load_errors of all part and check files.",
         &[
             ("path", Kind::Text, true, "Path relative to the project, e.g. parts/box.rhai."),
             ("content", Kind::Text, true, "The whole new content of the file."),
@@ -336,7 +338,7 @@ impl Server {
             "file_list" => local(files::list(dir, args["dir"].as_str())),
             "file_read" => local(files::read(dir, text("path"))),
             "file_write" => match args["content"].as_str() {
-                Some(content) => local(files::write(dir, text("path"), content)),
+                Some(content) => self.file_write(text("path"), content),
                 None => Err(bad_request("file_write: content must be a string".to_owned())),
             },
             "build" => self.waiting("/build", pick(args, &["parts", "wait_s"])),
@@ -387,6 +389,55 @@ impl Server {
         body["wait_s"] = json!(wait_s);
         let wait = Duration::try_from_secs_f64(wait_s).unwrap_or(Duration::ZERO);
         self.service("POST", path, Some(body), wait + WAIT_MARGIN)
+    }
+
+    /// `file_write`; a part or check file comes back with what it declares
+    /// (`declared: {parts, checks}`) or its `load_error`, a `lib/` file with
+    /// the `load_errors` of all files, once the service has discovered them
+    /// (ADR-0056). So `/status` shows the new parts afterwards.
+    fn file_write(&self, path: &str, content: &str) -> Result<Reply, Refusal> {
+        let mut result = files::write(self.project.dir(), path, content).map_err(bad_request)?;
+        let folder = path.split('/').next().unwrap_or_default();
+        if !path.ends_with(".rhai") || !["parts", "checks", "lib"].contains(&folder) {
+            return Ok(Reply::Result(result));
+        }
+        let files = if folder == "lib" { Value::Null } else { json!([path]) };
+        let body = json!({"files": files, "wait_s": DEFAULT_WAIT_S});
+        let wait = Duration::try_from_secs_f64(DEFAULT_WAIT_S).unwrap_or(Duration::ZERO);
+        // The file is written either way; a service that cannot say what it
+        // declares is reported next to it.
+        let answer = match self.service("POST", "/discover", Some(body), wait + WAIT_MARGIN) {
+            Ok(Reply::Envelope(envelope)) if envelope["ok"] == json!(true) => {
+                envelope["result"].clone()
+            }
+            Ok(Reply::Envelope(envelope)) => {
+                result["discovery_error"] = envelope["error"].clone();
+                return Ok(Reply::Result(result));
+            }
+            Err(Refusal(kind, message)) => {
+                result["discovery_error"] = json!({"kind": kind, "message": message});
+                return Ok(Reply::Result(result));
+            }
+            Ok(_) => return Ok(Reply::Result(result)),
+        };
+        let known = answer["files"].as_array().cloned().unwrap_or_default();
+        if folder == "lib" {
+            let errors: Vec<&Value> =
+                known.iter().filter(|f| f["state"] == "failed").map(|f| &f["error"]).collect();
+            result["load_errors"] = json!(errors);
+        } else if let Some(f) = known.first() {
+            match f["state"].as_str() {
+                Some("declared") => {
+                    result["declared"] = json!({"parts": f["parts"], "checks": f["checks"]});
+                }
+                Some("failed") => result["load_error"] = f["error"].clone(),
+                _ => {}
+            }
+        }
+        if !answer["discovering"].as_array().is_none_or(Vec::is_empty) {
+            result["discovering"] = answer["discovering"].clone();
+        }
+        Ok(Reply::Result(result))
     }
 
     /// `GET /task/<id>` plus `project`: names and states of the parts and
