@@ -39,7 +39,7 @@ OpenCascade connection. Runs entirely in its own worker thread.
   `in_box`/`near`/`length`/`area`, fillet, chamfer, shell; `project.rs` `part()`/`value()` with
   `PartMode` (all, declare without the CAD API, one part from dependency BREPs); `check.rs`
   `check()`/`expect…` (incl. `expect_eq`) and `part(name)`; `limits.rs` the size limits of
-  declaration discovery (AG-HD-02: staged runs that measure the variables, then a search for
+  declaration discovery (AG-HD-02: runs in doubling stages that measure the variables, then a search for
   the statement that crossed a limit) (AG-CK-01/02, `RunOptions::check`, results in
   `RunOutput::checks`; closures run only in `PartMode::All`); `measure.rs` area, center,
   distance, common volume for callers in Rust; BREP
@@ -88,10 +88,12 @@ OpenCascade connection. Runs entirely in its own worker thread.
   and combines the regions with `punch` or a planar BOP. Only worker isolation protects
   against untried outlines.
 - Rhai's own size limits miss `a += a` on arrays and assignment into containers (`m[k] = v`).
-  Declare mode therefore turns fast operators off and measures the variables in stages of
-  4096 operations; scripts with long top levels get quadratically slower there (600 000
-  operations: 1.6 s instead of 40 ms). `Engine::on_var` would avoid that but is
-  `#[deprecated]` in Rhai and would exceed the lint-suppression cap (`harness/ratchet.txt`).
+  Declare mode therefore turns fast operators off and measures the variables after stages
+  that double (4096, 8192, … operations, each run from the start because Rhai cannot resume):
+  the total cost stays below twice the last stage (ADR-0056). Memory grown between two
+  measurements is not seen there; discovery runs in a worker whose memory limit stops it.
+  `Engine::on_var` would avoid the reruns but is `#[deprecated]` in Rhai and would exceed the
+  lint-suppression cap (`harness/ratchet.txt`).
 - The `import` literal check is textual (Rhai's AST needs the `internals` feature): only
   double-quoted literals without escapes pass. `RunOutput::modules_read` lists the modules
   the resolver actually loaded; they feed the cache key.

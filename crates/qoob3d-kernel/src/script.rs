@@ -241,10 +241,10 @@ pub fn run(source: &str, options: &RunOptions) -> Result<RunOutput, ScriptError>
         n => n.min(limits::MAX_OPERATIONS),
     };
     // In stages, see `limits`: after each one the variables are measured.
-    let mut budget = 0;
+    let mut budget: u64 = 0;
     loop {
         let clean = budget.max(1);
-        budget = (budget + limits::STAGE_OPERATIONS).min(operations);
+        budget = budget.saturating_mul(2).max(limits::STAGE_OPERATIONS).min(operations);
         let (outcome, output, oversize) = evaluate(source, options, budget);
         if let Some((what, started)) = oversize {
             let over = budget.min(started + 1).max(clean + 1);

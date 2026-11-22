@@ -13,7 +13,7 @@ use qoob3d_core::qmesh;
 use serde_json::{Value, json};
 
 use super::pool::Pool;
-use super::snapshot::{Declarations, Snapshot};
+use super::snapshot::{FileDecl, Snapshot};
 use super::{Answer, Failure};
 use crate::live::ProjectDir;
 use crate::worker::{ErrorKind, PartError, Request};
@@ -26,8 +26,22 @@ const RUNS: usize = 2;
 pub(super) fn run(dir: &Path) -> Answer {
     let project = ProjectDir::open(dir).map_err(|e| Failure::not_found(format!("{e:#}")))?;
     let dir = project.dir();
-    let snapshot = Snapshot::load(dir, &Declarations::default())
-        .map_err(|m| PartError::new(ErrorKind::Load, m))?;
+    // The bench is no service: it discovers the parts in its own process.
+    let files = qoob3d_core::project::part_files(dir)
+        .map_err(|e| PartError::new(ErrorKind::Load, e))?
+        .into_iter()
+        .map(|file| {
+            let mut f = FileDecl::read(dir, file);
+            if f.declared.is_none() {
+                f.declared = Some(crate::worker::declaration_of(dir, &f.file));
+            }
+            f
+        })
+        .collect();
+    let snapshot = Snapshot::load(dir, files).map_err(|m| PartError::new(ErrorKind::Load, m))?;
+    if let Some(e) = snapshot.load_errors.first() {
+        return Err(e.clone().into());
+    }
     let exe = std::env::current_exe().map_err(|e| Failure::new(500, ErrorKind::Io, e))?;
     let cache = dir.join(".qoob3d").join(format!("bench-{}", std::process::id()));
     let result = measure(dir, &snapshot, &exe, &cache);

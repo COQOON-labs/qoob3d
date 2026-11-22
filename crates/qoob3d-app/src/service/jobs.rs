@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::Service;
-use super::snapshot::{PartSource, Snapshot, cache_dir, cached, evict, record};
+use super::snapshot::{Discovered, PartSource, Snapshot, cache_dir, cached, evict, record};
 use crate::worker::{Answer, ErrorKind, PartError, Request};
 
 /// Finished jobs kept for `/job/<id>`.
@@ -142,7 +142,7 @@ impl Outcome {
 
 /// Runs `work`; a panic in it becomes an error of kind `crash` instead of
 /// taking the thread (and with it the job queue) down (AG-HD-01).
-fn caught<T>(work: impl FnOnce() -> T) -> Result<T, PartError> {
+pub(super) fn caught<T>(work: impl FnOnce() -> T) -> Result<T, PartError> {
     std::panic::catch_unwind(AssertUnwindSafe(work)).map_err(|panic| {
         let text = panic
             .downcast_ref::<&str>()
@@ -159,8 +159,7 @@ impl Service {
     /// # Errors
     /// The project does not load, or a part name is unknown.
     pub(crate) fn submit(&self, parts: Option<Vec<String>>) -> Result<u64, PartError> {
-        let snapshot = Snapshot::load(&self.dir, &self.declarations)
-            .map_err(|m| PartError::new(ErrorKind::Load, m))?;
+        let snapshot = self.snapshot(None).map_err(|m| PartError::new(ErrorKind::Load, m))?;
         let total = snapshot
             .closure(parts.as_deref())
             .map_err(|m| PartError::new(ErrorKind::BadRequest, m))?
@@ -293,7 +292,9 @@ impl Service {
     }
 
     /// Loads the project and builds `requested` (`None` = all) with their
-    /// dependencies; the snapshot that was built.
+    /// dependencies; the snapshot that was built. Waits for the discovery of
+    /// every part file (ADR-0056). A build of all parts builds what loads and
+    /// then fails with the load errors of the files that do not.
     fn build_job(
         &self,
         id: u64,
@@ -301,13 +302,21 @@ impl Service {
         cancel: &AtomicBool,
     ) -> Result<Snapshot, PartError> {
         let load = |m| PartError::new(ErrorKind::Load, m);
-        let snapshot = Snapshot::load(&self.dir, &self.declarations).map_err(load)?;
+        let snapshot = self.snapshot(None).map_err(load)?;
         let names = snapshot.closure(requested).map_err(load)?;
         if let Some(job) = self.lock().jobs.get_mut(&id) {
             job.total = names.len();
         }
         self.build_parts(id, &snapshot, &names, cancel);
-        Ok(snapshot)
+        match snapshot.load_errors.as_slice() {
+            [] => Ok(snapshot),
+            _ if requested.is_some() => Ok(snapshot),
+            [one] => Err(one.clone()),
+            many => {
+                let messages: Vec<&str> = many.iter().map(|e| e.message.as_str()).collect();
+                Err(load(messages.join("; ")))
+            }
+        }
     }
 
     /// Builds `names` (build order) of `snapshot`, in parallel where the
@@ -334,6 +343,11 @@ impl Service {
                     let failed_dependency = part.depends.iter().find(|d| !done[d.as_str()].1);
                     let outcome = if cancel.load(Ordering::SeqCst) {
                         Outcome::Cancelled
+                    } else if let Discovered::Failed(e) = &part.discovered {
+                        Outcome::Failed(e.clone())
+                    } else if matches!(part.discovered, Discovered::Running) {
+                        let message = format!("{}: discovery did not finish", part.file.display());
+                        Outcome::Failed(PartError::new(ErrorKind::Load, message))
                     } else if let Some(d) = failed_dependency {
                         let message = format!("dependency {d:?} did not build");
                         Outcome::Failed(PartError::new(ErrorKind::Dependency, message))

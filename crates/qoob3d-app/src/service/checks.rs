@@ -1,5 +1,5 @@
 //! Checks of the service (AG-CK-01..03, ADR-0054): the checks declared in
-//! `checks/*.rhai` (found like parts, without OCCT), their last results and
+//! `checks/*.rhai` (discovered like parts, in a worker), their last results and
 //! `POST /check`. Every check runs as its own worker request under the
 //! project limits, so an endless check costs only its own result.
 //!
@@ -7,17 +7,15 @@
 //! or a part the check asked for was built with another key since.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, PoisonError};
 
-use qoob3d_core::project::{self, KeyInputs};
 use qoob3d_core::tasks::GateInput;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::jobs::Work;
-use super::snapshot::{Record, Snapshot, declarations, views};
+use super::snapshot::{FileDecl, Record, Snapshot, views};
 use super::{Answer, Failure, Service, State, body};
 use crate::worker::{ErrorKind, PartError, Probe};
 
@@ -29,13 +27,23 @@ pub(crate) struct CheckSource {
     fingerprint: String,
 }
 
-/// Declared check names by file (or why the file does not load), valid
-/// while the fingerprint is unchanged.
-#[derive(Default)]
-pub(crate) struct CheckFiles(Mutex<HashMap<PathBuf, (String, Declared)>>);
+/// The checks of the project and the check files that do not load.
+pub(crate) struct CheckSet {
+    pub(crate) sources: Vec<CheckSource>,
+    pub(crate) load_errors: Vec<PartError>,
+}
 
-/// The check names a file declares, or why it does not load.
-type Declared = Result<Vec<String>, String>;
+impl CheckSet {
+    /// The checks, or the load errors as one error (AG-CK-03 runs no check
+    /// of a project whose check files do not all load).
+    fn complete(self) -> Result<Vec<CheckSource>, PartError> {
+        if self.load_errors.is_empty() {
+            return Ok(self.sources);
+        }
+        let messages: Vec<&str> = self.load_errors.iter().map(|e| e.message.as_str()).collect();
+        Err(PartError::new(ErrorKind::Load, messages.join("; ")))
+    }
+}
 
 /// The last run of a check.
 pub(crate) struct CheckRecord {
@@ -45,58 +53,46 @@ pub(crate) struct CheckRecord {
     parts: BTreeMap<String, Option<String>>,
 }
 
-/// All checks of the project in `dir`, by file and call order.
+/// All checks of the check files `files` (discovered, ADR-0056), by file
+/// and call order. A file under rediscovery contributes its last checks.
 ///
 /// # Errors
-/// A check file cannot be read or evaluated, or a name is declared twice;
-/// the message names files and the check.
-pub(crate) fn load(dir: &Path, cache: &CheckFiles) -> Result<Vec<CheckSource>, String> {
-    let read =
-        |file: &Path| std::fs::read(dir.join(file)).map_err(|e| format!("{}: {e}", file.display()));
+/// A check name is declared twice; the message names files and the check.
+pub(crate) fn load(files: Vec<FileDecl>) -> Result<CheckSet, String> {
     let mut sources: Vec<CheckSource> = Vec::new();
-    for file in project::check_files(dir).map_err(|e| e.to_string())? {
-        let source = read(&file)?;
-        let modules = project::resolve_imports(dir, &file)
-            .map_err(|e| e.to_string())?
-            .iter()
-            .map(|m| read(m))
-            .collect::<Result<Vec<_>, _>>()?;
-        let text =
-            String::from_utf8(source.clone()).map_err(|e| format!("{}: {e}", file.display()))?;
-        let fingerprint = project::cache_key(&KeyInputs {
-            program_version: String::new(),
-            part_file: source,
-            modules,
-            values_read: Vec::new(),
-            dependency_keys: Vec::new(),
-        });
-        let mut cache = cache.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let names = match cache.get(&file) {
-            Some((f, names)) if *f == fingerprint => names.clone(),
-            _ => {
-                let names = declarations(dir, &file, &text)
-                    .map(|o| o.checks.into_iter().map(|c| c.name).collect::<Vec<_>>());
-                cache.insert(file.clone(), (fingerprint.clone(), names.clone()));
-                names
+    let mut load_errors = Vec::new();
+    for f in files {
+        let names = match f.declared {
+            Some(Ok(declared)) => declared.checks,
+            Some(Err(error)) => {
+                load_errors.push(error);
+                continue;
             }
+            None => f.last.map(|d| d.checks).unwrap_or_default(),
         };
-        drop(cache);
-        for name in names? {
+        for name in names {
             if let Some(first) = sources.iter().find(|s| s.name == name) {
                 return Err(format!(
                     "check {name:?} is declared in {} and in {}",
                     first.file.display(),
-                    file.display()
+                    f.file.display()
                 ));
             }
             sources.push(CheckSource {
                 name,
-                file: file.clone(),
-                fingerprint: fingerprint.clone(),
+                file: f.file.clone(),
+                fingerprint: f.fingerprint.clone(),
             });
         }
     }
-    Ok(sources)
+    Ok(CheckSet { sources, load_errors })
+}
+
+impl Service {
+    /// The checks once every check file is discovered.
+    fn check_set(&self) -> Result<CheckSet, PartError> {
+        self.declarations(None).1.and_then(load).map_err(|m| PartError::new(ErrorKind::Load, m))
+    }
 }
 
 /// Key of the last successful build of `part`.
@@ -137,8 +133,7 @@ impl Service {
     /// `POST /check` (AG-CK-03).
     pub(super) fn check(&self, bytes: &[u8]) -> Answer {
         let request: CheckBody = body(bytes)?;
-        let sources =
-            load(&self.dir, &self.check_files).map_err(|m| PartError::new(ErrorKind::Load, m))?;
+        let sources = self.check_set().and_then(CheckSet::complete)?;
         let unknown =
             request.names.iter().flatten().find(|name| !sources.iter().any(|s| s.name == **name));
         if let Some(name) = unknown {
@@ -159,8 +154,7 @@ impl Service {
         names: Option<&[String]>,
         cancel: &AtomicBool,
     ) -> Result<Value, PartError> {
-        let sources =
-            load(&self.dir, &self.check_files).map_err(|m| PartError::new(ErrorKind::Load, m))?;
+        let sources = self.check_set().and_then(CheckSet::complete)?;
         let built = self.built(snapshot);
         let mut checks = Vec::new();
         for source in sources.iter().filter(|s| names.is_none_or(|n| n.contains(&s.name))) {
@@ -212,14 +206,15 @@ impl Service {
     /// and the result of every check that is neither stale nor missing;
     /// and the load errors of the part and check files (AG-HD-09).
     pub(crate) fn gate_input(&self) -> (GateInput, Vec<String>) {
-        let snapshot = Snapshot::load(&self.dir, &self.declarations);
-        let sources = load(&self.dir, &self.check_files);
-        let load_errors: Vec<String> = [snapshot.as_ref().err(), sources.as_ref().err()]
-            .into_iter()
-            .flatten()
-            .cloned()
-            .collect();
-        let sources = sources.unwrap_or_default();
+        let (part_files, check_files) = self.declarations(None);
+        let snapshot = part_files.and_then(|files| Snapshot::load(&self.dir, files));
+        let set = check_files.and_then(load);
+        let mut load_errors: Vec<String> =
+            [snapshot.as_ref().err(), set.as_ref().err()].into_iter().flatten().cloned().collect();
+        let file_errors = snapshot.iter().flat_map(|s| &s.load_errors);
+        let file_errors = file_errors.chain(set.iter().flat_map(|c| &c.load_errors));
+        load_errors.extend(file_errors.map(|e| e.message.clone()));
+        let sources = set.map(|c| c.sources).unwrap_or_default();
         let mut st = self.lock();
         let parts = snapshot
             .map(|s| views(&self.dir, &s, &mut st.records))

@@ -46,13 +46,20 @@ kernel connection come together.
   (`service.json`, header `X-Qoob3d-Token`), a local `Host` and no `Origin`, else 403 before
   routing (`Service::allowed`, AG-HD-03, ADR-0055); `http.rs` minimal server side HTTP; `jobs.rs` job
   queue and parallel part scheduling, cache hits; `pool.rs` warm workers, time/memory/crash
-  limits, replacement, recycling above `[workers] recycle_mb` (AG-PF-03); `snapshot.rs` part
-  discovery (`PartMode::Declare`, no OCCT), keys, states, cache eviction (`evict`, AG-PF-04);
+  limits, replacement, recycling above `[workers] recycle_mb` (AG-PF-03); `discovery.rs`
+  declaration discovery (ADR-0056): every changed part or check file goes to a worker
+  (`Probe::Declare`) on a thread of its own, answers and load errors cached by file and
+  literal-import bytes; `/status` waits at most `STATUS_WAIT` (50 ms) and then shows the last
+  known declarations (parts of a file under rediscovery `outdated`, of a broken file `failed`),
+  builds, checks and the gate wait for all files; `snapshot.rs` the project from those
+  declarations (per-file `load_errors`, a broken file never hides the others), keys, states,
+  cache eviction (`evict`, AG-PF-04);
   `bench.rs` `qoob3d bench <DIR>` (AG-PF-06): a fresh worker per build, entries in
-  `.qoob3d/bench-<pid>/` (removed afterwards), never the project cache. The service never runs
-  OCCT. The `[mesh]` settings enter the cache key through `worker::key_version` (AG-PF-05).
+  `.qoob3d/bench-<pid>/` (removed afterwards), never the project cache; it discovers in its own
+  process. The service never runs OCCT and never evaluates a script. The `[mesh]` settings
+  enter the cache key through `worker::key_version` (AG-PF-05).
   R4 (ADR-0054): `jobs.rs` `Work` (build, check, run) so `/check` and `/run` answer with a job
-  like `/build`; `checks.rs` check discovery (`checks/*.rhai`, declared without OCCT), `/check`
+  like `/build`; `checks.rs` checks of the discovered `checks/*.rhai`, `/check`
   (one worker request per check), states passed/failed/stale/never_run (stale = check file or
   the build key of a part the check read changed), `gate_input` for the review gate; `probe.rs`
   `/run` and `/measure`; `save.rs` `/save` (`git` executable, never adds `.qoob3d/`, `out/`);
@@ -68,10 +75,14 @@ kernel connection come together.
   build (`modules_read` in the cache `.json`, `snapshot::Reads`), the literal scan only
   before the first build (AG-HD-06). Declaration results are cached per file **including
   load errors**, so a file that hits the discovery limits is not evaluated on every poll.
+  `/status` reports `load_errors: [{kind, message, file, line?, column?}]` (kind `load`,
+  `time_limit`, `memory_limit`, `crash`) and the first one also as `error`; a build of all
+  parts builds what loads and then fails with those errors.
 - `src/worker.rs`: `qoob3d worker` (AG-PJ-05): request/answer types of the JSON-line protocol
   (answers start with `{"job":`, foreign stdout lines from OCCT are skipped), builds one part and
-  writes its cache entry, writes STEP. Exits when stdin closes. `worker/probe.rs`: `Probe`
-  requests that write nothing: one check, a throwaway script, measures of one or two parts.
+  writes its cache entry, writes STEP, declares a file (`declaration`, `PartMode::Declare` with
+  the AG-HD-02 limits). Exits when stdin closes. `worker/probe.rs`: `Probe` requests that write
+  nothing: one check, a throwaway script, measures of one or two parts, declarations.
 - `src/service_cli.rs`: CLI clients against the service of the working directory (AG-SV-02),
   `check` (exit 1 if a check failed) and `task …` as role human.
 - `src/mcp.rs` + `src/mcp/`: `qoob3d mcp [DIR]` (AG-MC-01..06): JSON-RPC 2.0 over stdio, one
@@ -127,4 +138,4 @@ kernel connection come together.
 
 ## Relevant ADRs
 
-ADR-0005, ADR-0008, ADR-0013, ADR-0015, ADR-0017, ADR-0018, ADR-0019, ADR-0020, ADR-0021, ADR-0022, ADR-0023, ADR-0027, ADR-0029, ADR-0033, ADR-0034, ADR-0035, ADR-0053, ADR-0054, ADR-0055
+ADR-0005, ADR-0008, ADR-0013, ADR-0015, ADR-0017, ADR-0018, ADR-0019, ADR-0020, ADR-0021, ADR-0022, ADR-0023, ADR-0027, ADR-0029, ADR-0033, ADR-0034, ADR-0035, ADR-0053, ADR-0054, ADR-0055, ADR-0056

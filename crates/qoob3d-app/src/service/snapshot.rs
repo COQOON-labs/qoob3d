@@ -2,66 +2,103 @@
 //! AG-PJ-02/04): configuration, values, declared parts in build order with
 //! the bytes their cache keys hash, and the build state of every part.
 //!
-//! Declarations come from evaluating the part files with a recording
-//! `part()` and without the CAD API (`PartMode::Declare`), so the service
-//! never runs OCCT. Results are cached by the file and module bytes.
+//! Declarations come from discovery (`discovery.rs`): a worker evaluates
+//! each part and check file with a recording `part()` and without the CAD
+//! API, so the service never evaluates a script (ADR-0056). A file that does
+//! not load is a load error of that file; the other files' parts stay.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
 
 use qoob3d_core::project::{self, Config, Graph, KeyInputs, PartDecl, Values};
-use qoob3d_kernel::script::{self, DeclaredPart, PartMode, RunOptions, RunOutput};
 use serde_json::Value;
 
-use crate::worker::{PartError, key_version};
-
-/// Rhai operations allowed for declaring the parts of one file: top-level
-/// code is meant to be declarations, not computations.
-const DECLARE_MAX_OPERATIONS: u64 = 1_000_000;
+use crate::worker::{Declaration, ErrorKind, PartError, key_version};
 
 /// `.qoob3d/cache/<part>` of the project in `dir`.
 pub(crate) fn cache_dir(dir: &Path, part: &str) -> PathBuf {
     dir.join(".qoob3d").join("cache").join(part)
 }
 
-/// The parts `text` (the part file `file`) declares.
-///
-/// # Errors
-/// The script fails; the message names the file.
-pub(crate) fn declare(dir: &Path, file: &Path, text: &str) -> Result<Vec<DeclaredPart>, String> {
-    declarations(dir, file, text).map(|o| o.parts)
+/// What a part or check file declares, or why it does not load.
+pub(crate) type Declared = Result<Declaration, PartError>;
+
+/// A part or check file with what discovery knows of it.
+pub(crate) struct FileDecl {
+    pub(crate) file: PathBuf,
+    /// Hash of the file and its literally imported modules: the key of the
+    /// declaration cache.
+    pub(crate) fingerprint: String,
+    source: Vec<u8>,
+    modules: Vec<Vec<u8>>,
+    /// The declarations of these bytes; `None` while discovery runs.
+    pub(crate) declared: Option<Declared>,
+    /// The last declarations of the file that loaded, from earlier bytes
+    /// too: what `/status` shows while the file is rediscovered or broken.
+    pub(crate) last: Option<Declaration>,
 }
 
-/// What `text` (the part or check file `file`) declares, without running
-/// any closure.
-///
-/// # Errors
-/// The script fails; the message names the file.
-pub(crate) fn declarations(dir: &Path, file: &Path, text: &str) -> Result<RunOutput, String> {
-    let options = RunOptions {
-        max_operations: DECLARE_MAX_OPERATIONS,
-        project_dir: Some(dir.to_owned()),
-        parts: PartMode::Declare,
-        ..RunOptions::default()
-    };
-    script::run(text, &options).map_err(|e| format!("{}: {e}", file.display()))
+impl FileDecl {
+    /// Reads `file` (relative to `dir`) and the modules it imports
+    /// literally; a file that cannot be read is a load error of its own.
+    pub(crate) fn read(dir: &Path, file: PathBuf) -> Self {
+        let read =
+            |f: &Path| std::fs::read(dir.join(f)).map_err(|e| format!("{}: {e}", f.display()));
+        let inputs = read(&file).and_then(|source| {
+            let modules = project::resolve_imports(dir, &file)
+                .map_err(|e| e.to_string())?
+                .iter()
+                .map(|m| read(m))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((source, modules))
+        });
+        match inputs {
+            Ok((source, modules)) => {
+                let fingerprint = project::cache_key(&KeyInputs {
+                    program_version: String::new(),
+                    part_file: source.clone(),
+                    modules: modules.clone(),
+                    values_read: Vec::new(),
+                    dependency_keys: Vec::new(),
+                });
+                Self { file, fingerprint, source, modules, declared: None, last: None }
+            }
+            Err(message) => Self {
+                declared: Some(Err(load_error_of(&file, message))),
+                file,
+                fingerprint: String::new(),
+                source: Vec::new(),
+                modules: Vec::new(),
+                last: None,
+            },
+        }
+    }
 }
 
-/// What a part file declares, or why it does not load.
-type Declared = Result<Vec<DeclaredPart>, String>;
+/// A load error of `file` (kind `load`).
+pub(crate) fn load_error_of(file: &Path, message: String) -> PartError {
+    let mut error = PartError::new(ErrorKind::Load, message);
+    error.file = Some(file.display().to_string());
+    error
+}
 
-/// Declarations by file, valid while the file and module bytes are unchanged.
-/// A load error is kept as well: `/status` is polled, and a file that runs
-/// into the limits of discovery (AG-HD-02) must not cost that run every time.
-#[derive(Default)]
-pub(crate) struct Declarations(Mutex<HashMap<PathBuf, (String, Declared)>>);
+/// How far the declaration of a part is known.
+#[derive(Debug, Clone)]
+pub(crate) enum Discovered {
+    /// From the current bytes of its file.
+    Current,
+    /// From earlier bytes; discovery of the current ones runs.
+    Running,
+    /// From earlier bytes; the current ones do not load.
+    Failed(PartError),
+}
 
 /// One declared part with the inputs of its cache key.
 pub(crate) struct PartSource {
     pub(crate) name: String,
     pub(crate) file: PathBuf,
     pub(crate) depends: Vec<String>,
+    pub(crate) discovered: Discovered,
     source: Vec<u8>,
     modules: Vec<Vec<u8>>,
 }
@@ -71,42 +108,46 @@ pub(crate) struct Snapshot {
     pub(crate) values: Values,
     /// In build order: every part after its dependencies.
     pub(crate) parts: Vec<PartSource>,
-}
-
-fn read(dir: &Path, file: &Path) -> Result<Vec<u8>, String> {
-    std::fs::read(dir.join(file)).map_err(|e| format!("{}: {e}", file.display()))
+    /// Part files that do not load (AG-PJ-02, ADR-0056).
+    pub(crate) load_errors: Vec<PartError>,
 }
 
 impl Snapshot {
-    /// Reads the project.
+    /// The project with the part files `files` as discovery knows them.
     ///
     /// # Errors
-    /// Any load error (AG-PJ-01..03), as a message naming files, ids or parts.
-    pub(crate) fn load(dir: &Path, cache: &Declarations) -> Result<Self, String> {
+    /// A load error of the whole project (AG-PJ-01..03: configuration,
+    /// values, part names, duplicates, dependencies), as a message naming
+    /// files, ids or parts.
+    pub(crate) fn load(dir: &Path, files: Vec<FileDecl>) -> Result<Self, String> {
         let config = Config::load(dir).map_err(|e| e.to_string())?;
         let values = Values::load(dir).map_err(|e| e.to_string())?;
         let mut sources = Vec::new();
-        for file in project::part_files(dir).map_err(|e| e.to_string())? {
-            let source = read(dir, &file)?;
-            let modules = project::resolve_imports(dir, &file)
-                .map_err(|e| e.to_string())?
-                .iter()
-                .map(|m| read(dir, m))
-                .collect::<Result<Vec<_>, _>>()?;
-            for part in declared(dir, &file, &source, &modules, cache)? {
+        let mut load_errors = Vec::new();
+        for f in files {
+            let (declaration, discovered) = match f.declared {
+                Some(Ok(declaration)) => (Some(declaration), Discovered::Current),
+                Some(Err(error)) => {
+                    load_errors.push(error.clone());
+                    (f.last, Discovered::Failed(error))
+                }
+                None => (f.last, Discovered::Running),
+            };
+            for part in declaration.map(|d| d.parts).unwrap_or_default() {
                 if !plain_name(&part.name) {
                     return Err(format!(
                         "{}: part name {:?} must not be empty, start with '.' or contain / or \\",
-                        file.display(),
+                        f.file.display(),
                         part.name
                     ));
                 }
                 sources.push(PartSource {
                     name: part.name,
-                    file: file.clone(),
+                    file: f.file.clone(),
                     depends: part.depends,
-                    source: source.clone(),
-                    modules: modules.clone(),
+                    discovered: discovered.clone(),
+                    source: f.source.clone(),
+                    modules: f.modules.clone(),
                 });
             }
         }
@@ -122,7 +163,7 @@ impl Snapshot {
         let mut by_name: HashMap<String, PartSource> =
             sources.into_iter().map(|p| (p.name.clone(), p)).collect();
         let parts = graph.order().into_iter().filter_map(|name| by_name.remove(name)).collect();
-        Ok(Self { config, values, parts })
+        Ok(Self { config, values, parts, load_errors })
     }
 
     pub(crate) fn part(&self, name: &str) -> Option<&PartSource> {
@@ -195,33 +236,6 @@ impl Snapshot {
 /// A part name usable as a folder name.
 fn plain_name(name: &str) -> bool {
     !name.is_empty() && !name.starts_with('.') && !name.contains(['/', '\\'])
-}
-
-fn declared(
-    dir: &Path,
-    file: &Path,
-    source: &[u8],
-    modules: &[Vec<u8>],
-    cache: &Declarations,
-) -> Declared {
-    let fingerprint = project::cache_key(&KeyInputs {
-        program_version: String::new(),
-        part_file: source.to_vec(),
-        modules: modules.to_vec(),
-        values_read: Vec::new(),
-        dependency_keys: Vec::new(),
-    });
-    let mut cache = cache.0.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((f, parts)) = cache.get(file)
-        && *f == fingerprint
-    {
-        return parts.clone();
-    }
-    let parts = std::str::from_utf8(source)
-        .map_err(|e| format!("{}: {e}", file.display()))
-        .and_then(|text| declare(dir, file, text));
-    cache.insert(file.to_owned(), (fingerprint, parts.clone()));
-    parts
 }
 
 // ------------------------------------------------------------------ state
@@ -369,7 +383,13 @@ pub(crate) fn views(
             .collect();
         let expected = snapshot.key(dir, part, &r.reads(), dependency_keys);
         let mut error = None;
-        let state = if r.failed.as_ref().is_some_and(|(k, _)| *k == expected) {
+        let state = if let Discovered::Failed(e) = &part.discovered {
+            error = Some(e.clone());
+            State::Failed
+        } else if matches!(part.discovered, Discovered::Running) {
+            // ADR-0056: earlier declarations while the file is rediscovered.
+            State::Outdated
+        } else if r.failed.as_ref().is_some_and(|(k, _)| *k == expected) {
             error = r.failed.as_ref().map(|(_, e)| e.clone());
             State::Failed
         } else if r.built.as_ref().is_some_and(|(k, _)| *k == expected) {

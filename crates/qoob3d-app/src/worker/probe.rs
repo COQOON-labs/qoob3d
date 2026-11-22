@@ -1,7 +1,7 @@
-//! Worker jobs that only look at built parts (R4, agent.md §4.2–4.3): one
-//! check of a check file (AG-CK-01..03), a throwaway script (AG-SV-05) and
-//! the measures of one or two parts (AG-SV-06). `Request::deps` maps the
-//! built parts to their BREP files; nothing is written.
+//! Worker jobs that write nothing (R4, agent.md §4.2–4.3): one check of a
+//! check file (AG-CK-01..03), a throwaway script (AG-SV-05), the measures
+//! of one or two parts (AG-SV-06), and what a part or check file declares
+//! (ADR-0056). `Request::deps` maps the built parts to their BREP files.
 
 use std::time::Instant;
 
@@ -21,6 +21,8 @@ pub(crate) enum Probe {
     Run { source: String },
     /// Measures the first part, and against the second if there is one.
     Measure { parts: Vec<String> },
+    /// What `Request::file` declares: a [`super::Declaration`].
+    Declare,
 }
 
 pub(super) fn answer(request: &Request, probe: &Probe) -> Result<Value, PartError> {
@@ -28,7 +30,14 @@ pub(super) fn answer(request: &Request, probe: &Probe) -> Result<Value, PartErro
         Probe::Check { name } => check(request, name),
         Probe::Run { source } => run(request, source),
         Probe::Measure { parts } => measure(request, parts),
+        Probe::Declare => declare(request),
     }
+}
+
+/// The declarations of `Request::file`.
+fn declare(request: &Request) -> Result<Value, PartError> {
+    let file = request.file.as_deref().ok_or_else(|| load_error("declare without a file"))?;
+    Ok(json!(super::declaration_of(&request.dir, file)?))
 }
 
 /// `{min, max, size}` of the bounding box of `shape`.

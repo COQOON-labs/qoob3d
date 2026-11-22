@@ -85,8 +85,7 @@ impl Service {
     /// # Errors
     /// The project does not load, a limit, or the script error.
     pub(crate) fn run_script(&self, source: &str, cancel: &AtomicBool) -> Result<Value, PartError> {
-        let snapshot = Snapshot::load(&self.dir, &self.declarations)
-            .map_err(|m| PartError::new(ErrorKind::Load, m))?;
+        let snapshot = self.snapshot(None).map_err(|m| PartError::new(ErrorKind::Load, m))?;
         let probe = Probe::Run { source: source.to_owned() };
         self.probe(probe, None, self.built(&snapshot), &snapshot.config.limits, cancel)
     }
@@ -117,10 +116,8 @@ impl Service {
                 })
                 .collect()
         };
-        let limits = Snapshot::load(&self.dir, &self.declarations)
-            .map_err(|m| PartError::new(ErrorKind::Load, m))?
-            .config
-            .limits;
+        let limits =
+            self.snapshot(None).map_err(|m| PartError::new(ErrorKind::Load, m))?.config.limits;
         let probe = Probe::Measure { parts };
         Ok(self.probe(probe, None, deps, &limits, &AtomicBool::new(false))?)
     }

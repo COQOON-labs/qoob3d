@@ -9,6 +9,7 @@
 
 mod bench;
 mod checks;
+mod discovery;
 mod http;
 mod jobs;
 mod pool;
@@ -34,11 +35,12 @@ use qoob3d_core::qmesh;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use self::checks::{CheckFiles, CheckRecord};
+use self::checks::CheckRecord;
+use self::discovery::{Discovery, STATUS_WAIT};
 use self::http::Reply;
 use self::jobs::Job;
 use self::pool::Pool;
-use self::snapshot::{Declarations, Record, Snapshot, cache_dir, views};
+use self::snapshot::{Record, Snapshot, cache_dir, views};
 use crate::live::ProjectDir;
 use crate::worker::{ErrorKind, PartError, Request};
 
@@ -54,9 +56,9 @@ pub(crate) struct Service {
     port: u16,
     /// Random per start; required in `X-Qoob3d-Token` (AG-HD-03).
     token: String,
-    pool: Pool,
-    declarations: Declarations,
-    check_files: CheckFiles,
+    pool: Arc<Pool>,
+    /// Declarations of the part and check files (ADR-0056).
+    discovery: Arc<Discovery>,
     state: Mutex<State>,
     /// Held while a task file is created or changed, so two requests never
     /// pick the same number or lose each other's log line (AG-HD-07).
@@ -120,13 +122,12 @@ pub fn serve(dir: &Path) -> anyhow::Result<()> {
     let workers = Config::load(&dir).map_or_else(|_| Workers::default(), |c| c.workers);
     let exe = std::env::current_exe().context("locating the qoob3d executable")?;
     let service = Arc::new(Service {
-        pool: Pool::start(exe, workers.count, workers.recycle_mb),
+        pool: Arc::new(Pool::start(exe, workers.count, workers.recycle_mb)),
         dir,
         port,
         token: random_token(),
         task_writes: Mutex::new(()),
-        declarations: Declarations::default(),
-        check_files: CheckFiles::default(),
+        discovery: Arc::default(),
         state: Mutex::new(State::default()),
         changed: Condvar::new(),
         stopping: AtomicBool::new(false),
@@ -137,6 +138,8 @@ pub fn serve(dir: &Path) -> anyhow::Result<()> {
     write_atomic(&service_json, info.as_bytes()).context("writing service.json")?;
     tracing::info!(port, dir = %service.dir.display(), "project service listening");
 
+    // Discovery starts at once, so the first `/status` likely knows the parts.
+    let _started = service.declarations(Some(Duration::ZERO));
     let runner = Arc::clone(&service);
     std::thread::Builder::new().name("qoob3d-jobs".into()).spawn(move || runner.run_jobs())?;
     for stream in listener.incoming() {
@@ -288,12 +291,16 @@ impl Service {
         envelope(answer, start)
     }
 
-    /// `GET /status` (WA-PR-01, §3.1); a load error is reported in `error`
-    /// with an empty part list, so the service stays reachable.
+    /// `GET /status` (WA-PR-01, §3.1). It waits at most [`STATUS_WAIT`]
+    /// for discovery (ADR-0056): parts of a file under rediscovery are
+    /// `outdated`, those of a file that no longer loads `failed`. Every file
+    /// that does not load is in `load_errors`, the first one also in `error`;
+    /// a load error of the whole project gives an empty part list.
     fn status(&self) -> Value {
         let (count, busy) = self.pool.counts();
-        let snapshot = Snapshot::load(&self.dir, &self.declarations);
-        let declared = checks::load(&self.dir, &self.check_files);
+        let (part_files, check_files) = self.declarations(Some(STATUS_WAIT));
+        let snapshot = part_files.and_then(|files| Snapshot::load(&self.dir, files));
+        let declared = check_files.and_then(checks::load);
         let mut st = self.lock();
         let first = st.jobs.len().saturating_sub(STATUS_JOBS);
         let jobs: Vec<Value> = st
@@ -309,10 +316,12 @@ impl Service {
             "jobs": jobs,
             "workers": {"count": count, "busy": busy, "recycled": self.pool.recycled()},
         });
+        let mut load_errors = Vec::new();
         match snapshot {
             Ok(s) => {
                 result["project"] = json!(s.config.name);
                 result["parts"] = json!(views(&self.dir, &s, &mut st.records));
+                load_errors.extend(s.load_errors);
             }
             Err(message) => {
                 result["project"] = json!(Config::load(&self.dir).map(|c| c.name).ok());
@@ -320,12 +329,21 @@ impl Service {
             }
         }
         match declared {
-            Ok(sources) => result["checks"] = json!(checks::status(&sources, &st)),
+            Ok(set) => {
+                result["checks"] = json!(checks::status(&set.sources, &st));
+                load_errors.extend(set.load_errors);
+            }
             Err(message) if result.get("error").is_none() => {
                 result["error"] = json!(PartError::new(ErrorKind::Load, message));
             }
             Err(_) => {}
         }
+        if result.get("error").is_none()
+            && let Some(first) = load_errors.first()
+        {
+            result["error"] = json!(PartError::new(ErrorKind::Load, &first.message));
+        }
+        result["load_errors"] = json!(load_errors);
         result
     }
 
@@ -359,7 +377,7 @@ impl Service {
 
     /// `GET /mesh/<part>` (WA-PR-02): the qmesh of the last successful build.
     fn mesh(&self, part: &str) -> Result<Reply, Failure> {
-        let snapshot = Snapshot::load(&self.dir, &self.declarations).map_err(Failure::not_found)?;
+        let snapshot = self.snapshot(Some(STATUS_WAIT)).map_err(Failure::not_found)?;
         let key = {
             let mut st = self.lock();
             let views = views(&self.dir, &snapshot, &mut st.records);

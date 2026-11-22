@@ -1,14 +1,18 @@
 //! Size limits of declaration discovery (docs/requirements/agent.md
-//! AG-HD-02): discovery runs in the service, where no memory limit stops a
-//! script that doubles a string forty times.
+//! AG-HD-02): a file that doubles a string forty times at its top level gets
+//! a clear load error with its line. Discovery runs in a worker (ADR-0056),
+//! whose memory limit stops what the measurements below do not see.
 //!
 //! Rhai's own size limits check what a function call returns or changes. An
 //! assignment into a container (`m[k] = v`) grows it unchecked, and Rhai has
 //! no hook that sees the variables of a running script. So the script runs
-//! in stages: with a budget of operations that grows by `STAGE_OPERATIONS`,
-//! from the start each time, and after every stage the variables are
-//! measured. That bounds what a loop can pile up unseen (a third of a stage
-//! in assignments), and costs nothing for a script that fits one stage.
+//! in stages: with a budget of operations that doubles from
+//! `STAGE_OPERATIONS`, from the start each time (Rhai cannot resume a run),
+//! and after every stage the variables are measured. Doubling keeps the
+//! total cost below twice the last stage, linear in the operations of the
+//! script (ADR-0056); a loop can pile up unseen what fits between two
+//! measurements, which the worker's memory limit bounds. A script that fits
+//! the first stage costs nothing extra.
 //! A measurement notices the growth after the statement that caused it;
 //! `locate` finds that statement by running the script with fewer
 //! operations.
@@ -24,8 +28,7 @@ const MAX_STRING_BYTES: usize = 65_536;
 const MAX_ARRAY_ELEMENTS: usize = 10_000;
 const MAX_MAP_ENTRIES: usize = 1_000;
 pub(super) const MAX_OPERATIONS: u64 = 1_000_000;
-/// Operations a run may do between two measurements of its variables:
-/// about 1400 assignments of at most 160 kB (an array of 10 000 values).
+/// Operations of the first stage; every further stage doubles the budget.
 pub(super) const STAGE_OPERATIONS: u64 = 4096;
 /// Operations of one statement at most whose position `locate` looks for.
 const STATEMENT_OPERATIONS: u64 = 16;

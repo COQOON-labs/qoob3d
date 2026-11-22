@@ -61,7 +61,9 @@ flowchart LR
    `qoob3d worker` (the only process that runs OCCT for project builds; JSON lines on
    stdin/stdout, killed and replaced on time or memory limit or crash) and the CLI clients
    `qoob3d build|status|export|values`. Parts are declared without OCCT (`part()` only
-   records); cache entries `.qoob3d/cache/<part>/<key>.{brep,qmsh,json}` are written by the
+   records), and in a worker too: the service never evaluates a script (ADR-0056); `/status`
+   answers from the last known declarations and lists files that do not load per file;
+   cache entries `.qoob3d/cache/<part>/<key>.{brep,qmsh,json}` are written by the
    worker; the app (`--project`) only polls `/status` and loads changed meshes.
    The service is for local tools only (ADR-0055): a random token per start in
    `.qoob3d/service.json` is required as `X-Qoob3d-Token`, requests with an `Origin` or a

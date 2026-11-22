@@ -2,7 +2,8 @@
 //! process that runs OCCT for project builds. It reads one JSON request per
 //! line from stdin and answers one JSON line per job on stdout, staying warm
 //! between jobs. The service owns limits and replaces a worker that crashes
-//! or is killed.
+//! or is killed. Declaration discovery of part and check files runs here as
+//! well (`Probe::Declare`, ADR-0056): the service never evaluates scripts.
 //!
 //! OCCT's STEP translator prints to stdout too, so answers are framed: every
 //! answer line contains `{"job":` and the service ignores everything before
@@ -22,12 +23,15 @@ use serde_json::{Value, json};
 mod probe;
 
 pub(crate) use self::probe::Probe;
-use crate::service::snapshot::{cache_dir, declare};
+use crate::service::snapshot::cache_dir;
 
 /// Enters every cache key (§2.1): another program version rebuilds.
 const PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Marks the start of an answer in the worker's stdout.
 pub(crate) const ANSWER_MARK: &str = "{\"job\":";
+/// Rhai operations allowed for declaring the parts of one file: top-level
+/// code is meant to be declarations, not computations (AG-HD-02).
+const DECLARE_MAX_OPERATIONS: u64 = 1_000_000;
 
 /// The program part of a cache key: the version and the tessellation settings
 /// (AG-PF-05), so changing either rebuilds.
@@ -139,6 +143,60 @@ impl PartError {
             column: Some(*column),
         }
     }
+}
+
+/// What a part or check file declares, without running any closure: the
+/// answer to `Probe::Declare` (ADR-0056).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct Declaration {
+    pub(crate) parts: Vec<PartDeclaration>,
+    pub(crate) checks: Vec<String>,
+}
+
+/// One `part(...)` of a file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PartDeclaration {
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) depends: Vec<String>,
+}
+
+/// What `text` (the part or check file `file`) declares, in
+/// `PartMode::Declare` with the size limits of AG-HD-02.
+///
+/// # Errors
+/// The script fails: a load error naming the file, with the position.
+pub(crate) fn declaration(dir: &Path, file: &Path, text: &str) -> Result<Declaration, PartError> {
+    let options = RunOptions {
+        max_operations: DECLARE_MAX_OPERATIONS,
+        project_dir: Some(dir.to_owned()),
+        parts: PartMode::Declare,
+        ..RunOptions::default()
+    };
+    let output = script::run(text, &options).map_err(|e| {
+        let mut error = PartError::script(Some(file), &e);
+        error.kind = ErrorKind::Load;
+        error.message = format!("{}: {e}", file.display());
+        error
+    })?;
+    Ok(Declaration {
+        parts: output
+            .parts
+            .into_iter()
+            .map(|p| PartDeclaration { name: p.name, depends: p.depends })
+            .collect(),
+        checks: output.checks.into_iter().map(|c| c.name).collect(),
+    })
+}
+
+/// What the part or check file `file` (relative to `dir`) declares.
+///
+/// # Errors
+/// The file cannot be read or fails: a load error naming it.
+pub(crate) fn declaration_of(dir: &Path, file: &Path) -> Result<Declaration, PartError> {
+    let text = std::fs::read_to_string(dir.join(file))
+        .map_err(|e| load_error(format!("{}: {e}", file.display())))?;
+    declaration(dir, file, &text)
 }
 
 /// Main loop of `qoob3d worker`.
@@ -300,8 +358,8 @@ fn locate(
     };
     for file in files {
         let text = std::fs::read_to_string(dir.join(&file)).map_err(|e| io_error(&file, e))?;
-        let declared = declare(dir, &file, &text).map_err(load_error)?;
-        if let Some(part) = declared.into_iter().find(|p| p.name == name) {
+        let declared = declaration(dir, &file, &text)?;
+        if let Some(part) = declared.parts.into_iter().find(|p| p.name == name) {
             return Ok((file, part.depends));
         }
     }
