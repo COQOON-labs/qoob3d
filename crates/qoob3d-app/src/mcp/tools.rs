@@ -394,19 +394,26 @@ impl Server {
     /// `file_write`; a part or check file comes back with what it declares
     /// (`declared: {parts, checks}`) or its `load_error`, a `lib/` file with
     /// the `load_errors` of all files, once the service has discovered them
-    /// (ADR-0056). So `/status` shows the new parts afterwards.
+    /// (ADR-0056). So `/status` shows the new parts afterwards. A script in a
+    /// sub folder of `parts/` or `checks/` gets a `note` instead.
     fn file_write(&self, path: &str, content: &str) -> Result<Reply, Refusal> {
         let mut result = files::write(self.project.dir(), path, content).map_err(bad_request)?;
         let folder = path.split('/').next().unwrap_or_default();
         if !path.ends_with(".rhai") || !["parts", "checks", "lib"].contains(&folder) {
             return Ok(Reply::Result(result));
         }
+        if folder != "lib" && path.matches('/').count() > 1 {
+            // Sub folders are not searched (AG-PJ-01).
+            result["note"] = json!(
+                "not discovered: only parts/*.rhai and checks/*.rhai (directly in the folder) \
+                 are part and check files"
+            );
+            return Ok(Reply::Result(result));
+        }
         let files = if folder == "lib" { Value::Null } else { json!([path]) };
-        let body = json!({"files": files, "wait_s": DEFAULT_WAIT_S});
-        let wait = Duration::try_from_secs_f64(DEFAULT_WAIT_S).unwrap_or(Duration::ZERO);
         // The file is written either way; a service that cannot say what it
         // declares is reported next to it.
-        let answer = match self.service("POST", "/discover", Some(body), wait + WAIT_MARGIN) {
+        let answer = match self.waiting("/discover", json!({"files": files})) {
             Ok(Reply::Envelope(envelope)) if envelope["ok"] == json!(true) => {
                 envelope["result"].clone()
             }
