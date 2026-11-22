@@ -1027,7 +1027,10 @@ fn read_3mf(path: &Path) -> Vec<(String, Vec<[[f32; 3]; 3]>)> {
         .expect("unzip -p");
     assert!(model.status.success());
     let xml = String::from_utf8(model.stdout).expect("3MF model is UTF-8");
+    // `tag` is the text after "<vertex ", "<triangle " or "<object ", so its
+    // first attribute has no leading space: prepend one before searching.
     let attr = |tag: &str, name: &str| -> String {
+        let tag = format!(" {tag}");
         let pat = format!(" {name}=\"");
         let start = tag.find(&pat).unwrap_or_else(|| panic!("{name} missing in {tag}")) + pat.len();
         tag[start..start + tag[start..].find('"').expect("closing quote")].to_string()

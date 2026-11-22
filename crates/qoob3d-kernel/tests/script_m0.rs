@@ -152,10 +152,14 @@ fn stair_script_reproduces_the_analytic_volume() {
     // them: one connected body.
     assert_eq!(shape.solid_count(), 1);
     assert_rel(shape.volume(), stair_volume(), REL_TOL, "stair");
-    // The stringers are cut exactly at z = 0 and z = 65; outer width 20 plus
-    // the eyes: x = ±(10 + 1.1 − 0.5 + 1.1) = ±11.7.
+    // The stringers are cut exactly at z = 0 (nothing else reaches lower:
+    // step 1 starts at 5.91 − 0.8). The top is the top face of step 11 at
+    // z = 11 · 5.91 = 65.01, 0.01 above the stringer cut at 65 (teile.py
+    // `_stufe`; the analytic volume counts all 11 full steps). Outer width
+    // 20 plus the eyes: x = ±(10 + 1.1 − 0.5 + 1.1) = ±11.7.
+    let top = 11.0 * 5.91;
     let (min, max) = shape.bbox();
-    assert!(min[2].abs() < 1e-6 && (max[2] - 65.0).abs() < 1e-6, "{min:?} {max:?}");
+    assert!(min[2].abs() < 1e-6 && (max[2] - top).abs() < 1e-6, "{min:?} {max:?}");
     assert!((min[0] + 11.7).abs() < 1e-6 && (max[0] - 11.7).abs() < 1e-6, "{min:?} {max:?}");
     // AG-SC-15 release bound: < 1 s; script overhead < 5 % of the OCCT time
     // needs a profiling seam (see report), not checked here.
