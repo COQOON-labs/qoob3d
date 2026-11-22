@@ -420,7 +420,8 @@ const TOOLS: [(&str, &[&str], &[&str]); 19] = [
     ("run_script", &["source", "wait_s"], &["source"]),
     ("measure", &["a", "b"], &["a"]),
     ("check", &["names", "wait_s"], &[]),
-    ("render", &["view", "parts", "width", "height"], &[]),
+    // AG-MC-09: `render` accepts `views` (2 to 6 named views, contact sheet).
+    ("render", &["view", "views", "parts", "width", "height"], &[]),
     ("export", &["parts", "format"], &["parts", "format"]),
     ("values", &[], &[]),
     ("save_state", &["message"], &["message"]),
