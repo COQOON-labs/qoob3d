@@ -1,5 +1,5 @@
 //! 2D profiles, extrude/revolve/loft and pipe of the script API (AG-SC-07,
-//! AG-SC-08). An outline keeps its curves and plane; the face is made by the
+//! AG-SC-08, AG-SC-17), sections (AG-SC-21). An outline keeps its curves and plane; the face is made by the
 //! sketch region code (`qoob3d_profile_faces`, ADR-0028) when it is used.
 //! Profile algebra (AG-PF-02) combines such faces in the plane z = 0.
 
@@ -10,13 +10,17 @@ use qoob3d_core::document::{OriginPlane, PlaneFrame};
 use rhai::{Array, Dynamic, Engine};
 
 use super::api::{
-    COMMON, CUT, FUSE, Rr, TRANSLATE, finite, geometry, made, num, occt, point, positive, runtime,
+    COMMON, CUT, FUSE, ROTATE, Rr, TRANSLATE, finite, geometry, made, num, occt, point, positive,
+    runtime,
 };
 use super::{Shape, compound};
+use crate::model::occ;
 use crate::occt::ffi;
 
 /// `qoob3d_transform`: from the XY plane into a plane frame.
 const PLACE: u32 = 4;
+/// Profiles with less area are empty, mm².
+const MIN_AREA_MM2: f64 = 1e-9;
 
 /// A region in the local XY plane of `frame`.
 #[derive(Clone)]
@@ -81,27 +85,90 @@ impl Profile {
         made(function, ffi::qoob3d_transform(local.get(), PLACE, &frame.to_array()))
     }
 
-    /// The profile shifted by `d` in its plane.
-    fn moved(&self, d: [f64; 2]) -> Rr<Self> {
+    /// The profile after a rigid motion in its plane: `map` moves a point,
+    /// arcs turn by `turn` (rad). `kind` and `params` say the same to
+    /// `qoob3d_transform`.
+    fn transformed(
+        &self,
+        function: &'static str,
+        (kind, params): (u32, &[f64]),
+        map: impl Fn([f64; 2]) -> [f64; 2],
+        turn: f64,
+    ) -> Rr<Self> {
         let (c, simple) = match &self.source {
             Source::Outline { curves, simple } => (curves, *simple),
             Source::Faces(faces) => {
-                let r = ffi::qoob3d_transform(faces.get(), TRANSLATE, &[d[0], d[1], 0.0]);
-                return Ok(Self { source: Source::Faces(made("move", r)?), frame: self.frame });
+                let r = ffi::qoob3d_transform(faces.get(), kind, params);
+                return Ok(Self { source: Source::Faces(made(function, r)?), frame: self.frame });
             }
         };
         // Lines are x y pairs; circles and arcs start with their centre.
-        let shift = |values: &[f64], stride: usize| {
+        let mapped = |values: &[f64], stride: usize| {
             let mut out = values.to_vec();
             for item in out.chunks_exact_mut(stride) {
-                item[0] += d[0];
-                item[1] += d[1];
+                [item[0], item[1]] = map([item[0], item[1]]);
             }
             out
         };
-        let moved = Self::new(shift(&c.lines, 2), shift(&c.circles, 3), shift(&c.arcs, 5), simple);
+        let mut arcs = mapped(&c.arcs, 5);
+        for arc in arcs.as_chunks_mut::<5>().0 {
+            arc[3] += turn;
+            arc[4] += turn;
+        }
+        let moved = Self::new(mapped(&c.lines, 2), mapped(&c.circles, 3), arcs, simple);
         Ok(Self { frame: self.frame, ..moved })
     }
+
+    /// The profile shifted by `d` in its plane.
+    fn moved(&self, d: [f64; 2]) -> Rr<Self> {
+        let shift = |[x, y]: [f64; 2]| [x + d[0], y + d[1]];
+        self.transformed("move", (TRANSLATE, &[d[0], d[1], 0.0]), shift, 0.0)
+    }
+
+    /// The profile turned counter-clockwise about its origin.
+    fn rotated(&self, deg: f64) -> Rr<Self> {
+        let angle = deg.to_radians();
+        let (sin, cos) = angle.sin_cos();
+        let turn = |[x, y]: [f64; 2]| [x * cos - y * sin, x * sin + y * cos];
+        self.transformed("rotate", (ROTATE, &[0.0, 0.0, 1.0, angle]), turn, angle)
+    }
+
+    /// Area in mm².
+    fn area(&self, function: &'static str) -> Rr<f64> {
+        let faces = self.local(function)?;
+        occt(function, occ(ffi::qoob3d_area(faces.get())))
+    }
+}
+
+/// The region within `d` of the profile (`d` > 0) or its points deeper than
+/// −`d` inside (AG-SC-17). OCCT may answer a vanished profile with an empty
+/// or a degenerate outline: the area must be there and change with `d`.
+fn offset(p: &Profile, d: f64) -> Rr<Profile> {
+    if d == 0.0 {
+        return Ok(p.clone());
+    }
+    let before = p.area("offset")?;
+    let local = p.local("offset")?;
+    let faces = made("offset", ffi::qoob3d_profile_offset(local.get(), d))?;
+    let result = Profile { source: Source::Faces(faces), frame: p.frame };
+    let after = result.area("offset")?;
+    let changed = if d > 0.0 { after > before } else { after < before };
+    if after.is_nan() || after <= MIN_AREA_MM2 {
+        Err(geometry("offset", format!("nothing is left of the profile ({after} mm²)")))
+    } else if changed {
+        Ok(result)
+    } else {
+        Err(geometry("offset", format!("implausible area ({before} -> {after} mm²)")))
+    }
+}
+
+/// The cut of `s` with an origin plane moved to the world coordinate `at`
+/// along the axis the plane name leaves out (AG-SC-21).
+fn section(s: &Shape, name: &str, at: f64) -> Rr<Profile> {
+    let mut frame = plane(name)?.frame();
+    frame.origin = frame.n.map(|c| c.abs() * at);
+    let faces = made("section", ffi::qoob3d_section(s.get(), &frame.to_array()))?;
+    Ok(Profile { source: Source::Faces(faces), frame })
 }
 
 /// `first` combined with all of `rest` as one planar operation (AG-PF-02).
@@ -146,6 +213,23 @@ fn rect(w: f64, h: f64) -> Profile {
     let (x, y) = (w / 2.0, h / 2.0);
     let corners = [[-x, -y], [x, -y], [x, y], [-x, y]];
     Profile::new(outline(&corners), Vec::new(), Vec::new(), true)
+}
+
+/// Rectangle with corners rounded by quarter circles of radius `r`.
+fn rounded_rect(w: f64, h: f64, r: f64) -> Profile {
+    // (x, y): centre of the corner arc in the first quadrant.
+    let (x, y) = (w / 2.0 - r, h / 2.0 - r);
+    let (right, top) = (w / 2.0, h / 2.0);
+    let sides =
+        [[-x, -top, x, -top], [right, -y, right, y], [x, top, -x, top], [-right, y, -right, -y]];
+    // With 2 r = w or h a pair of sides has no length.
+    let lines = sides.iter().filter(|s| s[0] != s[2] || s[1] != s[3]).flatten().copied().collect();
+    let arcs = [[x, -y], [x, y], [-x, y], [-x, -y]]
+        .iter()
+        .zip([-1.0, 0.0, 1.0, 2.0])
+        .flat_map(|(c, k)| [c[0], c[1], r, k * FRAC_PI_2, (k + 1.0) * FRAC_PI_2])
+        .collect();
+    Profile::new(lines, Vec::new(), arcs, true)
 }
 
 /// Closed polyline through `points` as line segments `x0 y0 x1 y1`.
@@ -203,10 +287,16 @@ fn extrude(p: &Profile, h: f64) -> Rr<Shape> {
 }
 
 /// The profile's (x, y) become (radius, height): drawn in XZ, turned about Z.
-fn revolve(p: &Profile, deg: f64) -> Rr<Shape> {
-    let face = p.face("revolve", &OriginPlane::XZ.frame())?;
+fn revolve(function: &'static str, p: &Profile, deg: f64) -> Rr<Shape> {
+    let face = p.face(function, &OriginPlane::XZ.frame())?;
     let angle = if deg >= 360.0 { 2.0 * PI } else { deg.to_radians() };
-    made("revolve", ffi::qoob3d_revolve(face.get(), &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0], angle))
+    made(function, ffi::qoob3d_revolve(face.get(), &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0], angle))
+}
+
+/// Solid of revolution about Z of the closed polyline `points` (radius,
+/// height), which runs counter-clockwise and does not cross itself.
+pub(super) fn turned(function: &'static str, points: &[[f64; 2]]) -> Rr<Shape> {
+    revolve(function, &Profile::new(outline(points), Vec::new(), Vec::new(), true), 360.0)
 }
 
 fn loft(sections: &Array) -> Rr<Shape> {
@@ -247,6 +337,17 @@ pub(super) fn register(engine: &mut Engine) {
         let r = positive(&d, "circle: d")? / 2.0;
         Ok(Profile::new(Vec::new(), vec![0.0, 0.0, r], Vec::new(), true))
     });
+    engine.register_fn("rounded_rect", |w: Dynamic, h: Dynamic, r: Dynamic| -> Rr<Profile> {
+        let (w, h) = (positive(&w, "rounded_rect: w")?, positive(&h, "rounded_rect: h")?);
+        let r = positive(&r, "rounded_rect: r")?;
+        if 2.0 * r > w.min(h) {
+            return Err(runtime(format!(
+                "rounded_rect: r ({r}) must be at most half the shorter side ({})",
+                w.min(h) / 2.0
+            )));
+        }
+        Ok(rounded_rect(w, h, r))
+    });
     engine.register_fn("polygon", |points: Array| polygon(&points));
     engine.register_fn("slot", |l: Dynamic, w: Dynamic| -> Rr<Profile> {
         let (l, w) = (positive(&l, "slot: l")?, positive(&w, "slot: w")?);
@@ -265,6 +366,16 @@ pub(super) fn register(engine: &mut Engine) {
     });
     engine.register_fn("move", |p: Profile, x: Dynamic, y: Dynamic| -> Rr<Profile> {
         p.moved([finite(&x, "move: x")?, finite(&y, "move: y")?])
+    });
+    engine.register_fn("rotate", |p: Profile, deg: Dynamic| -> Rr<Profile> {
+        p.rotated(finite(&deg, "rotate: deg")?)
+    });
+    engine.register_fn("offset", |p: Profile, d: Dynamic| -> Rr<Profile> {
+        offset(&p, finite(&d, "offset: d")?)
+    });
+    engine.register_fn("area", |p: Profile| p.area("area"));
+    engine.register_fn("section", |s: Shape, name: &str, at: Dynamic| -> Rr<Profile> {
+        section(&s, name, finite(&at, "section: offset")?)
     });
     engine.register_fn("+", |a: Profile, b: Profile| profile_union(&[a, b]));
     engine.register_fn("-", |a: Profile, b: Profile| profile_cut(&a, &[b]));
@@ -287,7 +398,7 @@ pub(super) fn register(engine: &mut Engine) {
         if deg.is_nan() || deg <= 0.0 || deg > 360.0 {
             return Err(runtime(format!("revolve: deg must be in (0, 360], got {deg}")));
         }
-        revolve(&p, deg)
+        revolve("revolve", &p, deg)
     });
     engine.register_fn("loft", |sections: Array| loft(&sections));
     engine.register_fn("pipe", |points: Array, d: Dynamic, bend: Dynamic| -> Rr<Shape> {

@@ -31,17 +31,24 @@ OpenCascade connection. Runs entirely in its own worker thread.
   in C++, ADR-0028). Construction and degenerate curves do not count.
 - `src/tessellate.rs`: call of the C++ mesher → `ShapeMesh`, structure check, demo part.
 - `src/script.rs` + `src/script/`: script kernel (ADR-0053): `run`, `ScriptError`, `Shape`,
-  sandboxed imports, STL/3MF/STEP export; `api.rs` solids, booleans (batched, plausibility
-  AG-SC-12), transforms, measures; `profile.rs` profiles, profile algebra (AG-PF-02),
-  extrude/revolve/loft, pipe;
-  `select.rs` edge/face selectors, fillet, chamfer, shell; `project.rs` `part()`/`value()` with
+  sandboxed imports, STL/3MF/STEP export (STL/3MF at 0.01 mm chordal tolerance, ADR-0034);
+  `api.rs` solids (named kinds `BOX`…`TORUS`), booleans (batched, plausibility AG-SC-12),
+  transforms, measures, `countersink`/`counterbore`, `mass`, `overhangs`/`bed_area`;
+  `profile.rs` profiles, profile algebra (AG-PF-02), `rounded_rect`, `rotate`, `offset`,
+  `area`, `section`, extrude/revolve/loft, pipe; `select.rs` edge/face selectors incl.
+  `in_box`/`near`/`length`/`area`, fillet, chamfer, shell; `project.rs` `part()`/`value()` with
   `PartMode` (all, declare without the CAD API, one part from dependency BREPs); `check.rs`
-  `check()`/`expect…` and `part(name)` (AG-CK-01/02, `RunOptions::check`, results in
+  `check()`/`expect…` (incl. `expect_eq`) and `part(name)`; `limits.rs` the size limits of
+  declaration discovery (AG-HD-02: staged runs that measure the variables, then a search for
+  the statement that crossed a limit) (AG-CK-01/02, `RunOptions::check`, results in
   `RunOutput::checks`; closures run only in `PartMode::All`); `measure.rs` area, center,
   distance, common volume for callers in Rust; BREP
   read/write and `Shape::mesh` for the cache. Runs on the calling thread, not
   the worker. Every API change updates `docs/script-api.md` (its examples run in
-  `tests/script.rs`).
+  `tests/script.rs` and `tests/script_r5.rs` with the project folder `docs/script-api`; the
+  imported example assets live in `docs/script-api/lib/examples/`, and `qoob3d init` copies
+  them). The reference is served to agents over MCP: no repository paths, requirement IDs,
+  ADR numbers or Rust notes in it – those belong here.
 - `src/occt.rs` + `cpp/`: own cxx bridge. `build.rs` compiles it against the OCCT headers
   from `DEP_OCCT_INCLUDE` (set by the `opencascade-sys` fork in `third_party/opencascade-sys`
   via `links = "occt"`, ADR-0047).
@@ -75,6 +82,23 @@ OpenCascade connection. Runs entirely in its own worker thread.
   self-intersections.
 - `BRepCheck_Analyzer` and `BRepGProp::SurfaceProperties` are slow on faces with very many
   wires (plate with 1000 holes: validity seconds, area ~0.1 s), whichever way it was built.
+- `BRepOffsetAPI_MakeOffset` **segfaults** (no exception, `guarded` does not help) on a face
+  with concentric circular wires and on a single circle of radius ≤ 1 mm.
+  `qoob3d_profile_offset` therefore offsets every wire on its own, handles full circles itself
+  and combines the regions with `punch` or a planar BOP. Only worker isolation protects
+  against untried outlines.
+- Rhai's own size limits miss `a += a` on arrays and assignment into containers (`m[k] = v`).
+  Declare mode therefore turns fast operators off and measures the variables in stages of
+  4096 operations; scripts with long top levels get quadratically slower there (600 000
+  operations: 1.6 s instead of 40 ms). `Engine::on_var` would avoid that but is
+  `#[deprecated]` in Rhai and would exceed the lint-suppression cap (`harness/ratchet.txt`).
+- The `import` literal check is textual (Rhai's AST needs the `internals` feature): only
+  double-quoted literals without escapes pass. `RunOutput::modules_read` lists the modules
+  the resolver actually loaded; they feed the cache key.
+- `Shape::bbox()` is quantised to 1e-9 mm (−0 → 0) so that the same part reports the same
+  box before and after a BREP round trip (AG-HD-11); derive `size` from the quantised values.
+- `qoob3d_overhang_area` meshes a copy of the curved faces (angle 0.1 rad; 0.025 rad took 5 s
+  for a sphere, 118 s for a torus), so export and display meshes stay untouched.
 - STEP read/write share static OCCT settings; the wrappers serialise them with a mutex.
   OCCT's STEP translator prints progress to stdout.
 - OCCT normals follow the surface, not the face orientation → for `TopAbs_REVERSED`

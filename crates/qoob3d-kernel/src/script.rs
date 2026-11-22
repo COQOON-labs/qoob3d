@@ -9,6 +9,7 @@
 
 mod api;
 mod check;
+mod limits;
 mod measure;
 mod profile;
 mod project;
@@ -23,7 +24,7 @@ use std::rc::Rc;
 use qoob3d_core::ShapeMesh;
 use qoob3d_core::export::{self, ExportObject};
 use rhai::module_resolvers::{DummyModuleResolver, FileModuleResolver};
-use rhai::{Engine, EvalAltResult, Module, ModuleResolver, Position, Shared};
+use rhai::{Engine, EvalAltResult, Module, ModuleResolver, Position, Scope, Shared};
 
 use crate::model::{self, occ};
 use crate::occt::ffi;
@@ -37,6 +38,11 @@ pub use project::{DeclaredPart, PartMode};
 /// Call depth limit (AG-SC-02). Rhai's own default differs between debug
 /// and release builds; scripts must behave the same in both.
 const MAX_CALL_LEVELS: usize = 64;
+
+/// Bounding boxes are reported in steps of 1e-9 mm (AG-HD-11): OCCT's box of
+/// a shape read back from a BREP file differs from the built one in the last
+/// bits, and every place that reports a box must show the same numbers.
+const BBOX_STEPS_PER_MM: f64 = 1e9;
 
 /// How a script runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +85,9 @@ pub struct RunOutput {
     pub values_read: BTreeMap<String, serde_json::Value>,
     /// Checks declared with `check(...)`, in call order (AG-CK-01).
     pub checks: Vec<CheckResult>,
+    /// Module files the engine resolved for `import`, relative to the
+    /// project folder, each once in the order of first use (AG-HD-06).
+    pub modules_read: Vec<PathBuf>,
 }
 
 /// A failed script run (AG-SC-03). Lines and columns are 1-based; 0 means
@@ -155,7 +164,8 @@ impl Shape {
         occ(ffi::qoob3d_solid_count(self.get())).map_or(0, |n| n as usize)
     }
 
-    /// Tight bounding box `(min, max)` in mm (NaN if the shape is empty).
+    /// Tight bounding box `(min, max)` in mm, in steps of 1e-9 mm (NaN if
+    /// the shape is empty). The same numbers as `bbox()` in scripts.
     pub fn bbox(&self) -> ([f64; 3], [f64; 3]) {
         self.bounds().unwrap_or(([f64::NAN; 3], [f64::NAN; 3]))
     }
@@ -182,7 +192,9 @@ impl Shape {
 
     fn bounds(&self) -> Result<([f64; 3], [f64; 3]), KernelError> {
         let b = occ(ffi::qoob3d_bbox(self.get()))?;
-        Ok(([b[0], b[1], b[2]], [b[3], b[4], b[5]]))
+        // Adding 0 turns −0 into 0.
+        let step = |v: f64| (v * BBOX_STEPS_PER_MM).round() / BBOX_STEPS_PER_MM + 0.0;
+        Ok(([b[0], b[1], b[2]].map(step), [b[3], b[4], b[5]].map(step)))
     }
 }
 
@@ -214,19 +226,62 @@ fn compound<'a>(parts: impl IntoIterator<Item = &'a Shape>) -> Result<Shape, Ker
     model::shape(Ok(c)).map(Shape::new)
 }
 
-/// Evaluates a script (AG-SC-01).
+/// Evaluates a script (AG-SC-01). Declaration discovery
+/// (`PartMode::Declare`) runs with at most 1 000 000 operations and with size
+/// limits for strings, arrays and maps (AG-HD-02).
 pub fn run(source: &str, options: &RunOptions) -> Result<RunOutput, ScriptError> {
+    if options.parts != PartMode::Declare {
+        let (outcome, output, _) = evaluate(source, options, options.max_operations);
+        outcome.map_err(|e| script_error(*e))?;
+        return Ok(output);
+    }
+    // 0 means no limit to Rhai.
+    let operations = match options.max_operations {
+        0 => limits::MAX_OPERATIONS,
+        n => n.min(limits::MAX_OPERATIONS),
+    };
+    // In stages, see `limits`: after each one the variables are measured.
+    let mut budget = 0;
+    loop {
+        let clean = budget.max(1);
+        budget = (budget + limits::STAGE_OPERATIONS).min(operations);
+        let (outcome, output, oversize) = evaluate(source, options, budget);
+        if let Some((what, started)) = oversize {
+            let over = budget.min(started + 1).max(clean + 1);
+            return Err(limits::locate(what, (clean, over), |n| {
+                let (outcome, _, oversize) = evaluate(source, options, n);
+                (outcome, oversize.is_some())
+            }));
+        }
+        if budget == operations || !limits::out_of_operations(&outcome) {
+            outcome.map_err(|e| script_error(*e))?;
+            return Ok(output);
+        }
+    }
+}
+
+/// One run with at most `operations` Rhai operations: how it ended, what it
+/// produced, and what the size checks of declaration discovery found, with
+/// the number of operations the run started.
+fn evaluate(
+    source: &str,
+    options: &RunOptions,
+    operations: u64,
+) -> (limits::Outcome, RunOutput, Option<(limits::Oversize, u64)>) {
     let output = Rc::new(RefCell::new(RunOutput::default()));
     let project =
         options.project_dir.as_ref().map(|d| d.canonicalize().unwrap_or_else(|_| d.clone()));
+    let declare = options.parts == PartMode::Declare;
 
     let mut engine = Engine::new();
-    engine.set_max_operations(options.max_operations);
+    engine.set_max_operations(operations);
     engine.set_max_call_levels(MAX_CALL_LEVELS);
     match &project {
         Some(root) => engine.set_module_resolver(ProjectModules {
             root: root.clone(),
             files: FileModuleResolver::new_with_path(root),
+            script: source.to_owned(),
+            output: Rc::clone(&output),
         }),
         None => engine.set_module_resolver(DummyModuleResolver::new()),
     };
@@ -235,17 +290,21 @@ pub fn run(source: &str, options: &RunOptions) -> Result<RunOutput, ScriptError>
     engine.on_debug(|line, _, pos| tracing::debug!(%pos, "script: {line}"));
     // Declaring parts must not reach OCCT (§2.1): without the CAD API a
     // geometry call outside a part closure is an error, not a computation.
-    if options.parts != PartMode::Declare {
+    let started = if declare {
+        Some(limits::apply(&mut engine))
+    } else {
         api::register(&mut engine, &output, project);
-    }
+        None
+    };
     project::register(&mut engine, &output, options);
     check::register(&mut engine, &output, options);
 
-    let result = engine.run(source);
+    let mut scope = Scope::new();
+    let outcome = engine.run_with_scope(&mut scope, source);
+    let oversize = started.and_then(|n| Some((limits::found(&scope)?, n.get())));
     // The engine's closures hold clones of `output`.
     drop(engine);
-    result.map_err(|e| script_error(*e))?;
-    Ok(output.take())
+    (outcome, output.take(), oversize)
 }
 
 fn line_column(pos: Position) -> (usize, usize) {
@@ -315,20 +374,63 @@ fn inside_project(root: &Path, relative: &str) -> Result<PathBuf, String> {
 struct ProjectModules {
     root: PathBuf,
     files: FileModuleResolver,
+    /// Text of the script that runs.
+    script: String,
+    output: Rc<RefCell<RunOutput>>,
 }
 
 impl ModuleResolver for ProjectModules {
     fn resolve(
         &self,
         engine: &Engine,
-        _source: Option<&str>,
+        source: Option<&str>,
         path: &str,
         pos: Position,
     ) -> Result<Shared<Module>, Box<EvalAltResult>> {
-        inside_project(&self.root, &format!("{path}.rhai"))
+        let file = format!("{path}.rhai");
+        let full = inside_project(&self.root, &file)
             .map_err(|m| EvalAltResult::ErrorModuleNotFound(m, pos))?;
-        self.files.resolve(engine, None, path, pos)
+        // The importing code: the script itself, or the module named `source`.
+        let module_text = source.map(|module| {
+            std::fs::read_to_string(self.root.join(format!("{module}.rhai"))).unwrap_or_default()
+        });
+        let text = module_text.as_deref().unwrap_or(&self.script);
+        let statement = import_statement(text, pos, path);
+        if !matches!(statement, Some((_, true))) {
+            // The cache key knows the literal paths only (AG-HD-06).
+            let message = "import needs its path as a plain string literal: import \"lib/x\" as x;";
+            let at = statement.map_or(pos, |(at, _)| at);
+            return Err(EvalAltResult::ErrorRuntime(message.into(), at).into());
+        }
+        let module = self.files.resolve(engine, None, path, pos)?;
+        let relative =
+            full.strip_prefix(&self.root).map_or_else(|_| file.into(), Path::to_path_buf);
+        let read = &mut self.output.borrow_mut().modules_read;
+        if !read.contains(&relative) {
+            read.push(relative);
+        }
+        Ok(module)
     }
+}
+
+/// The `import` statement of `text` at `pos` (`pos` is the statement or a
+/// place in its path expression): where its keyword stands, and whether its
+/// path is the double-quoted literal `path` and nothing else.
+fn import_statement(text: &str, pos: Position, path: &str) -> Option<(Position, bool)> {
+    let line = pos.line()?;
+    let row = text.lines().nth(line - 1)?;
+    // Up to the end of a keyword that starts at `pos`.
+    let head: String = row.chars().take(pos.position()? + 5).collect();
+    let start = head.rfind("import")?;
+    let after = row[start + "import".len()..]
+        .trim_start()
+        .strip_prefix('"')
+        .and_then(|r| r.strip_prefix(path))
+        .and_then(|r| r.strip_prefix('"'))
+        .map(str::trim_start);
+    let literal = after.is_some_and(|r| r.is_empty() || r.starts_with("as") || r.starts_with(';'));
+    let column = row[..start].chars().count() + 1;
+    Some((Position::new(u16::try_from(line).ok()?, u16::try_from(column).ok()?), literal))
 }
 
 /// Binary STL of all shapes (ADR-0034), meshed at the export tolerance.

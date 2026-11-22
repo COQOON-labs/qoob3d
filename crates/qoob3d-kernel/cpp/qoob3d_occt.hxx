@@ -123,3 +123,27 @@ std::unique_ptr<TopoDS_Shape> qoob3d_read_step(rust::Str path);
 // OCCT's native BREP text format (cache entries, AG-PJ-04).
 void qoob3d_write_brep(const TopoDS_Shape &shape, rust::Str path);
 std::unique_ptr<TopoDS_Shape> qoob3d_read_brep(rust::Str path);
+
+// ---- Script API additions: profiles, selections, sections, print analysis.
+
+// The region within `distance` of the planar faces in z = 0 (positive), or
+// the points of them deeper than −`distance` (negative): outlines move
+// outward with round corners, holes shrink. An empty result is an error.
+std::unique_ptr<TopoDS_Shape> qoob3d_profile_offset(const TopoDS_Shape &faces, double distance);
+// Length (edges) or area (faces) of the elements with the map indices.
+rust::Vec<double> qoob3d_element_sizes(const TopoDS_Shape &shape, bool faces,
+                                       rust::Slice<const uint32_t> indices);
+// Smallest distance of each of these elements to `point` (x y z).
+rust::Vec<double> qoob3d_element_distances(const TopoDS_Shape &shape, bool faces,
+                                           rust::Slice<const uint32_t> indices,
+                                           rust::Slice<const double> point);
+// The cut of the shape with the plane of the frame (origin u v n, 12
+// values) as faces in the local plane z = 0. No cut is an error.
+std::unique_ptr<TopoDS_Shape> qoob3d_section(const TopoDS_Shape &shape,
+                                             rust::Slice<const double> frame);
+// Area of the planar faces that lie in the lowest z of the shape, facing down.
+double qoob3d_bed_area(const TopoDS_Shape &shape);
+// Area whose outward normal is closer than `max_angle` (rad) to −Z, without
+// the faces counted by `qoob3d_bed_area`. Planar faces exact, curved faces
+// from a fine mesh with the true normals, triangles split at the limit.
+double qoob3d_overhang_area(const TopoDS_Shape &shape, double max_angle);

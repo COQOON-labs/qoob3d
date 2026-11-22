@@ -3,12 +3,10 @@
 //! functions `area`, `center` and `distance`.
 
 use super::Shape;
+use super::api::COMMON;
 use crate::KernelError;
 use crate::model::{self, occ};
 use crate::occt::ffi;
-
-/// `op` of `qoob3d_boolean` for the common part.
-const COMMON: u32 = 2;
 
 impl Shape {
     /// Surface area in mm² (NaN if OCCT cannot compute it).

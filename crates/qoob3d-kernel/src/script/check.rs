@@ -1,6 +1,7 @@
 //! Checks in scripts (docs/requirements/agent.md AG-CK-01/02, ADR-0054):
 //! `check("name", || { … })` with `expect`, `expect_near`, `expect_between`,
-//! and `part("Name")`, the built shape of a project part.
+//! `expect_eq` (AG-SC-20) and `part("Name")`, the built shape of a project
+//! part.
 //!
 //! Checks run in plain runs (`PartMode::All`); declaring and building one
 //! part only record their names. A failed expectation is recorded and the
@@ -32,9 +33,10 @@ pub struct CheckOptions {
 pub struct Expectation {
     pub text: String,
     pub passed: bool,
-    /// The measured number, or the condition of `expect`.
+    /// The measured number, the condition of `expect`, or the value of
+    /// `expect_eq` (int, float, string or bool).
     pub actual: Value,
-    /// The wanted number, `[min, max]` of `expect_between`, or `true`.
+    /// The wanted number or value, `[min, max]` of `expect_between`, or `true`.
     pub expected: Value,
     /// Tolerance of `expect_near`, otherwise null.
     pub tol: Value,
@@ -185,6 +187,24 @@ fn register_expectations(
         },
     );
 
+    let rec = Rc::clone(&record);
+    engine.register_fn("expect_eq", move |actual: Dynamic, expected: Dynamic, text: &str| {
+        let actual = plain(&actual, "actual")?;
+        let expected = plain(&expected, "expected")?;
+        let passed = match (&actual, &expected) {
+            // An int equals the float of the same value; floats compare exactly.
+            (Value::Number(a), Value::Number(e)) if a.is_f64() || e.is_f64() => {
+                a.as_f64() == e.as_f64()
+            }
+            // NaN and infinity have no JSON number and never pass.
+            (Value::Null, _) | (_, Value::Null) => false,
+            (a, e) => a == e,
+        };
+        let expectation =
+            Expectation { text: text.to_owned(), passed, actual, expected, tol: Value::Null };
+        rec("expect_eq", expectation)
+    });
+
     engine.register_fn(
         "expect_between",
         move |actual: Dynamic, min: Dynamic, max: Dynamic, text: &str| {
@@ -201,4 +221,22 @@ fn register_expectations(
             record("expect_between", expectation)
         },
     );
+}
+
+/// A value `expect_eq` compares and records.
+fn plain(v: &Dynamic, what: &str) -> Rr<Value> {
+    if let Ok(i) = v.as_int() {
+        Ok(json!(i))
+    } else if let Ok(f) = v.as_float() {
+        Ok(json!(f))
+    } else if let Ok(b) = v.as_bool() {
+        Ok(json!(b))
+    } else if let Ok(s) = v.clone().into_string() {
+        Ok(json!(s))
+    } else {
+        Err(runtime(format!(
+            "expect_eq: {what} must be an int, float, string or bool, got {}",
+            v.type_name()
+        )))
+    }
 }

@@ -1,4 +1,4 @@
-// Example module of docs/script-api.md: `import "script-api/fdm" as fdm;`
+// Example module of the script API reference: `import "lib/examples/fdm" as fdm;`
 // Functions of a module are visible as `fdm::name`, constants with `export`.
 
 export const CLEARANCE = 0.2;   // mm, typical FDM fit clearance

@@ -1,11 +1,11 @@
 # Script API reference
 
-As of: 2026-11-22 · Decision: ADR-0053 · Requirements: `docs/requirements/agent.md` §1
-(AG-SC-01…16) · Implementation: `crates/qoob3d-kernel/src/script/`
+As of: 2026-11-22
 
 A QOOB3D model is a [Rhai](https://rhai.rs) script. The script is glue: every geometric
-operation below is one call into OpenCascade. Every ```` ```rhai ```` example in this file is
-run by `crates/qoob3d-kernel/tests/script.rs` with the project folder `docs/`.
+operation below is one call into OpenCascade. Every ```` ```rhai ```` example in this file
+runs as written in a new project; the two files that examples read are in `lib/examples/`,
+where `qoob3d init` puts them.
 
 ## Conventions
 
@@ -219,6 +219,11 @@ Rectangle `w` × `h` mm, centred on the origin.
 
 Circle of diameter `d` mm around the origin.
 
+### `rounded_rect(w, h, r) -> Profile`
+
+Rectangle `w` × `h` mm, centred on the origin, its four corners rounded with the radius
+`r` mm (`r` at most half the shorter side).
+
 ### `polygon([[x, y], …]) -> Profile`
 
 Closed polygon through at least 3 points (closed automatically, must not cross itself).
@@ -233,6 +238,7 @@ show(extrude(rect(10, 20), 5), "rect");
 show(extrude(circle(10), 4), "disc");
 show(extrude(polygon([[0, 0], [10, 0], [0, 10]]), 3), "triangle");
 show(extrude(slot(20, 6), 2), "slot");
+show(extrude(rounded_rect(40, 20, 5), 3), "rounded_plate");   // V = (800 − (4 − π) · 25) · 3
 ```
 
 ### `profile.move(x, y) -> Profile`
@@ -242,6 +248,43 @@ profile's local axes).
 
 ```rhai
 show(extrude(circle(4).move(10, 5), 3), "pin");   // centre (10, 5)
+```
+
+### `profile.rotate(deg) -> Profile`
+
+Turns a profile by `deg` degrees counter-clockwise about the origin of its plane (in the XY
+plane: the same turn as `s.rotate("z", deg)`). Like `move`, it works in the profile's local
+axes.
+
+```rhai
+show(extrude(rect(10, 20).rotate(90), 2), "lying");               // x ∈ [−10, 10], y ∈ [−5, 5]
+show(extrude(circle(4).move(10, 0).rotate(90), 2), "turned_pin");  // centre (0, 10)
+```
+
+### `offset(profile, d) -> Profile`
+
+Grows (`d` > 0) or shrinks (`d` < 0) the region of a profile by `d` mm. Growing keeps every
+point within `d` of the profile, so corners that point outward become arcs of radius `d`.
+Shrinking keeps the points deeper than |`d`| inside, so those corners stay sharp. Holes go
+the other way: a grown profile has smaller holes, and a hole that closes disappears. Regions
+that meet become one, a region may split, and parts narrower than 2 |`d`| vanish. If nothing
+is left, it is a `Geometry` error.
+
+```rhai
+let plate = rect(40, 20);
+show(extrude(offset(plate, 2), 1), "brim");             // 44 × 24, corner radius 2
+show(extrude(plate - offset(plate, -3), 5), "frame");   // wall of 3 mm
+let ring = circle(20) - circle(12);
+print(offset(ring, 1).area());                          // π (11² − 5²)
+```
+
+### `profile.area() -> float`
+
+Area of the region of a profile in mm² (holes do not count).
+
+```rhai
+print(rect(10, 20).area());                 // 200
+print((circle(20) - circle(12)).area());    // π (10² − 6²)
 ```
 
 ### Profile algebra
@@ -285,7 +328,7 @@ show(extrude(slot(30, 8), 3), "tab");
 
 ### `on(plane, profile) -> Profile`
 
-Places a profile on an origin plane. Local axes (SK-PL-01): `"xy"`: u = +X, v = +Y,
+Places a profile on an origin plane. Local axes: `"xy"`: u = +X, v = +Y,
 normal +Z; `"xz"`: u = +X, v = +Z, normal −Y; `"yz"`: u = +Y, v = +Z, normal +X. `extrude`
 follows the normal.
 
@@ -355,7 +398,10 @@ selection:
 | `.top()` | edges lying in the highest z of the shape |
 | `.bottom()` | edges lying in the lowest z of the shape |
 | `.at_z(z, tol)` | edges lying in the plane z ± `tol` mm |
+| `.in_box([x0, y0, z0], [x1, y1, z1])` | edges that lie wholly inside the axis-aligned box between the two corners (mm, borders included) |
+| `.near([x, y, z], r)` | edges whose smallest distance to the point is at most `r` mm |
 | `.len()` | number of selected elements (an int, not a filter) |
+| `.length()` | sum of the lengths of the selected edges in mm (a float, not a filter) |
 
 ```rhai
 let b = box(20, 30, 40);
@@ -365,6 +411,18 @@ print(edges(b).parallel("x").top().len());     // 2
 print(edges(b).lines().at_z(40, 0.001).len()); // 4
 print(edges(b).bottom().len());                // 4
 print(edges(cylinder(10, 5)).circles().len()); // 2
+```
+
+Selecting by position picks single edges, whatever their direction:
+
+```rhai
+let b = box(20, 30, 40);                         // x ∈ [−10, 10], y ∈ [−15, 15], z ∈ [0, 40]
+let corner = edges(b).in_box([9, 14, -1], [11, 16, 41]);
+print(corner.len());                             // 1: the vertical edge at (10, 15)
+print(corner.length());                          // 40
+show(fillet(b, corner, 3), "one_round_corner");
+print(edges(b).near([10, 15, 40], 0.5).len());   // 3: the edges that meet in that corner
+print(edges(b).top().length());                  // 100
 ```
 
 ### `fillet(s, edges, r) -> Shape`
@@ -396,7 +454,9 @@ show(chamfer(c, edges(c).circles(), 1), "lead_in");
 ### `faces(s) -> Selection`
 
 All faces of a shape, with the filters `.top()`, `.bottom()`, `.at_z(z, tol)` (faces lying
-in that plane) and `.len()`.
+in that plane), `.in_box([x0, y0, z0], [x1, y1, z1])` (faces wholly inside the box) and
+`.near([x, y, z], r)` (faces whose smallest distance to the point is at most `r` mm), with
+`.len()` and with `.area()`, the sum of the areas of the selected faces in mm².
 
 ### `shell(s, thickness, open_faces) -> Shape`
 
@@ -409,6 +469,8 @@ let b = box(20, 30, 40);
 show(shell(b, 2, faces(b).top()), "cup");      // V = 24000 − 16 · 26 · 38
 show(shell(b, 2, faces(b).bottom()), "hood");
 print(faces(b).len());                          // 6
+print(faces(b).top().area());                   // 600
+print(faces(b).near([10, 15, 40], 0.5).len());  // 3: the faces that meet in that corner
 ```
 
 ## Measure
@@ -423,10 +485,19 @@ print(b.volume());   // 6000
 print(b.area());     // 2200
 ```
 
+### `s.mass(density_g_cm3) -> float`
+
+Mass in grams of the solid shape for a density in g/cm³ (volume in cm³ times density), for
+example about 1.24 for PLA. A print with infill weighs less.
+
+```rhai
+print(box(10, 20, 50).mass(1.24));   // 10 cm³: 12.4
+```
+
 ### `s.bbox() -> map`
 
 Tight axis-aligned bounding box (no tolerance added): a map with `min`, `max` and `size`,
-each `[x, y, z]` in mm.
+each `[x, y, z]` in mm. `min` and `max` are given in steps of 1e-9 mm.
 
 ```rhai
 let bb = sphere(10).move(0, 0, 5).bbox();
@@ -473,6 +544,54 @@ print(two.is_valid());   // true
 print(two.solids());     // 2
 ```
 
+### `section(s, plane, offset) -> Profile`
+
+Cuts the shape with a plane parallel to an origin plane: `"xy"` at z = `offset`, `"xz"` at
+y = `offset`, `"yz"` at x = `offset` (mm). The result is the cut face as a profile, with the
+holes and separate regions the shape has there. It lies in the cutting plane with the local
+axes of `on(plane, …)`, has `.area()` and works with every profile function (`extrude`
+follows the normal of the plane, −Y for `"xz"`). A plane that misses the shape or only
+touches it is a `Geometry` error.
+
+```rhai
+let b = box(20, 20, 10) - cylinder(4, 10);
+let face = section(b, "xy", 5);
+print(face.area());                           // 400 − 4 π
+show(extrude(face, 1), "slice");              // z ∈ [5, 6]
+print(section(sphere(20), "xz", 6).area());   // π (10² − 6²)
+```
+
+## Print analysis
+
+Both functions take the shape as it stands: +Z is up and the bed is the plane at the lowest
+z of the shape. Model a part in its print orientation, or turn it before asking.
+
+### `bed_area(s) -> float`
+
+Area in mm² of the flat faces that lie on the bed (the contact of the first layer). A shape
+that touches the bed only in a line or a point (lying cylinder, sphere) has 0.
+
+### `overhangs(s, max_angle_deg) -> float`
+
+Area in mm² of the surface that faces downward and is flatter than `max_angle_deg`, measured
+from the horizontal: a flat underside has 0°, a vertical wall 90°. `overhangs(s, 45)` is the
+area that needs support by the usual 45° rule; 0 means the shape prints without support.
+Faces on the bed do not count. `max_angle_deg` is in [0, 90]. Flat faces are exact; of a
+curved face only the part below the limit counts, within 1 %.
+
+```rhai
+let t = union([box(10, 10, 20), box(30, 10, 5).move(0, 0, 20)]);   // an upright T
+print(bed_area(t));                          // 100: the foot of the stem
+print(overhangs(t, 45));                     // 200: the two undersides of the bar
+print(overhangs(t.rotate("x", 180), 45));    // 0: upside down it needs no support
+let b = box(20, 30, 10);
+let c = chamfer(b, edges(b).bottom(), 2);
+print(bed_area(c));                          // 416 = 16 · 26
+print(overhangs(c, 50));                     // 184 √2: the chamfer faces stand at 45°
+print(overhangs(c, 40));                     // 0
+print(overhangs(sphere(20), 45));            // 184.0: the cap up to 45°
+```
+
 ## FDM helpers
 
 ### `pin(d, l) -> Shape`
@@ -493,6 +612,27 @@ show(base - hole(4, 3, 0.2).move(0, 0, 10), "base");
 show(top.move(0, 0, 15), "lid");
 ```
 
+### `countersink(d, head_d, angle_deg, l) -> Shape`
+
+Cutting tool for a countersunk screw: a clearance hole of diameter `d` from z = 0 down to
+z = −`l`, widened at the top by a cone that has the diameter `head_d` at z = 0 (mm,
+`head_d` > `d`). `angle_deg` is the full angle of the cone, between 0 and 180 (90 for metric
+countersunk screws); the cone is (`head_d` − `d`) / (2 tan(`angle_deg`/2)) deep. Move the
+tool to the face the screw head ends flush with and cut.
+
+### `counterbore(d, head_d, head_h, l) -> Shape`
+
+Cutting tool for a screw with a cylindrical head: a clearance hole of diameter `d` from
+z = 0 down to z = −`l`, its top `head_h` mm widened to the diameter `head_d` (mm,
+`head_d` > `d`, `head_h` < `l`).
+
+```rhai
+let plate = box(40, 20, 6);
+let sunk = countersink(3.4, 6.5, 90, 10).move(-10, 0, 6);   // cone 1.55 deep, hole goes through
+let bored = counterbore(4.5, 8, 4.2, 10).move(10, 0, 6);    // head 4.2 below the top face
+show(cut(plate, [sunk, bored]), "plate");
+```
+
 ## Files
 
 Scripts can only read files inside the project folder; absolute paths and `..` are errors,
@@ -503,7 +643,7 @@ and without a project there is no file access at all.
 Reads a STEP file (path relative to the project folder) as one shape in mm.
 
 ```rhai
-let block = import_step("script-api/block.step");
+let block = import_step("lib/examples/block.step");
 print(block.solids());   // 1
 show(block - cylinder(4, 30), "drilled");
 ```
@@ -511,17 +651,18 @@ show(block - cylinder(4, 30), "drilled");
 ### `import "path" as name;`
 
 Loads the Rhai module `<project>/path.rhai`; its functions and `export`ed constants are used
-as `name::item`.
+as `name::item`. The path must be written as a plain string literal (`import "lib/x" as x;`);
+a variable or a computed path is an error.
 
 ```rhai
-import "script-api/fdm" as fdm;
+import "lib/examples/fdm" as fdm;
 show(fdm::plate_with_hole(30, 4, 0.2), "plate");
 print(fdm::CLEARANCE);
 ```
 
 ## Project parts and values
 
-In a project folder (`docs/requirements/agent.md` §2) the files `parts/*.rhai` declare parts;
+In a project folder the files `parts/*.rhai` declare parts;
 `qoob3d serve` builds each part in a worker process and caches it.
 
 ### `part(name, options, |deps| shape)`
@@ -559,8 +700,7 @@ status = "measured"   # measured | one_source | assumption
 
 ## Checks
 
-The files `checks/*.rhai` of a project hold named checks (`docs/requirements/agent.md` §4.2,
-ADR-0054). `qoob3d check` (or the MCP tool `check`) builds stale parts and runs every check in
+The files `checks/*.rhai` of a project hold named checks. `qoob3d check` (or the MCP tool `check`) builds stale parts and runs every check in
 a worker process under the project limits. A task can only go to `review` and a state can only
 be saved when its checks pass.
 
@@ -585,6 +725,14 @@ expectation does not stop the check, so one run shows everything that is wrong.
 `min` ≤ `actual` ≤ `max` (both borders inclusive). NaN never passes. Outside `check` the three
 functions are `Runtime` errors.
 
+### `expect_eq(actual, expected, text)`
+
+Records an expectation that holds if the two values are equal: ints, floats, strings or
+bools. There is no tolerance: floats must be exactly equal (use `expect_near` for measured
+lengths), an int equals the float of the same value, values of different types are never
+equal, and NaN never passes. Meant for counts, names and flags. Outside `check` it is a
+`Runtime` error.
+
 ```rhai
 part("Plate", #{}, |deps| box(20, 10, 2));
 check("plate_size", || {
@@ -592,6 +740,8 @@ check("plate_size", || {
     expect_near(plate.volume(), 400, 0.001, "volume of the plate");
     expect_between(plate.bbox().size[0], 19.9, 20.1, "width of the plate");
     expect(plate.is_valid(), "the plate is valid");
+    expect_eq(plate.solids(), 1, "the plate is one body");
+    expect_eq(faces(plate).len(), 6, "the plate is a plain cuboid");
 });
 ```
 
@@ -609,12 +759,9 @@ A failed run returns one error with line and column of the script position:
 | `Geometry` | an OpenCascade operation failed or its result is implausible; names the API function |
 | `Limit` | more than `max_operations` Rhai operations (default 50 000 000) or too deep recursion |
 
-**Plausibility rule (AG-SC-12)** after every boolean, `shell`, `fillet` and `chamfer`: the
+**Plausibility rule** after every boolean, `shell`, `fillet` and `chamfer`: the
 result volume must be > 1e-6 mm³; `cut`/`-` and `shell` must reduce the volume; a union must
 not be smaller than its largest input. A cut that misses the body is therefore an error,
 because it is almost always a placement mistake.
 
 Scripts have no file, network or process access beyond the functions above.
-
-From Rust, `qoob3d_kernel::script::{export_stl, export_3mf, export_step}` write the shown
-shapes (STL and 3MF meshed with 0.01 mm chordal tolerance, ADR-0034).

@@ -151,6 +151,24 @@ pub(crate) mod ffi {
             radius: f64,
             bend_radius: f64,
         ) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_profile_offset(
+            faces: &TopoDS_Shape,
+            distance: f64,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_element_sizes(
+            shape: &TopoDS_Shape,
+            faces: bool,
+            indices: &[u32],
+        ) -> Result<Vec<f64>>;
+        fn qoob3d_element_distances(
+            shape: &TopoDS_Shape,
+            faces: bool,
+            indices: &[u32],
+            point: &[f64],
+        ) -> Result<Vec<f64>>;
+        fn qoob3d_section(shape: &TopoDS_Shape, frame: &[f64]) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_bed_area(shape: &TopoDS_Shape) -> Result<f64>;
+        fn qoob3d_overhang_area(shape: &TopoDS_Shape, max_angle: f64) -> Result<f64>;
         fn qoob3d_write_step(shape: &TopoDS_Shape, path: &str) -> Result<()>;
         fn qoob3d_read_step(path: &str) -> Result<UniquePtr<TopoDS_Shape>>;
         fn qoob3d_write_brep(shape: &TopoDS_Shape, path: &str) -> Result<()>;

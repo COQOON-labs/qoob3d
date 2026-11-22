@@ -1,11 +1,13 @@
 //! Edge and face selectors, fillet, chamfer and shell of the script API
-//! (AG-SC-09, AG-SC-10). A selection remembers its shape; OCCT addresses the
+//! (AG-SC-09, AG-SC-10, AG-SC-19). A selection remembers its shape; OCCT addresses the
 //! elements by their index in `TopExp::MapShapes`.
 
 use rhai::{Dynamic, Engine};
 
 use super::Shape;
-use super::api::{Expect, Rr, axis, geometry, made, num, plausible, positive, runtime};
+use super::api::{
+    Expect, Rr, axis, geometry, made, non_negative, num, plausible, point, positive, runtime,
+};
 use crate::occt::ffi;
 
 /// Kind of seams and degenerate edges in `Qoob3dElements`: never selected.
@@ -78,6 +80,27 @@ impl Selection {
 
     fn indices(&self) -> Vec<u32> {
         self.items.iter().map(|e| e.index).collect()
+    }
+
+    /// Elements whose smallest distance to `p` is at most `r`.
+    fn near(mut self, p: [f64; 3], r: f64) -> Rr<Self> {
+        let distances =
+            ffi::qoob3d_element_distances(self.shape.get(), self.faces, &self.indices(), &p)
+                .map_err(|e| geometry("near", e.what()))?;
+        let near = self.items.into_iter().zip(distances).filter(|(_, d)| *d <= r + TOL_MM);
+        self.items = near.map(|(e, _)| e).collect();
+        Ok(self)
+    }
+
+    /// Sum of the lengths (edges) or areas (faces); `function` names which.
+    fn total(&self, function: &'static str, faces: bool) -> Rr<f64> {
+        if self.faces != faces {
+            let (what, other) = if faces { ("faces", "edges") } else { ("edges", "faces") };
+            return Err(runtime(format!("{function}() sums {what}, not {other}")));
+        }
+        let sizes = ffi::qoob3d_element_sizes(self.shape.get(), self.faces, &self.indices())
+            .map_err(|e| geometry(function, e.what()))?;
+        Ok(sizes.iter().sum())
     }
 }
 
@@ -173,7 +196,16 @@ pub(super) fn register(engine: &mut Engine) {
         }
         Ok(sel.at_z(z, tol))
     });
+    engine.register_fn("in_box", |sel: Selection, min: Dynamic, max: Dynamic| -> Rr<Selection> {
+        let (lo, hi) = (point(&min, "in_box: min")?, point(&max, "in_box: max")?);
+        Ok(sel.keep(|e| (0..3).all(|i| e.min[i] >= lo[i] - TOL_MM && e.max[i] <= hi[i] + TOL_MM)))
+    });
+    engine.register_fn("near", |sel: Selection, p: Dynamic, r: Dynamic| -> Rr<Selection> {
+        sel.near(point(&p, "near: point")?, non_negative(&r, "near: r")?)
+    });
     engine.register_fn("len", |sel: Selection| sel.items.len() as i64);
+    engine.register_fn("length", |sel: Selection| sel.total("length", false));
+    engine.register_fn("area", |sel: Selection| sel.total("area", true));
     engine.register_fn("fillet", |s: Shape, sel: Selection, r: Dynamic| -> Rr<Shape> {
         edge_feature("fillet", &s, &sel, positive(&r, "fillet: r")?)
     });

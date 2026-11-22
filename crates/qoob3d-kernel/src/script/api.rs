@@ -1,4 +1,4 @@
-//! The CAD functions of the script API (AG-SC-01…14, `docs/script-api.md`):
+//! The CAD functions of the script API (AG-SC-01…14, 18, 21, 22, `docs/script-api.md`):
 //! argument checks, placement and the plausibility rule AG-SC-12 in Rust,
 //! geometry in OCCT. Numbers may be ints or floats wherever a number is
 //! expected; lengths are mm, angles degrees.
@@ -33,8 +33,15 @@ pub(super) const FUSE: u32 = 0;
 pub(super) const CUT: u32 = 1;
 pub(super) const COMMON: u32 = 2;
 
+/// `kind` of `qoob3d_primitive`.
+const BOX: u32 = 0;
+const CYLINDER: u32 = 1;
+const SPHERE: u32 = 2;
+const CONE: u32 = 3;
+const TORUS: u32 = 4;
+
 pub(super) const TRANSLATE: u32 = 0;
-const ROTATE: u32 = 1;
+pub(super) const ROTATE: u32 = 1;
 const MIRROR: u32 = 2;
 const SCALE: u32 = 3;
 
@@ -81,7 +88,7 @@ pub(super) fn positive(v: &Dynamic, what: &str) -> Rr<f64> {
     }
 }
 
-fn non_negative(v: &Dynamic, what: &str) -> Rr<f64> {
+pub(super) fn non_negative(v: &Dynamic, what: &str) -> Rr<f64> {
     let x = num(v, what)?;
     if x >= 0.0 && x.is_finite() {
         Ok(x)
@@ -202,7 +209,7 @@ fn primitive(function: &'static str, kind: u32, dims: &[f64]) -> Rr<Shape> {
 
 /// Cylinder of diameter `d` from z = −`l` up to 0 (AG-SC-13).
 fn downward_cylinder(function: &'static str, d: f64, l: f64) -> Rr<Shape> {
-    let c = primitive(function, 1, &[d / 2.0, l])?;
+    let c = primitive(function, CYLINDER, &[d / 2.0, l])?;
     transform(function, &c, TRANSLATE, &[0.0, 0.0, -l])
 }
 
@@ -214,9 +221,11 @@ pub(super) fn register(
     engine.register_type_with_name::<Shape>("Shape");
     register_output(engine, output, project);
     register_solids(engine);
+    register_screw_holes(engine);
     register_booleans(engine);
     register_transforms(engine);
     register_measures(engine);
+    register_print_analysis(engine);
     profile::register(engine);
     select::register(engine);
 }
@@ -244,14 +253,14 @@ fn register_output(engine: &mut Engine, output: &Rc<RefCell<RunOutput>>, project
 fn register_solids(engine: &mut Engine) {
     engine.register_fn("box", |x: Dynamic, y: Dynamic, z: Dynamic| -> Rr<Shape> {
         let (x, y, z) = (positive(&x, "box: x")?, positive(&y, "box: y")?, positive(&z, "box: z")?);
-        primitive("box", 0, &[-x / 2.0, -y / 2.0, 0.0, x, y, z])
+        primitive("box", BOX, &[-x / 2.0, -y / 2.0, 0.0, x, y, z])
     });
     engine.register_fn("cylinder", |d: Dynamic, h: Dynamic| -> Rr<Shape> {
         let (d, h) = (positive(&d, "cylinder: d")?, positive(&h, "cylinder: h")?);
-        primitive("cylinder", 1, &[d / 2.0, h])
+        primitive("cylinder", CYLINDER, &[d / 2.0, h])
     });
     engine.register_fn("sphere", |d: Dynamic| -> Rr<Shape> {
-        primitive("sphere", 2, &[positive(&d, "sphere: d")? / 2.0])
+        primitive("sphere", SPHERE, &[positive(&d, "sphere: d")? / 2.0])
     });
     engine.register_fn("cone", |d1: Dynamic, d2: Dynamic, h: Dynamic| -> Rr<Shape> {
         let (d1, d2) = (non_negative(&d1, "cone: d1")?, non_negative(&d2, "cone: d2")?);
@@ -259,14 +268,14 @@ fn register_solids(engine: &mut Engine) {
         if d1 == d2 {
             return Err(runtime("cone: d1 and d2 must differ (equal diameters: cylinder)"));
         }
-        primitive("cone", 3, &[d1 / 2.0, d2 / 2.0, h])
+        primitive("cone", CONE, &[d1 / 2.0, d2 / 2.0, h])
     });
     engine.register_fn("torus", |ring: Dynamic, tube: Dynamic| -> Rr<Shape> {
         let (ring, tube) = (positive(&ring, "torus: d_ring")?, positive(&tube, "torus: d_tube")?);
         if tube >= ring {
             return Err(runtime("torus: d_tube must be smaller than d_ring"));
         }
-        primitive("torus", 4, &[ring / 2.0, tube / 2.0])
+        primitive("torus", TORUS, &[ring / 2.0, tube / 2.0])
     });
     engine.register_fn("pin", |d: Dynamic, l: Dynamic| -> Rr<Shape> {
         downward_cylinder("pin", positive(&d, "pin: d")?, positive(&l, "pin: l")?)
@@ -276,6 +285,60 @@ fn register_solids(engine: &mut Engine) {
         let c = non_negative(&clearance, "hole: clearance")?;
         downward_cylinder("hole", d + 2.0 * c, l + c)
     });
+}
+
+/// `d` and `head_d` of a screw hole tool: the head must be the wider one.
+fn hole_and_head(function: &str, d: &Dynamic, head_d: &Dynamic) -> Rr<(f64, f64)> {
+    let d = positive(d, &format!("{function}: d"))?;
+    let head_d = positive(head_d, &format!("{function}: head_d"))?;
+    if head_d > d {
+        Ok((d / 2.0, head_d / 2.0))
+    } else {
+        Err(runtime(format!("{function}: head_d ({head_d}) must be larger than d ({d})")))
+    }
+}
+
+/// Tool bodies for screw holes (AG-SC-18), downward from z = 0 like `hole`:
+/// turned outlines (radius, height), so each is one solid without a boolean.
+fn register_screw_holes(engine: &mut Engine) {
+    engine.register_fn(
+        "countersink",
+        |d: Dynamic, head_d: Dynamic, angle: Dynamic, l: Dynamic| -> Rr<Shape> {
+            let (r, head) = hole_and_head("countersink", &d, &head_d)?;
+            let angle = num(&angle, "countersink: angle_deg")?;
+            if !(angle > 0.0 && angle < 180.0) {
+                return Err(runtime(format!(
+                    "countersink: angle_deg must be between 0 and 180, got {angle}"
+                )));
+            }
+            let l = positive(&l, "countersink: l")?;
+            // The wall of the cone leaves the axis by `slope` per mm of depth.
+            let slope = (angle / 2.0).to_radians().tan();
+            let cone = (head - r) / slope;
+            let outline = if cone < l {
+                vec![[0.0, -l], [r, -l], [r, -cone], [head, 0.0], [0.0, 0.0]]
+            } else {
+                // The hole ends inside the cone.
+                vec![[0.0, -l], [head - l * slope, -l], [head, 0.0], [0.0, 0.0]]
+            };
+            profile::turned("countersink", &outline)
+        },
+    );
+    engine.register_fn(
+        "counterbore",
+        |d: Dynamic, head_d: Dynamic, head_h: Dynamic, l: Dynamic| -> Rr<Shape> {
+            let (r, head) = hole_and_head("counterbore", &d, &head_d)?;
+            let h = positive(&head_h, "counterbore: head_h")?;
+            let l = positive(&l, "counterbore: l")?;
+            if h >= l {
+                return Err(runtime(format!(
+                    "counterbore: head_h ({h}) must be smaller than the depth l ({l})"
+                )));
+            }
+            let outline = [[0.0, -l], [r, -l], [r, -h], [head, -h], [head, 0.0], [0.0, 0.0]];
+            profile::turned("counterbore", &outline)
+        },
+    );
 }
 
 fn register_booleans(engine: &mut Engine) {
@@ -345,6 +408,10 @@ fn register_transforms(engine: &mut Engine) {
 fn register_measures(engine: &mut Engine) {
     engine.register_fn("volume", |s: Shape| s.volume());
     engine.register_fn("area", |s: Shape| occt("area", occ(ffi::qoob3d_area(s.get()))));
+    engine.register_fn("mass", |s: Shape, density: Dynamic| -> Rr<f64> {
+        // g/cm³ times mm³, 1000 mm³ = 1 cm³.
+        Ok(s.volume() * positive(&density, "mass: density_g_cm3")? / 1000.0)
+    });
     engine.register_fn("is_valid", |s: Shape| s.is_valid());
     engine.register_fn("solids", |s: Shape| s.solid_count() as i64);
     engine.register_fn("center", |s: Shape| -> Rr<Array> {
@@ -375,4 +442,17 @@ fn register_measures(engine: &mut Engine) {
             .map(|p| Dynamic::from_array(p.iter().copied().map(Dynamic::from_float).collect()))
             .collect())
     });
+}
+
+/// First print analysis (AG-SC-22): the shape stands as modelled, bed at its
+/// lowest z.
+fn register_print_analysis(engine: &mut Engine) {
+    engine.register_fn("overhangs", |s: Shape, limit: Dynamic| -> Rr<f64> {
+        let deg = num(&limit, "overhangs: max_angle_deg")?;
+        if !(0.0..=90.0).contains(&deg) {
+            return Err(runtime(format!("overhangs: max_angle_deg must be in [0, 90], got {deg}")));
+        }
+        occt("overhangs", occ(ffi::qoob3d_overhang_area(s.get(), deg.to_radians())))
+    });
+    engine.register_fn("bed_area", |s: Shape| occt("bed_area", occ(ffi::qoob3d_bed_area(s.get()))));
 }

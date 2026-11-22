@@ -8,9 +8,13 @@
 #include <utility>
 #include <vector>
 
+#include <cmath>
+
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
+#include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
@@ -18,6 +22,7 @@
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <ChFi2d_FilletAPI.hxx>
+#include <IMeshTools_Parameters.hxx>
 #include <IntCurvesFace_ShapeIntersector.hxx>
 #include <STEPControl_Reader.hxx>
 #include <STEPControl_Writer.hxx>
@@ -41,6 +46,7 @@
 #include <BRep_Builder.hxx>
 #include <Bnd_Box.hxx>
 #include <GeomAPI_Interpolate.hxx>
+#include <GeomLib.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <ShapeFix_Face.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
@@ -70,6 +76,7 @@
 #include <GCPnts_TangentialDeflection.hxx>
 #include <Poly_PolygonOnTriangulation.hxx>
 #include <Poly_Triangulation.hxx>
+#include <Precision.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -1334,5 +1341,383 @@ std::unique_ptr<TopoDS_Shape> qoob3d_read_brep(rust::Str path) {
       throw std::runtime_error("BREP file could not be read");
     }
     return own(shape);
+  });
+}
+
+// ---------------------------------------------------------------- script API additions
+
+namespace {
+
+// Largest angle (rad) between neighbouring mesh segments of curved faces in
+// the overhang analysis.
+const double OVERHANG_MESH_ANGLE = 0.1;
+
+// All faces of `shape` as one compound; none is an error saying `empty`.
+TopoDS_Shape faces_of(const TopoDS_Shape &shape, const char *empty) {
+  TopExp_Explorer face(shape, TopAbs_FACE);
+  if (!face.More()) {
+    throw std::runtime_error(empty);
+  }
+  BRep_Builder bb;
+  TopoDS_Compound faces;
+  bb.MakeCompound(faces);
+  for (; face.More(); face.Next()) {
+    bb.Add(faces, face.Current());
+  }
+  return faces;
+}
+
+// Closed outlines in the plane z = 0 that do not cross, as regions: an
+// outline inside an odd number of others bounds a hole.
+void outline_regions(const TopoDS_Shape &outlines, TopTools_ListOfShape &regions) {
+  const gp_Pln plane(gp::XOY());
+  std::vector<TopoDS_Face> discs;
+  std::vector<gp_Pnt2d> points; // one point of each outline
+  for (TopExp_Explorer w(outlines, TopAbs_WIRE); w.More(); w.Next()) {
+    const TopoDS_Wire wire = TopoDS::Wire(w.Current());
+    TopExp_Explorer vertex(wire, TopAbs_VERTEX);
+    if (!wire.Closed() || !vertex.More()) {
+      throw std::runtime_error("an offset outline is not closed");
+    }
+    const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(vertex.Current()));
+    points.emplace_back(p.X(), p.Y());
+    // `Inside`: the face is the finite side, whichever way the wire runs.
+    discs.push_back(BRepBuilderAPI_MakeFace(plane, wire, Standard_True).Face());
+  }
+  const size_t n = discs.size();
+  std::vector<std::vector<bool>> inside(n, std::vector<bool>(n, false)); // [i][j]: i in j
+  std::vector<int> depth(n, 0);
+  for (size_t j = 0; j < n; ++j) {
+    IntTools_FClass2d where(discs[j], 1e-7);
+    for (size_t i = 0; i < n; ++i) {
+      if (i != j && where.Perform(points[i]) == TopAbs_IN) {
+        inside[i][j] = true;
+        ++depth[i];
+      }
+    }
+  }
+  for (size_t i = 0; i < n; ++i) {
+    if (depth[i] % 2 != 0) {
+      continue;
+    }
+    BRepBuilderAPI_MakeFace region(discs[i]);
+    for (size_t j = 0; j < n; ++j) {
+      if (depth[j] == depth[i] + 1 && inside[j][i]) {
+        // A hole runs against the outline of its face.
+        region.Add(TopoDS::Wire(BRepTools::OuterWire(discs[j]).Reversed()));
+      }
+    }
+    regions.Append(region.Face());
+  }
+}
+
+// The regions of the closed outline `wire` in the plane z = 0 after it grew
+// by `delta` (shrank, if negative); none if it vanished. Corners that point
+// outward become arcs.
+void grow_outline(const TopoDS_Wire &wire, double delta, TopTools_ListOfShape &regions) {
+  const gp_Pln plane(gp::XOY());
+  TopExp_Explorer edges(wire, TopAbs_EDGE);
+  if (!edges.More()) {
+    throw std::runtime_error("an outline has no edge");
+  }
+  BRepAdaptor_Curve curve(TopoDS::Edge(edges.Current()));
+  edges.Next();
+  const double turn = curve.LastParameter() - curve.FirstParameter();
+  if (!edges.More() && curve.GetType() == GeomAbs_Circle && std::abs(turn - 2.0 * M_PI) < 1e-9) {
+    // A full circle changes its radius. OCCT's own shortcut for this misses
+    // radii up to 1 mm and then crashes in the bisector code.
+    gp_Circ circle = curve.Circle();
+    if (circle.Radius() + delta > 1e-7) {
+      circle.SetRadius(circle.Radius() + delta);
+      const TopoDS_Wire grown = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(circle).Edge());
+      regions.Append(BRepBuilderAPI_MakeFace(plane, grown, Standard_True).Face());
+    }
+    return;
+  }
+  // The offset follows the bisectors of the outline; parts that vanish are
+  // trimmed away.
+  BRepOffsetAPI_MakeOffset offset(BRepBuilderAPI_MakeFace(plane, wire, Standard_True).Face(),
+                                  GeomAbs_Arc);
+  offset.Perform(delta);
+  if (!offset.IsDone()) {
+    throw std::runtime_error("offset failed");
+  }
+  outline_regions(offset.Shape(), regions);
+}
+
+TopoDS_Shape element(const TopTools_IndexedMapOfShape &map, uint32_t i) {
+  if (i < 1 || static_cast<int>(i) > map.Extent()) {
+    throw std::runtime_error("element index out of range");
+  }
+  return map(static_cast<int>(i));
+}
+
+double lowest_z(const TopoDS_Shape &shape) {
+  Bnd_Box box;
+  BRepBndLib::AddOptimal(shape, box, Standard_False, Standard_False);
+  if (box.IsVoid()) {
+    throw std::runtime_error("empty shape");
+  }
+  return box.CornerMin().Z();
+}
+
+double area_of(const TopoDS_Shape &shape) {
+  GProp_GProps props;
+  BRepGProp::SurfaceProperties(shape, props);
+  return props.Mass();
+}
+
+// Outward normal of a planar face (mirrored planes have a left-handed frame).
+gp_Dir outward(const TopoDS_Face &face, const gp_Pln &plane) {
+  const gp_Dir n = plane.Position().XDirection().Crossed(plane.Position().YDirection());
+  return face.Orientation() == TopAbs_REVERSED ? n.Reversed() : n;
+}
+
+// Whether a planar face with the outward normal `n` lies on the bed z = `bed`.
+bool on_bed(const gp_Pln &plane, const gp_Dir &n, double bed) {
+  return n.Z() < -(1.0 - 1e-9) && std::abs(plane.Location().Z() - bed) < 1e-6;
+}
+
+// Share of a triangle where a function that is linear on it and has the
+// values `f` at the corners is positive.
+double positive_share(const double f[3]) {
+  const int count = (f[0] > 0.0) + (f[1] > 0.0) + (f[2] > 0.0);
+  if (count == 0 || count == 3) {
+    return count == 3 ? 1.0 : 0.0;
+  }
+  // The corner that stands alone cuts off a similar triangle.
+  const bool lone_positive = count == 1;
+  int a = 0;
+  while ((f[a] > 0.0) != lone_positive) {
+    ++a;
+  }
+  const double fa = f[a], fb = f[(a + 1) % 3], fc = f[(a + 2) % 3];
+  const double corner = (fa / (fa - fb)) * (fa / (fa - fc));
+  return lone_positive ? corner : 1.0 - corner;
+}
+
+// Angle (rad) between a normal and straight down.
+double from_down(const gp_Dir &n) {
+  return std::acos(std::max(-1.0, std::min(1.0, -n.Z())));
+}
+
+// Area of a meshed face where the outward normal is closer than `limit`
+// (rad) to −Z. Every corner of a triangle carries the angle of the true
+// surface normal there; between the corners it is taken as linear, which
+// is exact along the turn of a cylinder, a sphere or a torus. The triangle
+// areas are scaled to the exact area of the face.
+double overhang_of_mesh(const TopoDS_Face &face, double limit) {
+  TopLoc_Location loc;
+  const Handle(Poly_Triangulation) &tri = BRep_Tool::Triangulation(face, loc);
+  const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+  if (tri.IsNull() || !tri->HasUVNodes() || surface.IsNull()) {
+    throw std::runtime_error("a curved face could not be meshed");
+  }
+  const gp_Trsf trsf = loc.Transformation();
+  const bool reversed = face.Orientation() == TopAbs_REVERSED;
+  // Margin to the limit per node; NaN where the surface has no normal (the
+  // tip of a cone).
+  std::vector<double> margin(tri->NbNodes() + 1, std::nan(""));
+  for (int i = 1; i <= tri->NbNodes(); ++i) {
+    gp_Dir n;
+    if (GeomLib::NormEstim(surface, tri->UVNode(i), Precision::Confusion(), n) <= 1) {
+      margin[i] = limit - from_down(reversed ? n.Reversed() : n);
+    }
+  }
+  double meshed = 0.0, hit = 0.0;
+  for (int t = 1; t <= tri->NbTriangles(); ++t) {
+    int node[3];
+    tri->Triangle(t).Get(node[0], node[1], node[2]);
+    gp_Pnt p[3];
+    double f[3], sum = 0.0;
+    int known = 0;
+    for (int k = 0; k < 3; ++k) {
+      p[k] = tri->Node(node[k]).Transformed(trsf);
+      f[k] = margin[node[k]];
+      if (!std::isnan(f[k])) {
+        sum += f[k];
+        ++known;
+      }
+    }
+    if (known == 0) {
+      continue;
+    }
+    for (double &value : f) {
+      // A corner without a normal follows the others.
+      value = std::isnan(value) ? sum / known : value;
+    }
+    const double area = 0.5 * gp_Vec(p[0], p[1]).Crossed(gp_Vec(p[0], p[2])).Magnitude();
+    meshed += area;
+    hit += area * positive_share(f);
+  }
+  return meshed > 0.0 ? hit * area_of(face) / meshed : 0.0;
+}
+
+} // namespace
+
+std::unique_ptr<TopoDS_Shape> qoob3d_profile_offset(const TopoDS_Shape &faces, double distance) {
+  return guarded("profile_offset", [&] {
+    // Every outline is offset on its own and the regions are combined
+    // afterwards: the offset of a whole face needs the bisectors between
+    // its wires, and OCCT crashes on those of concentric circles.
+    TopTools_ListOfShape regions;
+    for (TopExp_Explorer f(faces, TopAbs_FACE); f.More(); f.Next()) {
+      const TopoDS_Wire outer = BRepTools::OuterWire(TopoDS::Face(f.Current()));
+      TopTools_ListOfShape grown, holes;
+      for (TopoDS_Iterator w(f.Current()); w.More(); w.Next()) {
+        const bool hole = !w.Value().IsSame(outer);
+        grow_outline(TopoDS::Wire(w.Value()), hole ? -distance : distance, hole ? holes : grown);
+      }
+      TopoDS_Shape cut;
+      if (grown.IsEmpty() || holes.IsEmpty()) {
+        regions.Append(grown);
+      } else if (grown.Extent() == 1 && punch(grown, holes, cut)) {
+        regions.Append(cut);
+      } else {
+        cut = boolean(grown, holes, 1);
+        for (TopExp_Explorer left(cut, TopAbs_FACE); left.More(); left.Next()) {
+          regions.Append(left.Current());
+        }
+      }
+    }
+    const char *empty = "nothing is left of the profile";
+    if (regions.IsEmpty()) {
+      throw std::runtime_error(empty);
+    }
+    BRep_Builder bb;
+    TopoDS_Compound all;
+    bb.MakeCompound(all);
+    for (TopTools_ListIteratorOfListOfShape it(regions); it.More(); it.Next()) {
+      bb.Add(all, it.Value());
+    }
+    if (distance > 0.0 && regions.Extent() > 1) {
+      // Regions that grew may have met.
+      TopTools_ListOfShape first;
+      first.Append(regions.First());
+      regions.RemoveFirst();
+      return own(faces_of(boolean(first, regions, 0), empty));
+    }
+    return own(all);
+  });
+}
+
+rust::Vec<double> qoob3d_element_sizes(const TopoDS_Shape &shape, bool faces,
+                                       rust::Slice<const uint32_t> indices) {
+  return guarded("element_sizes", [&] {
+    TopTools_IndexedMapOfShape map;
+    TopExp::MapShapes(shape, faces ? TopAbs_FACE : TopAbs_EDGE, map);
+    rust::Vec<double> out;
+    for (uint32_t i : indices) {
+      GProp_GProps props;
+      if (faces) {
+        BRepGProp::SurfaceProperties(element(map, i), props);
+      } else {
+        BRepGProp::LinearProperties(element(map, i), props);
+      }
+      out.push_back(props.Mass());
+    }
+    return out;
+  });
+}
+
+rust::Vec<double> qoob3d_element_distances(const TopoDS_Shape &shape, bool faces,
+                                           rust::Slice<const uint32_t> indices,
+                                           rust::Slice<const double> point) {
+  return guarded("element_distances", [&] {
+    need(point, 3, "point");
+    TopTools_IndexedMapOfShape map;
+    TopExp::MapShapes(shape, faces ? TopAbs_FACE : TopAbs_EDGE, map);
+    const TopoDS_Vertex vertex = BRepBuilderAPI_MakeVertex(point_at(point, 0)).Vertex();
+    rust::Vec<double> out;
+    for (uint32_t i : indices) {
+      BRepExtrema_DistShapeShape dist(vertex, element(map, i));
+      if (!dist.IsDone()) {
+        throw std::runtime_error("distance failed");
+      }
+      out.push_back(dist.Value());
+    }
+    return out;
+  });
+}
+
+std::unique_ptr<TopoDS_Shape> qoob3d_section(const TopoDS_Shape &shape,
+                                             rust::Slice<const double> frame) {
+  return guarded("section", [&] {
+    // In the coordinates of the plane the cut is at z = 0.
+    const TopoDS_Shape local =
+        BRepBuilderAPI_Transform(shape, frame_trsf(frame).Inverted(), Standard_False).Shape();
+    Bnd_Box box;
+    BRepBndLib::Add(local, box);
+    if (box.IsVoid()) {
+      throw std::runtime_error("empty shape");
+    }
+    const gp_Pnt lo = box.CornerMin(), hi = box.CornerMax();
+    const double m = 1.0;
+    TopTools_ListOfShape plane, solids;
+    plane.Append(BRepBuilderAPI_MakeFace(gp_Pln(gp::XOY()), lo.X() - m, hi.X() + m, lo.Y() - m,
+                                         hi.Y() + m)
+                     .Face());
+    flatten(local, solids);
+    return own(faces_of(boolean(plane, solids, 2), "the plane does not cut the shape"));
+  });
+}
+
+double qoob3d_bed_area(const TopoDS_Shape &shape) {
+  return guarded("bed_area", [&] {
+    const double bed = lowest_z(shape);
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    double total = 0.0;
+    for (int i = 1; i <= faces.Extent(); ++i) {
+      const TopoDS_Face &face = TopoDS::Face(faces(i));
+      BRepAdaptor_Surface surface(face);
+      if (surface.GetType() == GeomAbs_Plane &&
+          on_bed(surface.Plane(), outward(face, surface.Plane()), bed)) {
+        total += area_of(face);
+      }
+    }
+    return total;
+  });
+}
+
+double qoob3d_overhang_area(const TopoDS_Shape &shape, double max_angle) {
+  return guarded("overhang_area", [&] {
+    const double bed = lowest_z(shape);
+    // A hair below the angle: a wall that is vertical up to rounding never counts.
+    const double limit = max_angle - 1e-9;
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    double total = 0.0;
+    BRep_Builder bb;
+    TopoDS_Compound curved;
+    bb.MakeCompound(curved);
+    for (int i = 1; i <= faces.Extent(); ++i) {
+      const TopoDS_Face &face = TopoDS::Face(faces(i));
+      BRepAdaptor_Surface surface(face);
+      if (surface.GetType() != GeomAbs_Plane) {
+        bb.Add(curved, face);
+        continue;
+      }
+      const gp_Dir n = outward(face, surface.Plane());
+      if (from_down(n) < limit && !on_bed(surface.Plane(), n, bed)) {
+        total += area_of(face);
+      }
+    }
+    if (TopoDS_Iterator(curved).More()) {
+      // Mesh a copy (same geometry): the mesh of the shape itself, which
+      // export and display use, stays as it is.
+      const TopoDS_Shape copy = BRepBuilderAPI_Copy(curved, Standard_False).Shape();
+      Bnd_Box box;
+      BRepBndLib::Add(copy, box);
+      IMeshTools_Parameters mesh;
+      mesh.Angle = mesh.AngleInterior = OVERHANG_MESH_ANGLE;
+      mesh.Deflection = mesh.DeflectionInterior = 1e-3 * std::sqrt(box.SquareExtent());
+      mesh.InParallel = Standard_True;
+      BRepMesh_IncrementalMesh mesher(copy, mesh);
+      for (TopExp_Explorer f(copy, TopAbs_FACE); f.More(); f.Next()) {
+        total += overhang_of_mesh(TopoDS::Face(f.Current()), limit);
+      }
+    }
+    return total;
   });
 }
