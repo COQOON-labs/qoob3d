@@ -254,3 +254,93 @@ fn ag_hd_06_non_literal_import_is_refused_in_declare_mode_too() {
     let e = run(source, &options).expect_err("a non-literal import must fail");
     assert_eq!(position(&e).0, 2, "{e:?}");
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0056: the size measurement of declare mode costs linear time
+// ---------------------------------------------------------------------------
+
+/// Loop iterations of [`counting`] that cost about 900 000 operations in
+/// declare mode (4 per iteration there; 250 000 iterations reach the
+/// 1 000 000 of AG-HD-02). `adr_0056_counting_premise` checks the bounds
+/// that do not depend on how declare mode counts.
+const LONG_TOP_LEVEL: u32 = 225_000;
+
+/// A top level of `n` cheap loop iterations; the loop is on line 2.
+fn counting(n: u32) -> String {
+    format!("let x = 0;\nfor i in 0..{n} {{ x += 1; }}\n")
+}
+
+/// Debug-build bound of ADR-0056 for a top level of about a million
+/// operations. Plain evaluation of that many operations takes well under a
+/// second in a debug build; the quadratic staged measurement (a measurement
+/// every 4096 operations) needed 3.7 s for this loop and more than the 20 s
+/// start-up budget of the service for a file that runs into the limit.
+const LINEAR_BOUND: Duration = Duration::from_secs(3);
+
+#[test]
+fn adr_0056_counting_premise() {
+    // The premise of the tests below: the counting loop is a long top
+    // level (more than 600 000 operations even by the cheaper count of a
+    // plain run, measured with its operation limit) and it fits into the
+    // 1 000 000 operations of declaration discovery (it runs to its end).
+    let source = counting(LONG_TOP_LEVEL);
+    let short = RunOptions { max_operations: 600_000, ..RunOptions::default() };
+    let r = run(&source, &short);
+    assert!(matches!(r, Err(ScriptError::Limit { .. })), "fewer than 600 000 operations: {r:?}");
+    run_ok(&source, &declare());
+}
+
+#[test]
+fn adr_0056_a_long_top_level_without_violation_finishes_in_linear_time() {
+    // ADR-0056: "The measuring stages double (4096, 8192, …), so the total
+    // cost is linear in the operations of the file." About 900 000
+    // operations and no size violation: the part after the loop is
+    // declared, within 3 s.
+    let source = format!("{}part(\"Late\", #{{}}, |deps| 1);\n", counting(LONG_TOP_LEVEL));
+    let start = Instant::now();
+    let out = run_ok(&source, &declare());
+    let elapsed = start.elapsed();
+    assert_eq!(out.parts.len(), 1, "the part after the loop is declared");
+    assert!(elapsed < LINEAR_BOUND, "declare mode took {elapsed:?} for about 900 000 operations");
+}
+
+#[test]
+fn adr_0056_a_violation_after_a_long_top_level_is_reported_in_linear_time() {
+    // The same loop, then a string that crosses 65536 bytes on line 4
+    // (16 B * 2^13, a few dozen operations more). The loop alone runs to
+    // its end (premise), so line 4 can only be the size limit; it must be
+    // reported within 3 s.
+    let source = format!(
+        "{}let s = \"0123456789abcdef\";\nfor i in 0..13 {{ s += s; }}\nprint(s.len());\n",
+        counting(LONG_TOP_LEVEL)
+    );
+    let start = Instant::now();
+    let r = run(&source, &declare());
+    let elapsed = start.elapsed();
+    match r {
+        Err(ScriptError::Limit { line, message, .. }) => {
+            assert_eq!(line, 4, "position of the limit: {message}");
+        }
+        other => panic!("expected Limit in declare mode, got {other:?}"),
+    }
+    assert!(elapsed < LINEAR_BOUND, "the size limit was reported after {elapsed:?}");
+}
+
+#[test]
+fn adr_0056_a_violation_early_in_a_long_top_level_is_still_found() {
+    // Doubling stages must not lose a violation: the array passes 10 000
+    // elements after 10 001 of 100 000 iterations and keeps its 20 000
+    // elements to the end of the loop on line 2. The same loop without the
+    // growth runs to its end, so the `Limit` is the size limit.
+    let looping = |body: &str| {
+        format!(
+            "let a = [];\nfor i in 0..100000 {{ if i < 20000 {{ {body} }} }}\nprint(a.len());\n"
+        )
+    };
+    run_ok(&looping("a = [i];"), &declare());
+    let start = Instant::now();
+    let r = run(&looping("a += [i];"), &declare());
+    let elapsed = start.elapsed();
+    assert!(matches!(r, Err(ScriptError::Limit { line: 2, .. })), "{r:?}");
+    assert!(elapsed < LINEAR_BOUND, "the size limit was reported after {elapsed:?}");
+}

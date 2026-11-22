@@ -1513,22 +1513,99 @@ fn ag_hd_02_a_string_bomb_in_a_check_file_is_a_load_error() {
     assert_bomb_is_a_load_error("hd-02-check", "checks/bomb.rhai", &source);
 }
 
+/// The errors anywhere in a `/status` answer: every JSON object with a
+/// string `kind` and a `message`, as `(kind, text of the object)`. ADR-0056
+/// reports load errors per file; where in the answer is not specified.
+fn status_errors(v: &Value, out: &mut Vec<(String, String)>) {
+    match v {
+        Value::Object(map) => {
+            if let (Some(kind), true) =
+                (map.get("kind").and_then(Value::as_str), map.contains_key("message"))
+            {
+                out.push((kind.to_owned(), v.to_string()));
+            }
+            for child in map.values() {
+                status_errors(child, out);
+            }
+        }
+        Value::Array(list) => {
+            for child in list {
+                status_errors(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Polls `/status` every 50 ms until it reports an error of one of `kinds`
+/// that names the file `rel`, for at most `within`. Every poll must be
+/// answered within 100 ms (AG-SV-01; ADR-0056: "`/status` must not wait for
+/// discovery longer than its 100 ms budget"). Returns the kind found.
+fn wait_for_load_error(s: &Service, rel: &str, kinds: &[&str], within: Duration) -> String {
+    load_error_within(s, rel, kinds, within, Duration::from_millis(100))
+}
+
+/// As [`wait_for_load_error`] with `budget` per `/status` answer, for tests
+/// whose subject is not the latency of `/status`.
+fn load_error_within(
+    s: &Service,
+    rel: &str,
+    kinds: &[&str],
+    within: Duration,
+    budget: Duration,
+) -> String {
+    let deadline = Instant::now() + within;
+    let mut polls = 0;
+    loop {
+        let t = Instant::now();
+        let r = s
+            .try_request("GET", "/status", None, Duration::from_secs(5))
+            .unwrap_or_else(|e| panic!("{rel}, poll {polls}: /status: {e}\n{}", s.log()));
+        let took = t.elapsed();
+        assert!(took < budget, "{rel}, poll {polls}: /status took {took:?}");
+        assert_eq!(r.code, 200, "{rel}, poll {polls}: {}", r.text());
+        let v = r.envelope();
+        let mut errors = Vec::new();
+        status_errors(&v, &mut errors);
+        let found =
+            errors.iter().find(|(kind, text)| kinds.contains(&kind.as_str()) && text.contains(rel));
+        if let Some((kind, _)) = found {
+            return kind.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{rel}: no load error ({kinds:?}) after {within:?} and {polls} polls: {v}\n{}",
+            s.log()
+        );
+        polls += 1;
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn ag_hd_02_discovery_stops_after_a_million_operations() {
     // "`max_operations` 1000000" for discovery: 2 000 000 loop iterations
     // (at least one operation each) at the top level never reach the part
     // declaration; a worker run (50 000 000, AG-SC-02) would.
+    //
+    // ADR-0056: discovery runs in a worker, so the service is up at once
+    // (`Service::start` needs an answer to `/status` within a second) and
+    // the load error follows; with linear measuring cost a million
+    // operations take about a second in a debug build, 10 s is generous.
     let p = Project::new("hd-02-ops", "[workers]\ncount = 1\n");
     p.write("parts/normal.rhai", NORMAL).write(
         "parts/slow.rhai",
         "let n = 0;\nfor i in 0..2000000 { n += 1; }\npart(\"Late\", #{}, |deps| box(1, 1, 1));\n",
     );
     let s = Service::start(&p);
+    wait_for_load_error(&s, "parts/slow.rhai", &["load", "limit"], Duration::from_secs(10));
     let r = s.get("/status");
-    let v = r.envelope();
-    assert!(r.text().contains("parts/slow.rhai"), "/status names the file: {v}");
-    assert_eq!(load_error_kind(&v), Some("load"), "{v}");
-    assert!(!r.text().contains("\"Late\""), "the part after the loop is not declared: {v}");
+    assert!(
+        !r.text().contains("\"Late\""),
+        "the part after the loop is not declared: {}",
+        r.text()
+    );
+    assert!(alive(s.pid));
 }
 
 /// HTTP status of a hand-written request: `host` as `Host` header (none if
@@ -1842,4 +1919,108 @@ fn ag_hd_10_status_lists_at_most_the_20_newest_jobs_with_their_kind() {
     assert!(kinds.get("build").is_some_and(|n| *n <= 18), "old builds were dropped: {st}");
     let ids: BTreeSet<String> = jobs.iter().map(|j| j["id"].to_string()).collect();
     assert_eq!(ids.len(), jobs.len(), "no job twice: {st}");
+}
+
+// ===========================================================================
+// ADR-0056: declaration discovery runs in a worker
+// ===========================================================================
+
+/// A top level that never ends. Rhai counts operations, so discovery stops
+/// it at 1 000 000 (AG-HD-02) unless the time limit comes first.
+const ENDLESS_TOP_LEVEL: &str = "loop {}\n";
+
+/// A project with one normal part whose service runs; the file `rel` with
+/// `source` is written afterwards, as an agent would.
+fn service_then_file(tag: &str, extra: &str, rel: &str, source: &str) -> (Project, Service) {
+    let p = Project::new(tag, extra);
+    p.write("parts/normal.rhai", NORMAL);
+    let s = Service::start_capped(&p, BOMB_CAP_KIB);
+    assert_eq!(states(&s.status())["Normal"], "never_built");
+    p.write(rel, source);
+    (p, s)
+}
+
+#[test]
+fn adr_0056_an_endless_top_level_never_blocks_the_service() {
+    // ADR-0056: "The service never evaluates user scripts. Declaration
+    // discovery of part and check files is a worker request … under the
+    // project's time limit". `/status` answers within 100 ms on every poll
+    // from the moment the file exists, and reports the file's load error
+    // (operation limit or time limit, whichever comes first) within 10 s;
+    // `time_s` = 2.
+    let limits = "[limits]\ntime_s = 2\n[workers]\ncount = 2\n";
+    let (p, s) =
+        service_then_file("adr-56-endless", limits, "parts/endless.rhai", ENDLESS_TOP_LEVEL);
+    let before = service_json(&p.dir);
+    let kinds = ["load", "limit", "time_limit"];
+    wait_for_load_error(&s, "parts/endless.rhai", &kinds, Duration::from_secs(10));
+    // The same service process, still answering; its workers are usable.
+    assert!(alive(s.pid), "the service died");
+    assert_eq!(service_json(&p.dir), before, "the service was restarted");
+    assert_eq!(s.status()["workers"]["count"], json!(2));
+    // The same for a check file.
+    p.write("checks/endless.rhai", ENDLESS_TOP_LEVEL);
+    wait_for_load_error(&s, "checks/endless.rhai", &kinds, Duration::from_secs(10));
+    assert!(alive(s.pid), "the service died");
+}
+
+#[test]
+fn adr_0056_a_file_that_does_not_load_fails_only_itself() {
+    // ADR-0056: "A worker crash or limit during discovery fails only that
+    // file; the service stays up". The normal part next to the endless
+    // file is listed and builds (box(10, 20, 30) = 6000 mm³). The latency
+    // of `/status` is the subject of the test above, not of this one.
+    let limits = "[limits]\ntime_s = 2\n[workers]\ncount = 2\n";
+    let (_p, s) =
+        service_then_file("adr-56-beside", limits, "parts/endless.rhai", ENDLESS_TOP_LEVEL);
+    let kinds = ["load", "limit", "time_limit"];
+    let (within, patient) = (Duration::from_secs(10), Duration::from_secs(5));
+    load_error_within(&s, "parts/endless.rhai", &kinds, within, patient);
+    let st = s.status();
+    assert!(status_parts(&st).contains_key("Normal"), "the other file's part is listed: {st}");
+    assert_normal_builds(&s);
+    assert_eq!(states(&s.status())["Normal"], "current");
+    // The broken file is still reported after the build.
+    load_error_within(&s, "parts/endless.rhai", &kinds, within, patient);
+}
+
+/// Grows memory where the staged size measurement does not look: 150 000
+/// cheap iterations first (the measuring stages double, so late stages are
+/// hundreds of thousands of operations apart), then 80 000 map entries with
+/// a fresh string of 32 769 bytes each (below the 65536 of AG-HD-02):
+/// 80 000 * 32 KiB = 2.4 GiB if nothing stops it, far above `memory_mb` =
+/// 300. Bounded by the operation limit, and the service runs capped.
+const MEMORY_BETWEEN_MEASUREMENTS: &str = "\
+let x = 0;
+for i in 0..150000 { x += 1; }
+let s = \"0123456789abcdef\";
+for i in 0..11 { s += s; }
+let m = #{};
+for i in 0..80000 { m[`k${i}`] = s + \"x\"; }
+part(\"Late\", #{}, |deps| box(1, 1, 1));
+";
+
+#[test]
+fn adr_0056_memory_grown_during_discovery_is_a_load_error_of_that_file() {
+    // ADR-0056: "memory that grows between two measurements is stopped by
+    // the worker's memory limit and reported as that file's load error
+    // (`memory_limit`)"; a measurement that still catches it gives `limit`.
+    // Either way: the service process itself never holds that memory, it
+    // answers `/status` within 100 ms throughout and stays alive.
+    let limits = "[limits]\ntime_s = 30\nmemory_mb = 300\n[workers]\ncount = 2\n";
+    let (p, s) = service_then_file(
+        "adr-56-memory",
+        limits,
+        "parts/hungry.rhai",
+        MEMORY_BETWEEN_MEASUREMENTS,
+    );
+    let before = service_json(&p.dir);
+    let kinds = ["load", "limit", "memory_limit"];
+    wait_for_load_error(&s, "parts/hungry.rhai", &kinds, Duration::from_secs(15));
+    assert!(alive(s.pid), "the service died");
+    assert_eq!(service_json(&p.dir), before, "the service was restarted");
+    let st = s.status();
+    assert!(!st.to_string().contains("\"Late\""), "the part after the loop is not declared: {st}");
+    // The worker that was stopped is replaced: the other part builds.
+    assert_normal_builds(&s);
 }
