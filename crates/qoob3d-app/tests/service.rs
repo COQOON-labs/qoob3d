@@ -2031,3 +2031,237 @@ fn adr_0056_memory_grown_during_discovery_is_a_load_error_of_that_file() {
     // The worker that was stopped is replaced: the other part builds.
     assert_normal_builds(&s);
 }
+
+// ===========================================================================
+// §3.1: `discovering` in /status and `POST /discover` (ADR-0056)
+// ===========================================================================
+
+/// M1 and M2 (depends on M1) in one file.
+const PART_MULTI: &str = "\
+part(\"M1\", #{}, |deps| box(10, 10, 10));
+part(\"M2\", #{ depends: [\"M1\"] }, |deps| deps[\"M1\"].move(0, 0, 10));
+";
+/// Line 2 lacks the closing parenthesis of `part(`: a syntax error.
+const PART_BROKEN: &str = "// a broken part file\npart(\"Broken\", #{}, |deps| box(1, 1, 1);\n";
+const CHECK_NORMAL: &str = "\
+check(\"normal_volume\", || {
+    expect_near(part(\"Normal\").volume(), 6000, 0.001, \"volume\");
+});
+";
+/// A top level of 200 000 loop iterations before its part: about 800 000
+/// operations in declare mode (4 per iteration, the limit of AG-HD-02 is
+/// 1 000 000 at 250 000 iterations; `script_hardening.rs` measures this),
+/// so discovery takes a noticeable fraction of a second.
+fn slow_part(name: &str) -> String {
+    format!(
+        "let x = 0;\nfor i in 0..200000 {{ x += 1; }}\npart(\"{name}\", #{{}}, |deps| box(1, 1, 1));\n"
+    )
+}
+
+/// `{file: entry}` of the `files` of a `/discover` answer.
+fn discovered(result: &Value) -> std::collections::BTreeMap<String, Value> {
+    result["files"]
+        .as_array()
+        .unwrap_or_else(|| panic!("/discover without files: {result}"))
+        .iter()
+        .map(|f| (f["file"].as_str().unwrap_or_default().to_owned(), f.clone()))
+        .collect()
+}
+
+/// Names in a list of declarations: `[{name, …}]` or plain strings.
+fn declared_names(list: &Value) -> BTreeSet<String> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e["name"].as_str().or_else(|| e.as_str()).map(str::to_owned))
+        .collect()
+}
+
+/// A project with a normal part, a file with two parts, a broken part
+/// file, a check file and a module nobody imports.
+fn discover_project(tag: &str) -> Project {
+    let p = Project::new(tag, "[workers]\ncount = 2\n");
+    p.write("parts/normal.rhai", NORMAL)
+        .write("parts/multi.rhai", PART_MULTI)
+        .write("parts/broken.rhai", PART_BROKEN)
+        .write("checks/normal.rhai", CHECK_NORMAL)
+        .write("lib/form.rhai", LIB_FORM);
+    p
+}
+
+#[test]
+fn discover_waits_for_chosen_files_and_reports_declarations_or_errors() {
+    // §3.1: "`POST /discover {"files": [..]|null, "wait_s": f64}` waits up
+    // to `wait_s` for the discovery of those part and check files →
+    // `{"files": [{file, state: "declared"|"failed"|"discovering", parts?:
+    // [{name, depends}], checks?: [..], error?}], "discovering": [..]}`".
+    let p = discover_project("discover");
+    let s = Service::start(&p);
+    let chosen = json!({"files": ["parts/multi.rhai", "parts/broken.rhai"], "wait_s": 10});
+    let r = s.post("/discover", &chosen).ok();
+    assert_eq!(r["discovering"], json!([]), "nothing is left after the wait: {r}");
+    let files = discovered(&r);
+    assert_eq!(
+        files.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["parts/broken.rhai", "parts/multi.rhai"],
+        "exactly the chosen files: {r}"
+    );
+    let multi = &files["parts/multi.rhai"];
+    assert_eq!(multi["state"], json!("declared"), "{multi}");
+    assert_eq!(declared_names(&multi["parts"]), set(&["M1", "M2"]), "{multi}");
+    let parts = multi["parts"].as_array().cloned().unwrap_or_default();
+    let depends = |name: &str| {
+        let part = parts.iter().find(|part| part["name"] == json!(name));
+        part.map(|part| part["depends"].clone()).unwrap_or_default()
+    };
+    assert_eq!((depends("M1"), depends("M2")), (json!([]), json!(["M1"])), "{multi}");
+    assert!(multi.get("error").is_none_or(Value::is_null), "{multi}");
+
+    let broken = &files["parts/broken.rhai"];
+    assert_eq!(broken["state"], json!("failed"), "{broken}");
+    let error = &broken["error"];
+    assert!(error["message"].as_str().is_some_and(|m| !m.is_empty()), "{broken}");
+    // The syntax error is on line 2.
+    let line_named = error["line"].as_u64() == Some(2) || error.to_string().contains("line 2");
+    assert!(line_named, "the error names line 2: {broken}");
+    assert!(
+        declared_names(&broken["parts"]).is_empty(),
+        "a failed file declares nothing: {broken}"
+    );
+}
+
+#[test]
+fn discover_null_covers_all_part_and_check_files() {
+    // "`null` = all": every `parts/*.rhai` and `checks/*.rhai`, not the
+    // modules in `lib/`.
+    let p = discover_project("discover-all");
+    let s = Service::start(&p);
+    let r = s.post("/discover", &json!({"files": null, "wait_s": 10})).ok();
+    assert_eq!(r["discovering"], json!([]), "{r}");
+    let files = discovered(&r);
+    let expected =
+        ["checks/normal.rhai", "parts/broken.rhai", "parts/multi.rhai", "parts/normal.rhai"];
+    assert_eq!(files.keys().map(String::as_str).collect::<Vec<_>>(), expected, "{r}");
+    for (file, state) in [
+        ("checks/normal.rhai", "declared"),
+        ("parts/broken.rhai", "failed"),
+        ("parts/multi.rhai", "declared"),
+        ("parts/normal.rhai", "declared"),
+    ] {
+        assert_eq!(files[file]["state"], json!(state), "{file}: {r}");
+    }
+    assert_eq!(declared_names(&files["parts/normal.rhai"]["parts"]), set(&["Normal"]));
+    let check = &files["checks/normal.rhai"];
+    assert_eq!(declared_names(&check["checks"]), set(&["normal_volume"]), "{check}");
+    // `/status` agrees: the parts of the files that load, one load error.
+    let st = s.status();
+    assert_eq!(st["discovering"], json!([]), "{st}");
+    let listed: BTreeSet<String> = status_parts(&st).into_keys().collect();
+    assert_eq!(listed, set(&["M1", "M2", "Normal"]), "{st}");
+    let errors = st["load_errors"].as_array().cloned().unwrap_or_default();
+    assert_eq!(errors.len(), 1, "{st}");
+    assert_eq!(errors[0]["file"], json!("parts/broken.rhai"), "{st}");
+}
+
+#[test]
+fn discover_of_files_that_are_no_part_or_check_files_answers_at_once() {
+    // The requirement speaks of "those part and check files". What a filter
+    // that names something else gets is not specified (an error or an
+    // empty list); it must not wait, must not report such a file as
+    // declared, and must leave nothing in `discovering`.
+    let p = discover_project("discover-filter");
+    let s = Service::start(&p);
+    for files in [
+        json!(["lib/form.rhai"]),
+        json!(["qoob3d.toml"]),
+        json!(["parts/no-such-file.rhai"]),
+        json!(["../outside.rhai"]),
+        json!([]),
+    ] {
+        let t = Instant::now();
+        let r = s.post("/discover", &json!({"files": files, "wait_s": 10}));
+        let took = t.elapsed();
+        assert!(took < Duration::from_secs(5), "{files}: /discover waited {took:?}");
+        let v = r.envelope();
+        if v["ok"] == json!(true) {
+            let result = &v["result"];
+            assert_eq!(result["discovering"], json!([]), "{files}: {v}");
+            for entry in discovered(result).values() {
+                assert_ne!(entry["state"], json!("declared"), "{files}: {v}");
+                assert_ne!(entry["state"], json!("discovering"), "{files}: {v}");
+            }
+        }
+    }
+    // Nothing chosen: nothing reported.
+    let none = s.post("/discover", &json!({"files": [], "wait_s": 10})).ok();
+    assert_eq!(none["files"], json!([]), "{none}");
+    // The service is unimpressed.
+    assert_normal_builds(&s);
+}
+
+#[test]
+fn status_lists_files_under_discovery_and_drops_them_once_known() {
+    // §3.1: "`/status` never waits for discovery: `"discovering": [files]`
+    // lists the part and check files whose declarations are not known yet
+    // (… a new file has no parts yet)."
+    let p = Project::new("discovering", "[workers]\ncount = 2\n");
+    p.write("parts/normal.rhai", NORMAL);
+    let s = Service::start(&p);
+    s.post("/discover", &json!({"files": null, "wait_s": 10})).ok();
+    assert_eq!(s.status()["discovering"], json!([]), "everything is known");
+
+    // A new file that takes a while: the very next answer cannot know it.
+    p.write("parts/slow.rhai", &slow_part("Slow"));
+    let st = s.status();
+    assert_eq!(st["discovering"], json!(["parts/slow.rhai"]), "{st}");
+    let listed: BTreeSet<String> = status_parts(&st).into_keys().collect();
+    assert_eq!(listed, set(&["Normal"]), "a new file has no parts yet: {st}");
+
+    // `wait_s` = 0 does not wait either: the file is still being discovered.
+    let r = s.post("/discover", &json!({"files": ["parts/slow.rhai"], "wait_s": 0})).ok();
+    let files = discovered(&r);
+    if files["parts/slow.rhai"]["state"] != json!("declared") {
+        assert_eq!(files["parts/slow.rhai"]["state"], json!("discovering"), "{r}");
+        assert_eq!(r["discovering"], json!(["parts/slow.rhai"]), "{r}");
+    }
+
+    // Once known it leaves the list and its part appears.
+    let mut last = Value::Null;
+    let known = wait_until(Duration::from_secs(10), || {
+        last = s.status();
+        last["discovering"] == json!([])
+    });
+    assert!(known, "parts/slow.rhai is still being discovered: {last}");
+    let parts = status_parts(&last);
+    assert_eq!(parts.keys().cloned().collect::<BTreeSet<_>>(), set(&["Normal", "Slow"]), "{last}");
+    assert_eq!(parts["Slow"]["state"], json!("never_built"), "{last}");
+    assert_eq!(last["load_errors"], json!([]), "{last}");
+
+    // A changed file is discovered again; its earlier part stays listed.
+    p.write("parts/slow.rhai", &format!("{}// changed\n", slow_part("Slow")));
+    let st = s.status();
+    assert_eq!(st["discovering"], json!(["parts/slow.rhai"]), "{st}");
+    assert_eq!(states(&st)["Slow"], "outdated", "earlier parts are `outdated`: {st}");
+    let r = s.post("/discover", &json!({"files": ["parts/slow.rhai"], "wait_s": 10})).ok();
+    assert_eq!(discovered(&r)["parts/slow.rhai"]["state"], json!("declared"), "{r}");
+    assert_eq!(s.status()["discovering"], json!([]));
+}
+
+#[test]
+fn cli_status_waits_for_discovery_and_lists_a_freshly_written_part() {
+    // §3.1: "`qoob3d status` waits up to 10 s for it before asking
+    // `/status`": right after writing a part file the CLI answer is settled.
+    let p = Project::new("cli-settled", "[workers]\ncount = 2\n");
+    p.write("parts/normal.rhai", NORMAL);
+    let s = Service::start(&p);
+    p.write("parts/slow.rhai", &slow_part("Fresh")).write("parts/broken.rhai", PART_BROKEN);
+    let out = cli(&p.dir, &["status"], Duration::from_secs(60));
+    assert_eq!(out.code, Some(0), "{}{}", out.stdout, out.stderr);
+    let st = out.envelope()["result"].clone();
+    assert_eq!(st["discovering"], json!([]), "the CLI answer is settled: {st}");
+    let listed: BTreeSet<String> = status_parts(&st).into_keys().collect();
+    assert_eq!(listed, set(&["Fresh", "Normal"]), "{st}");
+    let errors = st["load_errors"].as_array().cloned().unwrap_or_default();
+    assert!(errors.iter().any(|e| e["file"] == json!("parts/broken.rhai")), "{st}");
+    drop(s);
+}

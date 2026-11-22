@@ -796,6 +796,120 @@ fn ag_mc_02_api_reference_whole_or_searched_sections() {
 }
 
 // ===========================================================================
+// §3.1: file_write reports what the written file declares (ADR-0056)
+// ===========================================================================
+
+/// Names in a list of declarations: `[{name, …}]` or plain strings.
+fn declared_names(list: &Value) -> BTreeSet<String> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e["name"].as_str().or_else(|| e.as_str()).map(str::to_owned))
+        .collect()
+}
+
+/// `file_write`; the result of the successful write.
+fn written(mcp: &mut Mcp, path: &str, content: &str) -> Value {
+    mcp.call("file_write", &json!({"path": path, "content": content})).ok().clone()
+}
+
+/// The load error names `file` and line `line`.
+fn names_file_and_line(error: &Value, file: &str, line: u64) -> bool {
+    let text = error.to_string();
+    let line_named = error["line"].as_u64() == Some(line) || text.contains(&format!("line {line}"));
+    text.contains(file) && line_named
+}
+
+#[test]
+fn file_write_answers_with_the_declarations_or_the_load_error_of_the_file() {
+    // §3.1: "The MCP `file_write` of a part, check or `lib/` file uses
+    // [`/discover`] and answers `declared: {parts, checks}` or `load_error`
+    // (a `lib/` file: `load_errors`)". The agent learns at once whether the
+    // file it wrote loads, without a status call.
+    let p = small_project("mcp-declared");
+    let mut mcp = Mcp::open(&p);
+
+    // A part file with two parts.
+    let two = "part(\"C1\", #{}, |deps| box(4, 4, 4));\n\
+               part(\"C2\", #{ depends: [\"C1\"] }, |deps| deps[\"C1\"].move(0, 0, 4));\n";
+    let r = written(&mut mcp, "parts/c.rhai", two);
+    assert_eq!(declared_names(&r["declared"]["parts"]), set(&["C1", "C2"]), "{r}");
+    assert!(declared_names(&r["declared"]["checks"]).is_empty(), "{r}");
+    assert!(r.get("load_error").is_none_or(Value::is_null), "{r}");
+    assert!(r.get("note").is_none_or(Value::is_null), "a part file needs no note: {r}");
+
+    // A broken part file: line 2 lacks the closing parenthesis of `part(`.
+    let broken = "// broken\npart(\"Broken\", #{}, |deps| box(1, 1, 1);\n";
+    let r = written(&mut mcp, "parts/broken.rhai", broken);
+    assert!(names_file_and_line(&r["load_error"], "parts/broken.rhai", 2), "{r}");
+    assert!(r.get("declared").is_none_or(Value::is_null), "a broken file declares nothing: {r}");
+    assert_eq!(p.read("parts/broken.rhai"), broken, "the file is written all the same");
+    // Repaired: the same file answers with its part.
+    let r = written(&mut mcp, "parts/broken.rhai", "part(\"Mended\", #{}, |deps| box(1, 1, 1));\n");
+    assert_eq!(declared_names(&r["declared"]["parts"]), set(&["Mended"]), "{r}");
+    assert!(r.get("load_error").is_none_or(Value::is_null), "{r}");
+
+    // A check file.
+    let checks = "check(\"c1_volume\", || {\n    \
+                  expect_near(part(\"C1\").volume(), 64, 0.001, \"volume\");\n});\n\
+                  check(\"c1_valid\", || { expect(part(\"C1\").is_valid(), \"valid\"); });\n";
+    let r = written(&mut mcp, "checks/c.rhai", checks);
+    assert_eq!(declared_names(&r["declared"]["checks"]), set(&["c1_volume", "c1_valid"]), "{r}");
+    assert!(declared_names(&r["declared"]["parts"]).is_empty(), "{r}");
+
+    // A module: first sound, with a part that imports it; nothing fails.
+    let r = written(&mut mcp, "lib/sizes.rhai", "fn side() { 4 }\n");
+    assert_eq!(r["load_errors"], json!([]), "every file loads: {r}");
+    let user = "import \"lib/sizes\" as sizes;\n\
+                part(\"U\", #{}, |deps| box(sizes::side(), 4, 4));\n";
+    let r = written(&mut mcp, "parts/user.rhai", user);
+    assert_eq!(declared_names(&r["declared"]["parts"]), set(&["U"]), "{r}");
+    // Then broken (line 1 never closes its brace): the answer lists the
+    // load error of the part file that imports it.
+    let r = written(&mut mcp, "lib/sizes.rhai", "fn side() { 4\n");
+    let errors = r["load_errors"].as_array().cloned().unwrap_or_default();
+    assert_eq!(errors.len(), 1, "only parts/user.rhai imports the module: {r}");
+    assert!(errors[0].to_string().contains("parts/user.rhai"), "{r}");
+    assert!(errors[0]["message"].as_str().is_some_and(|m| !m.is_empty()), "{r}");
+
+    // What the tool said is what the project status says.
+    let st = mcp.call("project_status", &json!({})).ok().clone();
+    // (Whether the earlier part `U` of the file that no longer loads stays
+    // listed is not specified; the parts of the other files must.)
+    let mut listed: BTreeSet<String> = declared_names(&st["parts"]);
+    listed.remove("U");
+    assert_eq!(listed, set(&["A", "B", "C1", "C2", "Mended"]), "{st}");
+    assert_eq!(st["load_errors"].as_array().map(Vec::len), Some(1), "{st}");
+    mcp.finish();
+}
+
+#[test]
+fn file_write_of_a_nested_script_notes_that_it_is_not_discovered() {
+    // Decided addition to §3.1: only `parts/*.rhai` and `checks/*.rhai` are
+    // part and check files (AG-PJ-01; sub folders are not searched). A
+    // script written to `parts/sub/x.rhai` would silently never build, so
+    // the result carries a `note` saying which locations are discovered.
+    let p = small_project("mcp-note");
+    let mut mcp = Mcp::open(&p);
+    let part = "part(\"Nested\", #{}, |deps| box(4, 4, 4));\n";
+    for path in ["parts/sub/x.rhai", "checks/deep/y.rhai"] {
+        let r = written(&mut mcp, path, part);
+        let note = r["note"].as_str().unwrap_or_else(|| panic!("{path}: no note: {r}"));
+        assert!(note.contains("parts/*.rhai") && note.contains("checks/*.rhai"), "{path}: {note}");
+        assert!(r.get("declared").is_none_or(Value::is_null), "{path} declares nothing: {r}");
+        assert_eq!(p.read(path), part, "the file is written all the same");
+    }
+    // The part is indeed not part of the project.
+    let st = mcp.call("project_status", &json!({})).ok().clone();
+    assert!(!declared_names(&st["parts"]).contains("Nested"), "{st}");
+    // A file in a discovered location has no such note.
+    let r = written(&mut mcp, "parts/top.rhai", part);
+    assert!(r.get("note").is_none_or(Value::is_null), "{r}");
+    assert_eq!(declared_names(&r["declared"]["parts"]), set(&["Nested"]), "{r}");
+    mcp.finish();
+}
+
+// ===========================================================================
 // AG-MC-03: confined file tools
 // ===========================================================================
 
