@@ -439,6 +439,20 @@ impl Service {
         r.ok()
     }
 
+    /// `POST /discover {"files": null, "wait_s": 20}` (ADR-0056, §3.1):
+    /// waits until every part and check file is discovered and asserts that
+    /// nothing is left in `discovering`. Discovery runs in a worker, so the
+    /// first `/status` after a start or a file write may not list the
+    /// declarations yet; call this before reading parts or checks from
+    /// `/status`. 20 s: the start-up budget (WA-OP-02), far above one worker
+    /// round trip per file. Returns the result.
+    fn wait_discovery(&self) -> Value {
+        let r = self.post("/discover", &json!({"files": null, "wait_s": 20}));
+        let result = r.ok();
+        assert_eq!(result["discovering"], json!([]), "discovery did not finish: {result}");
+        result
+    }
+
     /// `POST /build` with `wait_s` = [`WAIT_S`]; the build result (§3.1),
     /// also when parts failed.
     fn build(&self, parts: Option<&[&str]>) -> Value {
@@ -955,6 +969,8 @@ fn ag_pj_02_several_parts_per_file_with_dependencies() {
          part(\"M2\", #{ depends: [\"M1\"] }, |deps| deps[\"M1\"].move(0, 0, 10) + box(2, 2, 2).move(0, 0, 20));\n",
     );
     let s = Service::start(&p);
+    // Discovery runs in a worker (ADR-0056): wait until M1 and M2 are known.
+    s.wait_discovery();
     let st = s.status();
     let parts = status_parts(&st);
     assert_eq!(parts.keys().cloned().collect::<BTreeSet<_>>(), set(&["M1", "M2"]));
@@ -1728,7 +1744,11 @@ fn ag_hd_03_requests_need_the_token_and_a_local_host_and_no_origin() {
 
     // None of the refused requests reached a route: nothing was built, no
     // task was created, and the refused /shutdown did not stop the service.
+    // Discovery runs in a worker (ADR-0056): wait for it, so `states` lists
+    // A..D and the check below is not vacuously true on an empty list.
+    s.wait_discovery();
     let st = s.status();
+    assert_eq!(states(&st).len(), 4, "A, B, C and D are listed: {st}");
     assert!(states(&st).values().all(|v| v == "never_built"), "a refused /build ran: {st}");
     assert_eq!(st["jobs"].as_array().map(Vec::len), Some(0), "a refused request made a job: {st}");
     assert!(!p.path("tasks").exists(), "a refused POST /task created a task");
@@ -1942,6 +1962,9 @@ fn service_then_file(tag: &str, extra: &str, rel: &str, source: &str) -> (Projec
     let p = Project::new(tag, extra);
     p.write("parts/normal.rhai", NORMAL);
     let s = Service::start_capped(&p, BOMB_CAP_KIB);
+    // Discovery runs in a worker (ADR-0056): the first `/status` after the
+    // start may not list `Normal` yet.
+    s.wait_discovery();
     assert_eq!(states(&s.status())["Normal"], "never_built");
     p.write(rel, source);
     (p, s)
