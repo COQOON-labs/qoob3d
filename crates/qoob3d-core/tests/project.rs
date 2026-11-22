@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use qoob3d_core::project::{
-    Config, Graph, KeyInputs, PartDecl, ValueStatus, Values, cache_key, part_files, resolve_imports,
+    Config, Graph, KeyInputs, PartDecl, ProjectError, ValueStatus, Values, cache_key, check_files,
+    part_files, resolve_imports,
 };
 use serde_json::json;
 
@@ -631,4 +632,184 @@ fn ag_pj_04_value_types_are_distinguished() {
     let mut s = base();
     s.values_read[0].1 = json!("20");
     assert_ne!(cache_key(&s), cache_key(&base()));
+}
+
+// ---------------------------------------------------------------------------
+// AG-PF-05: tessellation settings
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ag_pf_05_mesh_settings_must_be_positive_and_finite() {
+    // AG-PF-05: `[mesh] deflection_mm` and `angle_deg` are a distance and an
+    // angle a mesher divides by; 0 (the boundary), negative values, the TOML
+    // infinities and nan are configuration errors naming the key.
+    for field in ["deflection_mm", "angle_deg"] {
+        for value in ["0.0", "0", "-0.0", "-0.01", "-20", "inf", "+inf", "-inf", "nan"] {
+            let body = format!("[mesh]\n{field} = {value}\n");
+            let e = config_with(&body).expect_err(&body);
+            assert_mentions(&e, &["qoob3d.toml", field]);
+        }
+    }
+}
+
+#[test]
+fn ag_pf_05_mesh_settings_default_and_accept_small_positive_values() {
+    // Defaults from AG-PF-05: deflection 0.01 mm, angle 20 deg. Small
+    // positive values are valid ("greater than 0").
+    let c = config_with("").expect("defaults");
+    assert_eq!(c.mesh.deflection_mm.to_bits(), 0.01f64.to_bits());
+    assert_eq!(c.mesh.angle_deg.to_bits(), 20.0f64.to_bits());
+    // Exact bit equality: the values come back as TOML parsed them.
+    let c = config_with("[mesh]\ndeflection_mm = 0.001\nangle_deg = 0.5\n").expect("small values");
+    assert_eq!(c.mesh.deflection_mm.to_bits(), 0.001f64.to_bits());
+    assert_eq!(c.mesh.angle_deg.to_bits(), 0.5f64.to_bits());
+    let c = config_with("[mesh]\ndeflection_mm = 5e-324\n").expect("smallest positive f64");
+    assert!(c.mesh.deflection_mm > 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// AG-CK-01: check files
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ag_ck_01_check_files_are_checks_star_rhai_sorted() {
+    // AG-PJ-01 lists `checks/*.rhai`; like part files: only `.rhai`, no sub
+    // folders, sorted, relative to the project, nothing from `parts/`.
+    let d = Dir::new("check-files");
+    d.write("qoob3d.toml", "[project]\nname = \"p\"\n")
+        .write("checks/wall.rhai", "")
+        .write("checks/fit.rhai", "")
+        .write("checks/notes.md", "")
+        .write("checks/old/legacy.rhai", "")
+        .write("parts/box.rhai", "");
+    let files = check_files(d.path()).expect("list check files");
+    assert_eq!(names(&files), ["checks/fit.rhai", "checks/wall.rhai"]);
+}
+
+#[test]
+fn ag_ck_01_project_without_checks_folder_has_no_checks() {
+    let d = Dir::new("no-checks");
+    d.write("qoob3d.toml", "[project]\nname = \"p\"\n").write("parts/box.rhai", "");
+    assert!(check_files(d.path()).expect("no checks/ is valid").is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// AG-PJ-03: all values
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ag_pj_03_iter_lists_every_value_once_sorted_by_id() {
+    // `Values::iter`: all values of all files, sorted by id. Ids by hand
+    // from CRANE_VALUES and print.toml.
+    let d = Dir::new("values-iter");
+    d.write("values/crane.toml", CRANE_VALUES).write(
+        "values/print.toml",
+        "[wall]\nvalue = 1.2\nsource = \"printer profile\"\nstatus = \"assumption\"\n",
+    );
+    let v = Values::load(d.path()).expect("valid values load");
+    let ids: Vec<&str> = v.iter().map(|value| value.id.as_str()).collect();
+    assert_eq!(ids, ["crane.boom", "crane.column", "hook", "wall"]);
+    let d = Dir::new("values-iter-empty");
+    assert_eq!(Values::load(d.path()).expect("no values/").iter().count(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// AG-PJ-04: modules in comments and literals are no imports
+// ---------------------------------------------------------------------------
+
+/// The sorted imports of `parts/p.rhai` = `script` in a project that has
+/// exactly the modules `lib/real.rhai` and `lib/other.rhai`. An import of
+/// `lib/ghost` (which does not exist) makes resolving fail.
+fn imports_of(script: &str) -> Result<Vec<String>, String> {
+    let d = Dir::new("import-scan");
+    d.write("parts/p.rhai", script)
+        .write("lib/real.rhai", "fn f() { 1 }\n")
+        .write("lib/other.rhai", "fn g() { 2 }\n");
+    resolve_imports(d.path(), Path::new("parts/p.rhai"))
+        .map(|mods| {
+            let mut got = names(&mods);
+            got.sort();
+            got
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[test]
+fn ag_pj_04_imports_in_comments_are_not_imports() {
+    // The script engine loads no module named in a comment, so it is no
+    // input of the cache key (contract of project/imports.rs: the scan skips
+    // comments and string literals).
+    for script in [
+        "// import \"lib/ghost\" as g;\nimport \"lib/real\" as r;\n",
+        "import \"lib/real\" as r; // import \"lib/ghost\" as g;\n",
+        "/* import \"lib/ghost\" as g; */ import \"lib/real\" as r;\n",
+        "/*\n import \"lib/ghost\" as g;\n*/\nimport \"lib/real\" as r;\n",
+        // A `/` inside the comment does not end it, only `*/` does.
+        "/* see a/b: import \"lib/ghost\" as g; */\nimport \"lib/real\" as r;\n",
+        // A `*` alone does not end it either.
+        "/* 2 * 3 import \"lib/ghost\" as g; */\nimport \"lib/real\" as r;\n",
+        // `/*/` opens a comment, its `*` is no closing `*/`.
+        "/*/ import \"lib/ghost\" as g; */\nimport \"lib/real\" as r;\n",
+    ] {
+        assert_eq!(imports_of(script), Ok(vec!["lib/real.rhai".to_owned()]), "{script}");
+    }
+}
+
+#[test]
+fn ag_pj_04_a_division_is_no_comment() {
+    // A single `/` is a division: the import after it on the same line counts.
+    let script = "let half = 10 / 2; import \"lib/real\" as r;\nlet q = 4 / 2;\n";
+    assert_eq!(imports_of(script), Ok(vec!["lib/real.rhai".to_owned()]));
+}
+
+#[test]
+fn ag_pj_04_imports_inside_literals_are_not_imports() {
+    // A `"` inside a char literal, an escaped quote in a string and a raw
+    // backtick string (no escapes in Rhai) must not shift the literal
+    // boundaries: the real import after them is found, the text
+    // `import "lib/ghost"` inside a literal is no import.
+    for script in [
+        "let q = '\"'; import \"lib/real\" as r;\n",
+        "let c = '\\''; import \"lib/real\" as r;\n",
+        "let s = \"say \\\" import \\\"lib/ghost\\\" \"; import \"lib/real\" as r;\n",
+        "let p = `C:\\`; import \"lib/real\" as r;\n",
+        "let t = `import \"lib/ghost\" as g;`; import \"lib/real\" as r;\n",
+    ] {
+        assert_eq!(imports_of(script), Ok(vec!["lib/real.rhai".to_owned()]), "{script}");
+    }
+}
+
+#[test]
+fn ag_pj_04_imports_after_comments_and_literals_are_found() {
+    let script = "import \"lib/other\" as o; /* c */ let s = \"x\";\nimport \"lib/real\" as r;\n";
+    assert_eq!(
+        imports_of(script),
+        Ok(vec!["lib/other.rhai".to_owned(), "lib/real.rhai".to_owned()])
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AG-PJ-02: a cycle error names only the cycle
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ag_pj_02_cycle_with_a_buildable_dependency_names_only_the_cycle() {
+    // Arm depends on Base (no dependencies, buildable) and on Hand; Hand
+    // depends on Arm. The cycle is Arm <-> Hand; Base is not in it and must
+    // not be named. Base comes first among Arm's dependencies on purpose, so
+    // a search that follows any dependency would reach it.
+    let e = Graph::new(vec![
+        decl("Base", "parts/base.rhai", &[]),
+        decl("Arm", "parts/arm.rhai", &["Base", "Hand"]),
+        decl("Hand", "parts/hand.rhai", &["Arm"]),
+    ])
+    .expect_err("Arm <-> Hand is a cycle");
+    let ProjectError::Cycle { cycle } = &e else {
+        panic!("expected a cycle error, got {e}");
+    };
+    let mut members: Vec<&str> = cycle.iter().map(String::as_str).collect();
+    members.sort_unstable();
+    members.dedup();
+    assert_eq!(members, ["Arm", "Hand"], "{e}");
+    assert!(!e.to_string().contains("Base"), "{e}");
 }

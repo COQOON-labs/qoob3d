@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use qoob3d_core::tasks::{
-    GateInput, LogEntry, Role, Task, TaskKind, TaskState, Tasks, create, update,
+    GateInput, LogEntry, Role, Task, TaskError, TaskKind, TaskState, Tasks, create, update,
 };
 
 // ---------------------------------------------------------------------------
@@ -1403,4 +1403,183 @@ fn ag_tk_04_gate_guards_only_the_way_into_review() {
             .unwrap_or_else(|e| panic!("{} -> {}: {e}", from.as_str(), to.as_str()));
         assert_eq!(t.state, to);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Points the module decides where the requirements are open (module comment
+// of qoob3d_core::tasks and the doc comments of `create` and `Task::body`).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ag_tk_01_log_lines_of_another_form_are_no_entries() {
+    // AG-TK-01: an entry is `- <YYYY-MM-DD> <who>: <text>`. A date of another
+    // shape, an empty `who` or a `who` with a space is not of that form, so
+    // the line is no entry (it stays in the file). The text may hold `: `.
+    let d = Dir::new("log-form");
+    d.write(
+        "tasks/0001-log.md",
+        "+++\ntitle = \"Log\"\n+++\n\n## Log\n\
+         - 2026-11-20 human: kept\n\
+         - someday human: no date\n\
+         - 2026-11-2 human: date too short\n\
+         - 2026-11-201 human: date too long\n\
+         - 2026/11/20 human: slashes\n\
+         - 2026-1x-20 human: letter in the month\n\
+         - 20261120xx human: no dashes\n\
+         - 2026-11-20 : no who\n\
+         - 2026-11-20 the human: who with a space\n\
+         - 2026-11-21 agent: kept too: with a colon\n",
+    );
+    let log = loaded(&d, "T-0001").log;
+    let entry = |date: &str, who: &str, text: &str| LogEntry {
+        date: date.to_owned(),
+        who: who.to_owned(),
+        text: text.to_owned(),
+    };
+    assert_eq!(
+        log,
+        [
+            entry("2026-11-20", "human", "kept"),
+            entry("2026-11-21", "agent", "kept too: with a colon")
+        ]
+    );
+}
+
+#[test]
+fn ag_tk_03_a_date_not_shaped_yyyy_mm_dd_is_refused_and_nothing_written() {
+    // The date of a log entry must be `YYYY-MM-DD` (AG-TK-01), otherwise
+    // the entry written would not load back as one.
+    for date in ["2026-11-2", "2026-11-201", "20261120xx", "2026_11_20", "2026-11-2x", "", "today"]
+    {
+        let d = Dir::new("bad-date");
+        let old = minimal(TaskState::Open);
+        d.write("tasks/0001-probe.md", &old);
+        let e = update(d.path(), "T-0001", Role::Human, None, Some("note"), date, &no_gate())
+            .expect_err(date);
+        assert!(matches!(e, TaskError::InvalidDate { .. }), "{date:?}: {e}");
+        assert_eq!(d.read("tasks/0001-probe.md"), old, "{date:?}: a refused change writes nothing");
+    }
+}
+
+#[test]
+fn ag_tk_03_note_with_the_current_state_leaves_the_header_byte_identical() {
+    // "A new state equal to the current one is no state change": a note with
+    // state = the current state only appends the note (AG-TK-03), even when
+    // the header spells the state unusually or leaves it to the default.
+    for old in [
+        "+++\ntitle = \"Box\"\nstate = 'open'   # as typed\n+++\nA box.\n\n## Log\n",
+        "+++\ntitle = \"Box\"\n+++\nA box.\n\n## Log\n",
+    ] {
+        let d = Dir::new("same-state");
+        d.write("tasks/0001-box.md", old);
+        let t = update(
+            d.path(),
+            "T-0001",
+            Role::Human,
+            Some(TaskState::Open),
+            Some("still open"),
+            TODAY,
+            &no_gate(),
+        )
+        .expect("note with the current state");
+        assert_eq!(t.state, TaskState::Open);
+        // AG-TK-07: a note-only update logs the note; who = human.
+        assert_eq!(d.read("tasks/0001-box.md"), format!("{old}- {TODAY} human: still open\n"));
+    }
+}
+
+#[test]
+fn ag_tk_01_body_drops_blank_lines_around_it_but_keeps_indentation() {
+    // `Task::body`: the Markdown "without surrounding blank lines"; blank
+    // lines may hold spaces. The indentation of the first line is Markdown
+    // (a code block) and stays.
+    let d = Dir::new("body-edges");
+    d.write(
+        "tasks/0001-code.md",
+        "+++\ntitle = \"Code\"\n+++\n\n  \n\n    indented code\nnext line\n\n \n## Log\n",
+    );
+    assert_eq!(loaded(&d, "T-0001").body, "    indented code\nnext line");
+    let d = Dir::new("body-edges-2");
+    d.write("tasks/0001-code.md", "+++\ntitle = \"Code\"\n+++\n\n\n\tTab first\n");
+    assert_eq!(loaded(&d, "T-0001").body, "\tTab first");
+}
+
+#[test]
+fn ag_tk_01_non_ascii_body_right_before_the_log_heading_loads() {
+    // Bodies are the human's words, often not ASCII; the last line before
+    // `## Log` may end in multi-byte characters (here `€`, 3 bytes, followed
+    // by 5 ASCII bytes and the line break, and variants shifted by a byte).
+    for line in ["Budget: 5 €/year", "Budget: 5 €/yea", "Budget: 5 €/yearly", "Angle 30° × 2 µm"]
+    {
+        let d = Dir::new("body-utf8");
+        d.write(
+            "tasks/0001-budget.md",
+            &format!("+++\ntitle = \"Budget\"\n+++\n{line}\n## Log\n- 2026-11-20 human: ok\n"),
+        );
+        let t = loaded(&d, "T-0001");
+        assert_eq!(t.body, line);
+        assert_eq!(t.log.len(), 1, "{:?}", t.log);
+        assert_eq!(t.log[0].text, "ok");
+    }
+}
+
+#[test]
+fn ag_tk_03_created_file_ends_with_exactly_one_line_break() {
+    // The body is written as given and the file ends in one line break (a
+    // text file, so an appended log line starts on its own line and Git
+    // shows no "No newline at end of file"); no blank line is added.
+    for body in ["Hello", "Hello\n"] {
+        let d = Dir::new("create-newline");
+        let t = create(d.path(), "Hi", TaskKind::Task, body, &[], &[], DATE).expect("create");
+        let text = d.read(&slash(&t.file));
+        assert!(text.ends_with("\nHello\n"), "{body:?}: {text:?}");
+        assert!(!text.ends_with("\n\n"), "{body:?}: {text:?}");
+    }
+}
+
+#[test]
+fn ag_tk_03_slug_collapses_runs_and_trims_dashes() {
+    // `create` doc: every character outside `[a-z0-9]` becomes `-`, runs of
+    // `-` collapse, `-` at both ends is trimmed.
+    for (title, slug) in [
+        ("  Hello  World  ", "hello-world"),
+        ("(padded)", "padded"),
+        ("a  --  b", "a-b"),
+        ("\u{d6}l", "l"),
+        ("--x--y--", "x-y"),
+    ] {
+        let d = Dir::new("slug-runs");
+        assert_eq!(slug_of(&new_task(&d, title)), slug, "title {title:?}");
+    }
+}
+
+#[test]
+fn ag_tk_03_numbers_end_at_9999() {
+    // Four digits (AG-TK-01): 9999 is the last number, the next create is an
+    // error and writes nothing.
+    let d = Dir::new("numbers");
+    d.write("tasks/9998-almost.md", "+++\ntitle = \"Almost\"\n+++\n");
+    let t = new_task(&d, "Last");
+    assert_eq!(t.id, "T-9999");
+    assert_eq!(slash(&t.file), "tasks/9999-last.md");
+    let e = create(d.path(), "One more", TaskKind::Task, "", &[], &[], DATE)
+        .expect_err("no number after 9999");
+    assert!(matches!(e, TaskError::NumbersUsedUp), "{e}");
+    assert_mentions(&e.to_string(), &["9999"]);
+    assert_eq!(d.task_files(), ["9998-almost.md", "9999-last.md"]);
+}
+
+#[test]
+fn ag_tk_03_other_files_and_sub_folders_in_tasks_are_ignored() {
+    // Module decision: in `tasks/`, sub folders and files not ending in `.md`
+    // are ignored (also by create, which picks the next number).
+    let d = Dir::new("ignored");
+    d.write("tasks/0001-a.md", "+++\ntitle = \"A\"\n+++\n")
+        .write("tasks/notes.txt", "not a task")
+        .write("tasks/.DS_Store", "")
+        .write("tasks/0005-draft.md.bak", "")
+        .write("tasks/archive.md/0009-old.md", "+++\ntitle = \"Old\"\n+++\n");
+    let ids: Vec<String> = load(&d).all().iter().map(|t| t.id.clone()).collect();
+    assert_eq!(ids, ["T-0001"]);
+    assert_eq!(new_task(&d, "Next").id, "T-0002");
 }

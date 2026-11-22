@@ -294,3 +294,114 @@ fn degenerate_and_nan_triangles_do_not_panic() {
     tris.push(point);
     let _ = read_binary(&stl(b"", &tris, None, 0));
 }
+
+/// WA-LV-03 welding by exact position: `-0.0` and `0.0` are the same
+/// coordinate. An open square whose second triangle stores its corner at
+/// the origin as (-0, -0, -0) must still share the diagonal with the first:
+/// 4 corners, 4 border feature edges, no diagonal (coplanar, 0°). Unwelded
+/// it would have 5 corners and 6 open edges.
+#[test]
+fn negative_zero_welds_with_zero() {
+    let (a, b, c, d) = ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]);
+    let a_neg = [-0.0f32, -0.0, -0.0];
+    let mesh = read_binary(&stl(b"", &[[a, b, c], [a_neg, c, d]], None, 0)).expect("valid STL");
+    assert_eq!(mesh.faces.positions.len(), 4, "{:?}", mesh.faces.positions);
+    assert_eq!(unique_segments(&mesh).len(), 4);
+    assert_eq!(segments(&mesh).len(), 4);
+}
+
+/// WA-LV-03: the corner coordinates are taken bit-exactly from the file
+/// (every byte of every f32 matters). The values are chosen so that the
+/// bytes of each float differ, e.g. 0.1 = 0x3DCCCCCD.
+#[test]
+fn coordinates_are_read_bit_exactly() {
+    let tri = [[0.1f32, 1.3, -2.7], [123.456, 0.2, 7.77], [-3.3, 55.55, 0.123]];
+    let mesh = read_binary(&stl(b"", &[tri], None, 0)).expect("valid STL");
+    let got: Vec<[u32; 3]> = mesh.faces.positions.iter().map(|p| p.map(f32::to_bits)).collect();
+    let want: Vec<[u32; 3]> = tri.iter().map(|p| p.map(f32::to_bits)).collect();
+    assert_eq!(got, want);
+}
+
+/// A triangle without area has no direction; its normal must still be a
+/// number (the renderer shades with it), never NaN. Zero-area cases: three
+/// collinear corners and three equal corners, each alone at its corners.
+#[test]
+fn degenerate_triangles_get_finite_normals() {
+    let line = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+    let point = [[5.0, 5.0, 5.0]; 3];
+    for tri in [line, point] {
+        let mesh = read_binary(&stl(b"", &[tri], Some(&[[0.0; 3]]), 0)).expect("valid STL");
+        assert!(!mesh.faces.normals.is_empty());
+        for n in &mesh.faces.normals {
+            assert!(n.iter().all(|c| c.is_finite()), "normal {n:?} of {tri:?}");
+        }
+    }
+}
+
+/// WA-LV-03 / module contract: the triangles around a corner are grouped by
+/// the feature angle and a corner gets one output vertex per group. Open
+/// coplanar square: one group per corner → 4 vertices, all with normal
+/// (0,0,1) (exact: both area normals are (0,0,1)·2·area). Cube: 3 faces at
+/// 90° meet at every corner → 8 · 3 = 24 vertices, each normal one of the 6
+/// axis directions (tolerance 1e-6: the average of equal axis normals is
+/// exact up to rounding, a wrong grouping is off by O(1)).
+#[test]
+fn a_corner_gets_one_vertex_per_flat_group() {
+    let q = quad([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]);
+    let mesh = read_binary(&stl(b"", &q, None, 0)).expect("valid STL");
+    assert_eq!(mesh.faces.positions.len(), 4);
+    for n in &mesh.faces.normals {
+        assert_eq!(*n, [0.0, 0.0, 1.0]);
+    }
+
+    let mesh = read_binary(&stl(b"", &cube([0.0; 3], 10.0), None, 0)).expect("valid STL");
+    assert_eq!(mesh.faces.positions.len(), 24);
+    for n in &mesh.faces.normals {
+        let axis = n.iter().filter(|c| (c.abs() - 1.0).abs() < 1e-6).count();
+        let zero = n.iter().filter(|c| c.abs() < 1e-6).count();
+        assert_eq!((axis, zero), (1, 2), "normal {n:?} is no face normal");
+    }
+}
+
+/// WA-LV-03 "more than 30°": a hinge whose two triangle normals are exactly
+/// 30° apart (in f32) is no feature edge; slightly steeper it is.
+///
+/// Triangle 1 (0,0,0),(1,0,0),(0,1,0) has normal (0,0,1). Triangle 2
+/// (1,0,0),(0,0,0),(0,-a,t) shares the edge on the X axis reversed, its
+/// winding normal is (-1,0,0)×(-1,-a,t) = (0,t,a), so the cosine between the
+/// normals is a/√(t²+a²) (exactly that in f32: the other products are 0).
+/// The test searches a small integer a and t near a·tan 30° for which this
+/// f32 cosine equals cos 30° computed like the limit; they are no
+/// hand-picked constants because f32 `cos` may differ by an ulp between
+/// platforms, and one a alone may skip the value in f32.
+#[test]
+fn exactly_thirty_degrees_is_no_feature_edge() {
+    assert!((super::FEATURE_ANGLE_DEG - 30.0).abs() < f32::EPSILON);
+    let cos_limit = 30.0f32.to_radians().cos();
+    let cosine = |a: f32, t: f32| {
+        let n = [0.0f32, t, a];
+        a / (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt()
+    };
+    let tan = 30.0f32.to_radians().tan();
+    let mut candidates = (1..=64u16).map(f32::from).flat_map(|a| {
+        let around = (a * tan).to_bits();
+        (around - 64..around + 64).map(move |bits| (a, f32::from_bits(bits)))
+    });
+    let (a, t) = candidates
+        .find(|&(a, t)| cosine(a, t).to_bits() == cos_limit.to_bits())
+        .expect("some f32 a, t give exactly cos 30°");
+    let steeper = (t.to_bits()..t.to_bits() + 64)
+        .map(f32::from_bits)
+        .find(|&s| cosine(a, s) < cos_limit)
+        .expect("a larger t gives a steeper angle");
+
+    let hinge = |t: f32| -> Vec<Tri> {
+        let (p, q) = ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
+        vec![[p, q, [0.0, 1.0, 0.0]], [q, p, [0.0, -a, t]]]
+    };
+    // 4 open border edges; the shared edge only when steeper than 30°.
+    let mesh = read_binary(&stl(b"", &hinge(t), None, 0)).expect("valid STL");
+    assert_eq!(unique_segments(&mesh).len(), 4, "exactly 30° (a = {a}, t = {t})");
+    let mesh = read_binary(&stl(b"", &hinge(steeper), None, 0)).expect("valid STL");
+    assert_eq!(unique_segments(&mesh).len(), 5, "just over 30° (a = {a}, t = {steeper})");
+}

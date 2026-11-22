@@ -328,3 +328,18 @@ fn error_has_a_message() {
     let err = read(b"nope").expect_err("too short");
     assert!(!err.to_string().is_empty());
 }
+
+/// WA-QM-01: the writer knows the full size from the layout table before it
+/// writes, so it allocates once and exactly that size: no reallocation while
+/// writing, no spare capacity handed on. `Vec::with_capacity(n)` is
+/// documented to give exactly capacity `n`, so `capacity == len` is a
+/// deterministic check. Sizes: tiny 152, empty 28 (see the layout tests),
+/// awkward 24 + 4·24 + 6·4 + 4·12 + 3·4 = 204.
+#[test]
+fn write_allocates_exactly_the_layout_size() {
+    for (mesh, len) in [(tiny(), 152), (ShapeMesh::default(), 28), (awkward(), 204)] {
+        let bytes = write(&mesh);
+        assert_eq!(bytes.len(), len);
+        assert_eq!(bytes.capacity(), len, "write must allocate exactly the layout size");
+    }
+}
