@@ -1,0 +1,238 @@
+# start+initialize: 0.55 s, tools: 48
+## execute(code)
+Execute build123d Python code in the persistent session. Errors include automatic fix hints — read them before retrying. Use show(shape, name) to register named objects (name defaults to 'shape'); show() immediately prints volume and face count confirming the shape is non-empty. After any boolean operation (-, +, &) call measure() to confirm it succeeded (check topology.faces). named_face(shape, name) is a built-in helper: named_face(box, 'top') returns the highest-Z face, 'bottom'/'front'/'back'/'left'/'right' work similarly. find_edges(shape, geom='circle', radius=4.25, at_z=10.2, length=Non
+
+## execute_file(path, result_name, snapshot)
+Execute a canonical build123d .py file in a clean namespace and atomically promote its result. The prior active model is restored if the source has a syntax/runtime error, times out, produces no shape, or does not produce result_name. Assign a Shape to `result` or call show(); optionally set result_name to require/register a specific Shape or BuildPart variable. snapshot saves the promoted geometry checkpoint. Returns source SHA-256 provenance plus captured output. The source must be UTF-8, under an allowed read root, and no larger than BUILD123D_MAX_SCRIPT_BYTES (default 2 MiB). Use this for 
+
+## render_view(direction, objects, quality, clip_plane, clip_at, azimuth, elevation, save_to, format, label_objects, highlights, colors, mode)
+Render model. Auto-detects 3D vs 2D: solids use VTK; flat drawings use the 2D pipeline. Renders confirm appearance, not geometry. format: png, svg, dxf, or both. direction accepts top, bottom, front, rear, side, left, right, or iso. quality: preview, standard, or high; a timed-out standard/high PNG automatically retries once as a coarse preview. azimuth/elevation apply after the preset. objects selects comma-separated registered names. clip_plane: x/y/z. save_to writes the result. mode: auto/2d/3d. label_objects and highlights add PNG labels; colors controls object/layer colours.
+
+## measure(object_name, density, material)
+Measure a shape and return a complete geometric summary: volume (mm³), surface area (mm²), topology (face/edge/vertex counts), bounding box with per-axis size and center, volumetric center of mass, 6-component inertia tensor (Ixx/Iyy/Izz/Ixy/Ixz/Iyz), and a face-type inventory classifying every face as Plane/Cylinder/Cone/Sphere/Torus/BSpline with area and type-specific params (e.g. cylinder diameter and axis); identical faces are collapsed with a count, non-analytic sliver faces folded into one summary line. Prefer measure over render_view for verifying geometry — numbers are unambiguous. top
+
+## validate(object_name)
+Check whether a shape would pass a CAD validity gate before exporting it. Returns a PASS/FAIL verdict plus JSON (passes_gate, n_solids, volume, is_manifold, brep_valid, reasons). The gate mirrors what strict CAD and mesh consumers require: a well-formed (BRepCheck), watertight, manifold solid with non-zero volume. A FAIL means a STEP/STL export would be rejected outright — common causes are a leftover 2D sketch or open shell as the current shape, an un-fused compound, or a degenerate boolean result. Run this immediately before export() on any part you intend to submit or hand off. object_name:
+
+## locate_gate_defects(object_name)
+Report WHERE a solid fails the validity gate, with 3D coordinates — so you can fix the exact edge/face instead of guessing. validate()/export() tell you WHAT is wrong (e.g. "1 non-manifold edge", "BRepCheck failed") but not where; call this when validate() FAILs to get a per-defect list: brep_invalid_face (face index + center + BRepCheck status, e.g. an unorientable BSpline), open_edge / nonmanifold_edge (B-rep edge midpoint + faces_incident), the mesh self-touches strict CAD/mesh consumers reject — mesh_nonmanifold_edge (edge midpoint) and mesh_nonmanifold_vertex (corner-to-corner touch point
+
+## design_audit(epsilon, max_params)
+Audit the current session program as a *design*, not just a shape: surface its named numeric parameters (Θ) and test how robust each is to editing. Parses the assembled program (see script()) for top-level numeric assignments (e.g. `plate_thickness = 5.0`), then rebuilds the program with each parameter nudged ±epsilon (default ±10%) in a hard-bounded subprocess (the live session is never mutated) and runs the validity gate on each result. Returns JSON: {parameters, baseline, audit:[{name, value, perturbations:[{delta_pct (realized), new_value, discrete_step?, rebuilt, passes_gate, volume_delta
+
+## analyze_printability(object_name, support_angle, nozzle, min_perimeters, build_volume, bed_tol, min_feature)
+Analyse a build123d shape for FDM printability using augura (BREP-exact analysis).
+
+    Checks: overhangs, manifold/watertight, tip-over risk, brim/raft need,
+    minimum vertical feature (→ max layer height), and thin walls. Optionally
+    checks bed-fit against a declared build volume.
+
+    Returns a plain-text summary followed by a JSON report with per-finding
+    detail (kind, severity, message, area/location where applicable).
+
+    object_name: named object from show() (default: current shape).
+    support_angle: faces shallower than this many degrees from horizontal need
+        support 
+
+## cross_sections(object_name, axis, num_slices)
+Compute cross-sectional areas at evenly spaced planes along an axis. Returns a list of {position, area} pairs. axis: X, Y, or Z (default Z). num_slices: number of planes (default 10, minimum 2). Useful for detecting internal voids, wall-thickness variation, or verifying that a shape's cross-section profile matches a reference. object_name: named object from show() (default: current shape).
+
+## mesh_section(object_name, axis, position, tolerance, weld)
+Loops on one cross-section plane of a mesh, largest first. Returns JSON {axis, position, loop_count, enclosed_passages, loops:[{points, center, size, min, max, enclosed}]}, all in the two axes that are not `axis`. enclosed_passages counts loops at odd nesting depth, representing passages through material at this height. An open groove reads 0. Works on imported STL shells and solids. axis: X, Y or Z (the plane normal). position: absolute world coordinate. tolerance: tessellation tolerance. weld: point-merge distance when chaining segments. object_name: named object from show()/import_cad_file 
+
+## mesh_holes(object_name, min_diameter, max_diameter, slices, min_depth, tolerance, weld)
+Find fastener holes in a MESH by slicing it on all three axes. Returns JSON {count, holes:[{axis, diameter, location, span, depth, through}]} where axis is the drilling direction and location is the hole centre in world coordinates. This is the mesh counterpart to find_holes(), which needs real topology and returns nothing for an imported STL - the usual case when remixing a downloaded model and you need its existing mounting features before designing a part that bolts on. Read `depth` and `through`: a blind pocket a few mm deep is a heat-set insert seat, not a screw hole, and coaxial pockets 
+
+## inspect_part(object_name, section_axis, section_slices, expected)
+Return one compact generation-checkpoint inventory: bbox, solid/topology counts, holes grouped by axis/diameter/depth/bottom, bosses grouped by axis/diameter/height, recognised patterns with member counts, and a cross-section area profile. expected is an optional JSON object derived from the drawing/spec; supported keys are bbox [x,y,z], solid_count, holes/bosses/patterns group lists, section_varying, and tolerance. Pattern groups can check type, diameter, pitch, direction, center, member_count, and member_diameter. A supplied feature category is an exact inventory: unexpected or ambiguously m
+
+## export(filename, format, object_name)
+Export model. format: step, stl, 3mf, dxf, svg, or comma-separated list e.g. 'step,stl' or 'dxf,svg'. 3D shapes (solids) export to step/stl/3mf; 2D shapes (Sketches and dimensioned drawings composed via build123d.drafting) export to dxf/svg. 3mf is a minimal core-spec mesh export (single object, no color/material) intended for slicers (Bambu Studio, PrusaSlicer, Orca) — use step for downstream CAD interop instead. Mixing 2D and 3D formats for the same shape errors with a clear message. object_name: named object from show(), '*' to export all named shapes as a combined assembly (default: curren
+
+## bank_candidate(filename, object_name, snapshot_name)
+Atomically promote a gate-clean STEP as the safe output/checkpoint. Writes the candidate to a private sibling file, runs the authoritative written-and-reimported STEP gate, and replaces filename only on a fully verified PASS; on FAIL or an unchecked mesh gate, the candidate is deleted and any existing output is preserved. If snapshot_name is supplied, the geometry snapshot is saved only after promotion. Returns JSON including banked, preservation/snapshot status, the export report, and the next recommended recognition or repair call. Use this instead of batching export() and save_snapshot() fo
+
+## inspect_drawing(objects, svg_path)
+DEPRECATED (#465) — moved to draftwright; off by default in 0.4.0, removed in 0.5.0. Calling it explains the replacement. Structured bbox and annotation report for a 2D drawing.
+
+    Two modes:
+
+    1. Session mode (default): inspects objects registered via annotate()/show().
+       Returns per-object bounding boxes, face/edge counts, annotation metadata
+       (label string, measured length, Leader tip/elbow), and structural lint.
+
+    2. SVG mode (svg_path set): parses an SVG file from disk and reports page
+       size, layer ids, text content + positions, and element counts. Decouples
+     
+
+## prepare_drawing(image_path, output_dir, max_regions, padding)
+Prepare a raster engineering drawing for efficient inspection. Detects substantial spatial regions, saves one labelled overview plus readable PNG crops, and returns their pixel bounding boxes and paths. Region ids are layout evidence only: this tool does NOT label views, recognise CAD features, interpret lines, infer dimensions, or trace geometry. Use it once near the start instead of repeatedly writing shell/PIL crop scripts; inspect the returned overview and only the relevant crops. Printed dimensions remain authoritative. image_path: PNG/JPEG/TIFF drawing under an allowed read root. output_
+
+## crop_drawing(image_path, bbox_px, output_path, scale, autocontrast)
+Save one model-selected raster drawing region at readable scale. bbox_px is exact source-image [x0,y0,x1,y1]; scale is 0.25..12. Returns the saved PNG path and an exact crop-pixel→source-pixel transform, so coordinates read from the enlargement remain usable. This is a mechanical crop only: it performs no OCR, feature recognition, or geometry inference.
+
+## view_axes(viewport_origin, viewport_up, look_at)
+DEPRECATED (#465) — moved to draftwright; off by default in 0.4.0, removed in 0.5.0. Calling it explains the replacement. Return the world→page axis mapping for a project_to_viewport call,
+    computed analytically (no projection performed). Use this BEFORE rendering
+    a projected view to confirm which world axis ends up on which page axis
+    and with what sign — catches bottom-view/side-view axis swaps before they
+    show up in the render.
+
+    Returns JSON like {"world_X": ["page_X", -1.0], "world_Y": ["page_Y", 1.0],
+    "world_Z": ["depth", 0.0]} — for a bottom-view origin (0,0,-100), 
+
+## lint_drawing(svg_path, drawing_scale, view_shape_names)
+DEPRECATED (#465) — moved to draftwright; off by default in 0.4.0, removed in 0.5.0. Calling it explains the replacement. Run structural drawing-quality checks and return JSON {violations: [...]}.
+
+    Session mode (default): reconstructs the session's annotations and delegates
+    to build123d-drafting-helpers (lint_drawing + find_interferences) — single
+    source of truth. Surfaces label-vs-measured divergence (axis swap), Leader
+    line through its own label, annotation/label overlap, a witness/extension
+    line piercing a neighbour's label, redundant collinear lines, and page-bounds
+   
+
+## render_drawing(svg_path, width, save_to)
+DEPRECATED (#465) — moved to draftwright; off by default in 0.4.0, removed in 0.5.0. Calling it explains the replacement. Rasterise an existing SVG file to PNG via resvg-py.
+
+    Complements render_view (which takes build123d shapes from the live
+    session) by accepting an SVG written outside the sandbox — typically by
+    a short Python script that does the ExportSVG call directly. The PNG is
+    returned inline so the LLM can see the drawing without you having to
+    open the file in another tool.
+
+    Args:
+        svg_path: path to an SVG file on disk.
+        width: output pixel width (
+
+## save_drawing_annotations(svg_path)
+DEPRECATED (#465) — moved to draftwright; off by default in 0.4.0, removed in 0.5.0. Calling it explains the replacement. Write a .dims.json sidecar file alongside an SVG with label metadata.
+
+    build123d renders Text as filled glyph paths, not <text> SVG elements, so
+    label strings are irrecoverable from a finished SVG. Call this tool after
+    completing a drawing (annotate all dims/leaders with annotate()) and before
+    or after exporting the SVG. The sidecar is read automatically by
+    inspect_drawing(svg_path=...) to restore annotation content.
+
+    Workflow:
+        1. Build your 
+
+## save_snapshot(name)
+Save a named checkpoint of the current geometric state (current_shape and the show() object registry).
+    The Python variable namespace is NOT saved — only geometry. Call this before risky experiments so you can
+    restore known-good geometry without re-running all prior execute() calls.
+
+## restore_snapshot(name)
+Restore geometric state from a previously saved snapshot (current_shape and the show() registry).
+    The Python variable namespace is NOT restored — execute() calls made after the snapshot are still in scope,
+    but current_shape and all show() objects revert to what they were at snapshot time.
+    Raises an error if the snapshot name does not exist.
+
+## session_state()
+Return a structured JSON snapshot of the current session: current_shape metrics, all named objects (replaces list_objects) with geometry stats, snapshot names, and a variables summary of the Python namespace (type + volume for shapes, type + length for collections, type + value for scalars). Use this to orient after a reset, restore, or multi-step build to confirm what geometry and variables are active.
+
+## health_check()
+Verify that render and export dependencies are working. Tests PNG render (VTK), SVG render (build123d HLR), STEP export, and STL export with a trivial shape. Returns JSON with ok/error per capability. Run at session start if you suspect a missing dependency.
+
+## reset()
+Clear the current session back to empty state, including all snapshots.
+
+## destroy_session()
+Close THIS client's CAD session, discarding its namespace, objects and snapshots, and release its worker subprocess. The next tool call transparently starts a fresh session under the same handle. Use when abandoning a model entirely; prefer reset() to clear geometry while keeping the session. Only meaningful over HTTP with a session handle configured.
+
+## list_sessions()
+Report how many CAD sessions this server process is holding, its configured limit, and how long each has been idle. Handles are secrets and are never returned. Operator/diagnostic tool for HTTP deployments — over stdio there is always exactly one session.
+
+## compare(a, b, kind, axis, mode, format)
+Unified comparison tool.
+
+    kind='shape' compares two named shapes from show(), a and b, by
+    volume/bbox/topology and localized surface deviation; b is required.
+
+    kind='fit' reports the spatial relationship between two named shapes, a and b:
+    clearance, apart/touching/containing/interpenetrating status, containment,
+    and overlap volumes; b is required.
+
+    kind='align' checks two named shapes, a and b, along one axis. axis: X, Y, or Z.
+    mode: flush (bbox extreme offset), center (centroid offset), or clearance
+    (nearest-face gap); b is required.
+
+    kind='snapshot' compar
+
+## find_holes(object_name)
+Recognise drilled holes on a session object (defaults to current shape). Coaxial internal cylinders are grouped into one record per hole: drill + counterbore + spotface stacks, keyway-split bores, and bores interrupted by crossing holes all count once. Returns JSON: {count, holes: [{axis (drilling direction, unit vector), location (opening point), diameter, depth (bore top to deep end; drill-point cone excluded), bottom: through|flat|drill_point|unknown, cbore: {diameter, depth}|null, spotface: {diameter, depth}|null}]}. Countersinks read as openings (not steps); threads and non-cylindrical fe
+
+## find_hole_patterns(object_name)
+Recognise hole patterns on a session object (defaults to current shape): ≥3 identical-spec holes equally spaced on a circle → bolt_circle (center, diameter/BCD), collinear at constant pitch → linear_array (pitch, direction). Returns JSON: {count, patterns: [{type, holes: [HoleFeature records], center/diameter | pitch/direction}]}. Each hole belongs to at most one pattern; make_drawing already annotates these automatically.
+
+## find_bosses(object_name)
+Recognise external cylindrical bosses on a session object (defaults to current shape), including a turned part's OD — filter on diameter against the part envelope for local bosses only. Returns JSON: {count, bosses: [{axis (base toward free end), location (free-end point), diameter, height}]}.
+
+## find_bored_bosses(object_name)
+Find candidate bored bosses and report target-selection/edit evidence: bore opening location, axis into the part, outward axis, bore diameter/depth, planar cap faces at the opening, whether the cap is split across multiple faces, and construction advice. Use this before lengthening any boss that carries a bore, whatever its outer profile; it is read-only and diagnostic, not proof of the requested target.
+
+## find_countersinks(object_name)
+Recognise countersinks (conical screw-head recesses) on a session object (defaults to current shape) — the feature find_holes reports only as a plain opening. A countersink is an internal cone flaring from a drilled bore out to a larger opening, coaxial with the drill; drill-point cones and external edge chamfers are excluded. Returns JSON: {count, countersinks: [{location (opening centre), axis (into the part), major_diameter (countersink Ø at the surface), drill_diameter, included_angle (deg, e.g. 82/90/100/120), depth}]}. object_name: named object from show() (default: current shape).
+
+## recognise_features(object_name, families, coordinate_frame, include_faces, max_features)
+Run the shared quiddity inventory once and return exact, run-local edit evidence. With families='' the response is a compact inventory and targetable-family count; pass comma-separated families such as 'holes,bosses,blends' for structured records and @feature handles. Returned handles are usable inside execute() as recognition_faces(handle), or recognition_faces(handle, role='defining'), and fail if their source geometry has been replaced. coordinate_frame='caller' (default) preserves the imported model coordinates used by edit instructions; 'part' uses a rigid-equivariant part-relative frame 
+
+## find_candidates(kind, qualifiers, stated_value, object_name)
+List recognised instances of a hole, boss, polygonal boss, slot, chamfer or fillet. qualifiers is JSON with optional axis (X/Y/Z), side (+X/-X/+Y/-Y/+Z/-Z, relative to the part bounding-box centre), and value_field; matches are reported for the literal axes and grouped over all 24 proper rotations of the request frame (no mirror readings, none preferred). stated_value is checked against the measured feature value within 0.1 mm or 1%. An unmatched value is flagged; empty or truncated recognition is never treated as proof of absence. Returns exact @feature handles for recognised instances.
+
+## interface_features(object_name)
+Suggest planar mounting faces from recognised hole openings, with exact hole handles. These are geometric candidates, not a declaration of design intent. Pass chosen hole handles as protected_refs to edit_feature(); that edit also checks every other recognised hole and the outer envelope.
+
+## edit_feature(handle, diameter, result_name, protected_refs)
+Transactionally resize one plain cylindrical through hole identified by a current @feature handle. Reject holes with counterbores, spotfaces, countersinks or multiple constituent faces. Predict the annular volume change, then check exact added/removed material, hole recognition, every other hole and the outer envelope before registering the result. protected_refs is a JSON list of other hole handles; the target itself cannot be protected. On failure no result is registered. Defaults to replacing the named source; result_name can preserve it under a new name.
+
+## resolve(object_name, selector, label)
+Evaluate a selector expression against a named object and return a geometry descriptor. selector is a Python expression suffix applied to the object, e.g. '.faces().filter_by(Axis.Z).last()'. If label is given, the descriptor is stored in session.geometry_refs[label] and appears in session_state(). Returns JSON: {label, ref, object, selector, type, geom_type, area/length, center}. center is the entity's true centre — the arc centre for a circular/elliptical edge, the area centroid otherwise — not the parametric midpoint, which for a circle or cylinder lies ON the entity a radius from its axis.
+
+## script(save_to)
+Return a single Python script assembled from all successfully executed code blocks in this session. Prepends 'from build123d import *' if not already present. If save_to is given, writes the script to that path and returns {script_path, blocks}; otherwise returns {script, blocks}. Useful for exporting a reproducible script after an interactive session.
+
+## import_cad_file(path, name)
+Import a STEP (.step/.stp), STL (.stl), or 3MF (.3mf) file as a named object in the session. path: absolute or relative path to the file. name: name to register the shape under (defaults to the filename stem). The shape becomes both the named object and the current_shape. A multi-object 3MF registers an aggregate under name plus each member as name_1, name_2, etc.; the result includes per-member topology summaries. After importing, use render_view() to visualise the shape, measure() for geometry queries, or compare(a='imported', b='model', kind='shape') to diff against a show() object. Note: S
+
+## repair_hints(error_text)
+Given an error message or validity-gate reason, return targeted fix suggestions for common build123d mistakes and gate failures: wrong Location syntax, missing .part, CadQuery idioms, blocked imports, degenerate boolean results, fillet edge selection, B-rep defects, mesh non-manifold/open-edge failures, and more. Pass the full error string from execute(), last_error(), validate(), or export().
+
+## repair_advice(error_text, goal, context)
+Return structured, field-proven repair/edit recipes for an agent to implement explicitly in execute(). Unlike repair_hints(), which gives short error-specific tips, this emits a sequenced plan with code-pattern names, acceptance checks, and stop conditions. Provide the full validate()/export()/last_error() text as error_text, the intended edit as goal, and any extra notes from locate_gate_defects()/compare(a='before', b='after', kind='shape') as context. The tool is read-only and does not mutate geometry.
+
+## last_error()
+Return details of the last failed execute() call: exception type, message, and (for runtime and syntax errors) line number and a 5-line excerpt around the failing line. Security errors include a message but no line/excerpt. Returns {"error": null} if the last execute() succeeded or no execute() has failed yet. Call this immediately after an execute() error to get the exact failing line — much faster than re-reading the submitted code.
+
+## version()
+Return the installed versions of the build123d-mcp server, its key dependencies (build123d, build123d-drafting-helpers), and the companion packages importable inside execute() (bd_warehouse for threads/fasteners/gears/bearings, augura for printability analysis). Use this to confirm which server build is running — e.g. to check whether a feature or fix is present, or whether the client is talking to a stale install.
+
+## workflow_hints()
+Return guidance on how to use these tools effectively. Call this at the start of a session or whenever unsure which tool to reach for.
+
+## suggest_view_layout(object_name, page_w, page_h, scale, views, title_block_w, title_block_h, margin, extents, centroid)
+DEPRECATED (#465) — moved to draftwright; off by default in 0.4.0, removed in 0.5.0. Calling it explains the replacement. Auto-calculate safe VIEW_X / VIEW_Y positions for a multi-view engineering drawing.
+
+    Measures the named shape's bounding box and returns per-view page positions
+    (VIEW_X, VIEW_Y), look_at values, and camera/up vectors for a standard
+    third-angle layout:
+
+        [plan ]  [      ]
+        [front]  [ side ] [ iso ]
+                          [ title block (bottom-right) ]
+
+    Returns JSON with:
+      views: {name: {VIEW_X, VIEW_Y, half_w, half_h, look_at, camera, up
+
+## install_skill(target, force, skill)
+Copy a b123d workflow skill into the current project.
+
+    Writes the appropriate config file for the requested agent so the
+    step-by-step workflow is available in future sessions.
+
+    skill: which workflow to install (default "modeling")
+      - drawing   → DEPRECATED; still installs, but drawing generation has moved to
+                    draftwright, which publishes its own skill (#465)
+      - modeling  → build 3D parts/assemblies (incl. from technical drawings)
+      - edit      → modify existing build123d code and verify geometry deltas
+      - repair    → repair a solid that fails t
+
