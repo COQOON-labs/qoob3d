@@ -7,8 +7,8 @@ Goal: an AI agent builds a model completely as code, checks, renders and exports
 printing without a UI; no run can block the environment or lose work; a human sees the state
 live in the app and can model with the mouse later. IDs `AG-<area>-<no>` are stable.
 
-Phases: **R1** script kernel · **R2** project, cache, worker processes · **R3** service, CLI,
-MCP · then W1 (`project-app.md`), mouse modelling, photo measurement, print analysis.
+Phases: **R1** script kernel · **R2** project, cache, worker processes · **R3** service, CLI ·
+**R4** tasks, checks, MCP, render (ADR-0054) · then W1 (`project-app.md`), mouse modelling, photo measurement, print analysis.
 
 ## 1. Script kernel (R1) – `qoob3d-kernel`, module `script`
 
@@ -69,7 +69,7 @@ layer where OCCT has it.
   (polled every 0.2 s; Linux `/proc/<pid>/statm`, macOS via `ps -o rss=` or an equivalent
   without new heavy dependencies), kill + replace.
 
-## 3. Service, CLI, MCP (R3)
+## 3. Service and CLI (R3)
 
 ### 3.1 HTTP details (envelope as in `project-app.md`)
 
@@ -89,12 +89,61 @@ layer where OCCT has it.
 | --- | --- |
 | AG-SV-01 | `qoob3d serve <DIR>`: HTTP on 127.0.0.1, `.qoob3d/service.json`; endpoints `/status`, `/build`, `/job/<id>`, `/job/<id>/cancel`, `/mesh/<part>`, `/export`; `/status` answers in < 100 ms while builds run. |
 | AG-SV-02 | CLI: `qoob3d build|status|export|values` against the service (started on demand), JSON envelope on stdout, exit 0/1. |
-| AG-SV-03 | MCP: `qoob3d mcp <DIR>` over stdio with the tools of concept section 6 except photo/print: `project_status`, `build`, `job`, `run_script` (throwaway worker, does not change the project), `measure`, `render`, `check`, `compare`, `export`, `save_state` (Git commit after green checks); resources: `docs/script-api.md` and examples. |
+| AG-SV-03 | MCP: `qoob3d mcp [DIR]` over stdio, specified in section 4.5 (AG-MC-*). |
 
-## 4. Acceptance
+## 4. Tasks, checks, MCP, render (R4) – ADR-0054
+
+### 4.1 Task inbox (`qoob3d-core`, module `tasks`, pure)
+
+| ID | Requirement |
+| --- | --- |
+| AG-TK-01 | A task is a file `tasks/NNNN-slug.md` (4 digits, lowercase slug `[a-z0-9-]+`). Its id is `T-NNNN`. The file starts with a TOML header between two lines `+++`: `title` (required, non-empty), `kind` = `"task"` \| `"requirement"` \| `"idea"` (default `task`), `state` (default `open`), `parts = [..]`, `checks = [..]` (default empty), `created = "YYYY-MM-DD"` (optional). After the header: the body (Markdown, the human's words), optionally followed by a section `## Log` with one line per entry `- <YYYY-MM-DD> <who>: <text>`. |
+| AG-TK-02 | States: `open`, `in_progress`, `blocked`, `review`, `done`, `rejected`. Allowed transitions for the role **agent**: `open → in_progress`, `in_progress → blocked` (note required: the question), `blocked → in_progress`, `in_progress → review` (gate AG-TK-04), `review → in_progress`. Role **human**: every transition, including `done` and `rejected`. A forbidden transition is an error naming task, states and role. |
+| AG-TK-03 | `Tasks::load(dir)` reads all tasks sorted by id; errors name the file (bad name, missing header, missing title, unknown kind/state, duplicate number). `create(dir, title, kind, body, parts, checks, date)` picks the next free number and a slug from the title (ASCII lowercase, other characters → `-`, at most 40 characters) and returns the task. `update(dir, id, role, new_state, note, date)` rewrites only the `state` line of the header and appends the log entry (who = `agent` or `human`); body and other header fields stay byte-identical. A note without state change only appends to the log. |
+| AG-TK-04 | Gate for `in_progress → review`: every part in `parts` exists and is in state `current`, every check in `checks` exists and passed in a run made after the last build; if `parts` and `checks` are both empty the gate needs a note. The pure layer takes this as input (`GateInput { parts: map name → state, checks: map name → passed }`) and reports every unmet condition. |
+
+### 4.2 Checks (`checks/*.rhai`, run in a worker)
+
+| ID | Requirement |
+| --- | --- |
+| AG-CK-01 | A check file declares checks with `check("name", || { … })`; names are unique in the project. Inside: `part("Name")` returns the built shape of a part (error if not built and current), `value("id")` as in parts, and all measure functions of the script API. |
+| AG-CK-02 | Expectations: `expect(cond, "text")`, `expect_near(actual, expected, tol, "text")`, `expect_between(actual, min, max, "text")`. Every expectation is recorded with text, actual, expected/tolerance and pass/fail; a failed expectation does not stop the check. A script error fails the check with file, line, column. |
+| AG-CK-03 | `POST /check {"names": [..]|null, "wait_s": f64}` builds stale parts first, runs the checks in a worker under the project limits and returns `{"checks": [{name, file, state: "passed"|"failed", duration_s, expectations: [{text, passed, actual, expected, tol}], error?}], "passed": n, "failed": n}`. `/status` gains `"checks": [{name, file, state: "passed"|"failed"|"stale"|"never_run"}]`; a check is `stale` when a part was rebuilt or a check file changed after its last run. CLI: `qoob3d check [NAMES..]`, exit 1 if any failed. |
+
+### 4.3 Service additions
+
+| ID | Requirement |
+| --- | --- |
+| AG-SV-04 | `GET /tasks` → list `{id, title, kind, state, parts, checks, file}`; `GET /task/<id>` → plus `body` and `log`; `POST /task {title, kind?, body?, parts?, checks?}` creates; `POST /task/<id> {state?, note?, role}` updates with the gate evaluated by the service from its own part and check states. CLI: `qoob3d task list|show ID|new TITLE [--kind K] [--body TEXT]|set ID STATE [--note TEXT]` (CLI acts as role human). |
+| AG-SV-05 | `POST /run {"source": str, "wait_s": f64}` runs a throwaway script in a worker: `part("Name")` and `value("id")` are available, nothing is written to the project or the cache; result `{shapes: [{name, volume, area, bbox, center, valid, solids}], printed: [..]}` or the script error. |
+| AG-SV-06 | `POST /measure {"a": part, "b"?: part}` → for `a`: volume, area, bbox, center, valid, solids; with `b`: `distance` and `common_volume` (0 if disjoint; an overlap is a finding, not an error). |
+| AG-SV-07 | `POST /save {"message": str}` → runs all checks; if any part failed or any check failed: error kind `gate` listing them; else `git add` of the project files (never `.qoob3d/`, `out/`) and `git commit` in the project folder, returns the commit hash. Not a Git repository → error kind `git`. |
+| AG-SV-08 | `qoob3d init <DIR>` creates a project skeleton (`qoob3d.toml`, `parts/`, `lib/`, `values/`, `checks/`, `tasks/`, `.gitignore` with `.qoob3d/` and `out/`) and refuses a non-empty folder that already has `qoob3d.toml`. |
+
+### 4.4 Render for the agent
+
+| ID | Requirement |
+| --- | --- |
+| AG-RD-01 | `qoob3d render-project <DIR> --out <PNG> [--view iso|front|back|left|right|top|bottom] [--size WxH] [--parts A,B]` renders the built parts headless (service started on demand, builds stale parts first), default view `iso`, default size 1024x768, camera fitted to the selected parts, orthographic. Unknown part → exit 1 naming it. |
+
+### 4.5 MCP server (`qoob3d mcp [DIR]`, stdio)
+
+| ID | Requirement |
+| --- | --- |
+| AG-MC-01 | JSON-RPC 2.0 over stdio, one message per line (MCP stdio transport). Implements `initialize` (answers with the client's protocol version if it is one of `2024-11-05`, `2025-03-26`, `2025-06-18`, else `2025-06-18`; capabilities `tools`, `resources`; `serverInfo` name `qoob3d`; `instructions` = the workflow guide), `notifications/initialized`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/read`. Unknown method → error −32601; malformed JSON → −32700; nothing but protocol messages on stdout. DIR defaults to the working directory; the service is started on demand. |
+| AG-MC-02 | Every tool result has one text content holding the JSON envelope `{ok, duration_s, warnings, result|error}` and `isError = !ok`. Tools (input schemas with descriptions in `tools/list`): `project_status`, `guide` (workflow guide), `api_reference {search?}` (the whole `docs/script-api.md`, or only the sections whose heading or text contains the search string, case-insensitive), `task_list {state?}`, `task_get {id}`, `task_create {title, kind?, body?, parts?, checks?}`, `task_update {id, state?, note?}` (role agent: can never set `done`/`rejected`), `file_list {dir?}`, `file_read {path}`, `file_write {path, content}`, `build {parts?, wait_s?}`, `job {id, cancel?}`, `run_script {source, wait_s?}`, `measure {a, b?}`, `check {names?, wait_s?}`, `render {view?, parts?, width?, height?}`, `export {parts, format}`, `values {}` (all values plus the assumptions), `save_state {message}`. |
+| AG-MC-03 | File tools are confined: paths relative to the project, only under `parts/`, `lib/`, `values/`, `checks/`, `tasks/` and the file `qoob3d.toml`, only extensions `.rhai`, `.toml`, `.md`; no `..`, no absolute paths, no symlink escape, never `.qoob3d/`; at most 1 MiB per file. Writing a task file through `file_write` is refused (tasks change only through the task tools, so the role rules hold). |
+| AG-MC-04 | `render` returns two contents: the text envelope (with `path` of the PNG under `out/renders/`) and an image content (`type: "image"`, base64 PNG, `mimeType: "image/png"`). |
+| AG-MC-05 | Resources: `qoob3d://script-api` (Markdown), `qoob3d://guide`, and one per example script `qoob3d://examples/<name>.rhai`. The API reference and examples are embedded in the binary, so they match its version. |
+| AG-MC-06 | The workflow guide (also tool `guide`) tells an agent in at most 60 lines: project layout, the loop (task_list → task_update in_progress → read API reference → write part and check → build → check → render and look → task_update review), the rules (values need sources; never guess a dimension, ask via `blocked`; booleans batched; units mm), and how errors are reported. |
+
+## 5. Acceptance
 
 - R1: the three M0 probe parts written as scripts reproduce the analytic volumes from
   `werft/m0/teile.py` to < 1e-6 relative; build times as AG-SC-15.
 - R2: an endless script is killed after the time limit while the service answers; changing
   one part rebuilds only it and its dependents.
-- R3: a fresh agent builds a box with lid and pin connection via MCP only, with a check.
+- R3: CLI and service pass `crates/qoob3d-app/tests/service.rs`.
+- R4: a fresh agent, given only the MCP server and a task file "box with lid and pin
+  connection, 0.2 mm clearance", builds both parts with a check and hands the task over in
+  state `review`; the human sets `done`.

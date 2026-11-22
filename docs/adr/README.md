@@ -63,4 +63,5 @@ Accepted ADRs are not rewritten but superseded by a new ADR.
 | [ADR-0051](0051-hooks-strip-the-macos-quarantine-from-xtask.md) | The git hooks run an un-quarantined xtask directly, pre-push stops under a quarantining client | accepted | 2026-10-15 | – |
 | [ADR-0052](0052-qoob3d-becomes-the-app-of-werft-models-are-code.md) | QOOB3D becomes the app of Werft – models are build123d code, agents come first | superseded | 2026-11-22 | qoob3d-app, qoob3d-core |
 | [ADR-0053](0053-agent-first-all-rust-models-are-rhai-scripts.md) | Agent first, all Rust – models are Rhai scripts on our OCCT kernel, heavy work in worker processes | accepted | 2026-11-22 | qoob3d-core, qoob3d-kernel, qoob3d-app |
+| [ADR-0054](0054-the-project-is-the-shared-workspace-tasks-checks-mcp.md) | The project folder is the shared workspace of human and agent – task inbox, checks as a gate, MCP as the main interface | accepted | 2026-11-22 | qoob3d-core, qoob3d-kernel, qoob3d-app |
 <!-- adr-index:end -->
