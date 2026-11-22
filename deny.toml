@@ -32,6 +32,8 @@ exceptions = [
     { name = "opencascade-kicad-parser", allow = ["LGPL-2.1"] },
     # egui's bundled default fonts (font licences, unproblematic for embedding).
     { name = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+    # Fixed dependency of rhai (ADR-0053): file-level copyleft, used unmodified (ADR-0055).
+    { name = "smartstring", allow = ["MPL-2.0"] },
 ]
 
 [licenses.private]
