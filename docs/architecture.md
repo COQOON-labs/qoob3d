@@ -101,6 +101,8 @@ flowchart TD
 | Rebuild of the features, booleans, cache | `crates/qoob3d-kernel/src/model.rs` |
 | Feature dialogs, selection in the viewport | `crates/qoob3d-app/src/commands.rs` |
 | CLI batch (`--report`, `--export`) | `crates/qoob3d-app/src/batch.rs` |
+| Script project shown live (`--project`, service client, poller; W1) | `crates/qoob3d-app/src/live.rs` |
+| Mesh transfer format, STL import | `crates/qoob3d-core/src/{qmesh,stl}.rs` |
 | E2E modeling through the UI | `crates/qoob3d-app/tests/modeling.rs` |
 | Reference model gate | `xtask/src/models.rs` |
 | Printer profiles (generated) | `crates/qoob3d-core/src/printer/{mod,data}.rs`, generator `xtask/src/printers.rs` |

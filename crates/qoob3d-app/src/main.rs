@@ -1,7 +1,7 @@
 //! QOOB3D – parametric CAD for FDM printing.
 
 use clap::Parser as _;
-use qoob3d_app::{app, batch, cli, headless_render, smoke};
+use qoob3d_app::{app, batch, cli, headless_render, live, smoke};
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -12,6 +12,18 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = cli::Cli::parse();
+
+    // WA-OP-01: a folder that is no project ends the app before any window.
+    let project = match cli.project.as_deref().map(live::ProjectDir::open).transpose() {
+        Ok(project) => project,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            std::process::exit(2);
+        }
+    };
+    if let (Some(project), Some(out)) = (&project, &cli.render) {
+        return render_project(&cli, project, out);
+    }
 
     if cli.render.is_some() || cli.export.is_some() || cli.report {
         return headless(&cli);
@@ -41,6 +53,7 @@ fn main() -> anyhow::Result<()> {
                 demo: cli.demo || smoke.is_some(),
                 smoke,
                 open: cli.file.clone(),
+                project_dir: project.map(|p| p.dir().to_path_buf()),
             };
             Ok(Box::new(app::QoobApp::new(cc, options)?))
         }),
@@ -60,6 +73,37 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
+    }
+    Ok(())
+}
+
+fn render_view(cli: &cli::Cli) -> headless_render::RenderView {
+    headless_render::RenderView {
+        preset: cli.view.into(),
+        orthographic: cli.ortho,
+        zoom: cli.zoom,
+        printer: cli.printer.clone(),
+        build_volume: cli.volume,
+    }
+}
+
+/// `--project <DIR> --render <PNG>` (WA-HL-01): failed parts are named on
+/// stderr and give exit code 1, after the PNG is written.
+fn render_project(
+    cli: &cli::Cli,
+    project: &live::ProjectDir,
+    out: &std::path::Path,
+) -> anyhow::Result<()> {
+    let (scene, failed) = live::build_and_load(project, &live::service_command_from_env())?;
+    if scene.faces.is_empty() {
+        anyhow::bail!("no part of {} has a mesh to render", project.dir().display());
+    }
+    headless_render::run(out, render_view(cli), cli.size, Some(scene))?;
+    for name in &failed {
+        eprintln!("error: part {name} failed to build");
+    }
+    if !failed.is_empty() {
+        std::process::exit(1);
     }
     Ok(())
 }
@@ -87,14 +131,7 @@ fn headless(cli: &cli::Cli) -> anyhow::Result<()> {
         scene = Some(batch::scene(&result));
     }
     if let Some(out) = &cli.render {
-        let view = headless_render::RenderView {
-            preset: cli.view.into(),
-            orthographic: cli.ortho,
-            zoom: cli.zoom,
-            printer: cli.printer.clone(),
-            build_volume: cli.volume,
-        };
-        headless_render::run(out, view, cli.size, scene)?;
+        headless_render::run(out, render_view(cli), cli.size, scene)?;
     }
     if !ok {
         std::process::exit(1);

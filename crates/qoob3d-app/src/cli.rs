@@ -12,6 +12,12 @@ pub struct Cli {
     /// `.qbd` file to open.
     pub file: Option<PathBuf>,
 
+    /// Open the script project in this folder (with `qoob3d.toml`) and show
+    /// its parts live; with --render, build and render them headless
+    /// (WA-OP-01, WA-HL-01).
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["file", "export", "report", "smoke_test"])]
+    pub project: Option<PathBuf>,
+
     /// Show the demo body (block with a hole) in addition to the document.
     #[arg(long)]
     pub demo: bool,

@@ -36,6 +36,10 @@ Document model and shared pure data types. Used by all other crates.
   (`cargo xtask models --write`) and `all_kinds()` (source of the v2 fixture, ADR-0033).
 - `src/generate.rs`: involute spur gear (contour from pieces), coil path, path length (ADR-0032).
 - `src/export.rs`: STL, 3MF, ZIP writer/reader with CRC-32 (ADR-0034).
+- `src/qmesh.rs`: indexed mesh transfer format service → app (WA-QM-*, ADR-0053); the reader
+  checks sizes against the input before allocating.
+- `src/stl.rs`: binary STL import (WA-LV-03): exact welding, normals from the winding,
+  feature edges > 30° plus open edges.
 - `tests/fixtures/`: `format_v1.qbd`, `format_v2.qbd` (all feature and curve kinds).
 - `src/printer/mod.rs`: `PrinterProfile`, `BedGeometry` (ADR-0021).
 - `src/printer/data.rs`: **generated** by `cargo xtask printers` from OrcaSlicer profiles –

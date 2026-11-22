@@ -37,8 +37,11 @@ kernel connection come together.
 ## Files
 
 - `src/main.rs`: entry point, CLI switch. `src/lib.rs`: modules for tests.
-- `src/cli.rs`: arguments (file, `--demo`, `--render`, `--view`, `--size`, `--ortho`, `--zoom`,
-  `--printer`, `--volume`, `--smoke-test`).
+- `src/cli.rs`: arguments (file, `--project`, `--demo`, `--render`, `--view`, `--size`, `--ortho`,
+  `--zoom`, `--printer`, `--volume`, `--smoke-test`).
+- `src/live.rs`: script project shown live (W1, ADR-0053, docs/requirements/project-app.md):
+  `ProjectDir`, minimal std::net HTTP `Client` (service start via `QOOB3D_SERVICE_CMD`), `Poller`
+  thread (HTTP never on the UI thread), view model `Live`, headless `build_and_load`.
 - `src/app.rs`: `QoobApp` (eframe::App), `Mode` (model/plane pick/sketch), dialogs
   (unsaved, error), keyboard shortcuts, kernel polling, status line.
 - `src/panels.rs`: toolbar (file, undo/redo, sketch tools, CREATE, CONSTRUCT,
@@ -60,6 +63,7 @@ kernel connection come together.
   test flickers when someone moves the mouse over the window that pops up).
 - `src/headless_render.rs`: `--render`, kernel + renderer without a window → PNG.
 - `tests/ui.rs`: UI tests of the real app, screenshot on request.
+- `tests/project.rs` (+ `tests/common/`): live project view against a fake service.
 - `tests/modeling.rs`: every shape end to end through the UI, export, editing; screenshots
   of dialog and model (60 Hz steps for double-clicks).
 

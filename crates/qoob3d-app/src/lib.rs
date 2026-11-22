@@ -8,6 +8,7 @@ pub mod commands;
 pub mod headless_render;
 mod history;
 pub mod i18n;
+pub mod live;
 mod navigation;
 mod panels;
 pub mod project;

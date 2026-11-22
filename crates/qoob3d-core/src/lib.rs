@@ -9,6 +9,8 @@ pub mod generate;
 pub mod mesh;
 pub mod printer;
 pub mod profile;
+pub mod qmesh;
+pub mod stl;
 
 pub use mesh::{Aabb, MeshReport, Polylines, RayHit, ShapeMesh, TriMesh};
 pub use printer::{BedGeometry, PRINTERS, PrinterProfile};

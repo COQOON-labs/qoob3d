@@ -9,6 +9,7 @@ use qoob3d_sketch::tools::ToolKind;
 
 use crate::commands::{CommandKind, icon};
 use crate::i18n::{self, Language, decimal, tr, tr_args};
+use crate::live::{Live, PartState};
 use crate::navigation::double_clicked_by;
 use crate::settings::Settings;
 use crate::sketch_ui::plane_label;
@@ -35,6 +36,8 @@ pub(crate) enum UiAction {
     EditFeature(FeatureId),
     DeleteFeature(FeatureId),
     ToggleVisible(FeatureId),
+    /// Show/hide a part of the open script project (index into `Live::parts`).
+    TogglePart(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +60,8 @@ pub(crate) struct PanelState<'a> {
     /// Open feature dialog: kind and the feature it edits.
     pub command: Option<(CommandKind, Option<FeatureId>)>,
     pub feature_error: &'a dyn Fn(FeatureId) -> Option<String>,
+    /// The open script project (W1).
+    pub live: Option<&'a Live>,
 }
 
 /// A toolbar group: caption below a row of buttons (Fusion ribbon style).
@@ -259,6 +264,9 @@ pub(crate) fn browser(ui: &mut egui::Ui, s: &PanelState<'_>, title: &str) -> Vec
     ui.add_space(4.0);
     ui.label(theme::caption(&tr("browser")));
     ui.add_space(2.0);
+    if let Some(live) = s.live {
+        project_parts(ui, live, &mut out);
+    }
     egui::CollapsingHeader::new(format!("📄 {title}")).id_salt("doc").default_open(true).show(
         ui,
         |ui| {
@@ -343,6 +351,47 @@ pub(crate) fn browser(ui: &mut egui::Ui, s: &PanelState<'_>, title: &str) -> Vec
         },
     );
     out
+}
+
+/// Parts of the script project with state and eye (WA-LV-04/05).
+fn project_parts(ui: &mut egui::Ui, live: &Live, out: &mut Vec<UiAction>) {
+    egui::CollapsingHeader::new(tr("browser-parts")).id_salt("parts").default_open(true).show(
+        ui,
+        |ui| {
+            if !live.reachable() {
+                ui.label(RichText::new(tr("live-unreachable")).color(theme::ERROR))
+                    .on_hover_text(tr("live-unreachable-tip"));
+            }
+            if live.parts().is_empty() {
+                ui.label(RichText::new(tr("browser-none")).color(theme::TEXT_MUTED));
+            }
+            for (index, part) in live.parts().iter().enumerate() {
+                ui.horizontal(|ui| {
+                    let eye = if part.visible { "👁" } else { "○" };
+                    if ui
+                        .add(egui::Button::new(eye).frame(false))
+                        .on_hover_text(tr("browser-toggle-visibility"))
+                        .clicked()
+                    {
+                        out.push(UiAction::TogglePart(index));
+                    }
+                    let state = tr(match part.state {
+                        PartState::Current => "part-state-current",
+                        PartState::Outdated => "part-state-outdated",
+                        PartState::Failed => "part-state-failed",
+                        PartState::NeverBuilt => "part-state-never-built",
+                    });
+                    let color = match part.state {
+                        PartState::Failed => theme::ERROR,
+                        PartState::Current => theme::TEXT,
+                        PartState::Outdated | PartState::NeverBuilt => theme::TEXT_MUTED,
+                    };
+                    ui.label(RichText::new(format!("◼ {}  ·  {state}", part.name)).color(color))
+                        .on_hover_text(&part.file);
+                });
+            }
+        },
+    );
 }
 
 pub(crate) fn timeline(ui: &mut egui::Ui, s: &PanelState<'_>) -> Vec<UiAction> {
