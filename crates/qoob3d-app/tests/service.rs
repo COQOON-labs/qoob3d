@@ -1471,6 +1471,11 @@ fn assert_bomb_is_a_load_error(tag: &str, rel: &str, source: &str) {
     p.write("parts/normal.rhai", NORMAL).write(rel, source);
     // `start_capped` already needs an answer to `/status`.
     let s = Service::start_capped(&p, BOMB_CAP_KIB);
+    // Discovery runs in a worker (ADR-0056): the first answers may come
+    // before it has finished. Every poll stays within the 100 ms budget;
+    // the load error naming the file follows within 10 s.
+    wait_for_load_error(&s, rel, &["load"], Duration::from_secs(10));
+    // From then on every answer carries it.
     for round in 0..3 {
         let t = Instant::now();
         let r = s
@@ -1839,6 +1844,8 @@ fn ag_hd_06_import_through_a_variable_at_the_top_level_is_a_load_error_with_posi
     )
     .write("lib/form.rhai", LIB_FORM);
     let s = Service::start(&p);
+    // Discovery runs in a worker (ADR-0056): poll until its answer is in.
+    wait_for_load_error(&s, "parts/top.rhai", &["load"], Duration::from_secs(10));
     let r = s.get("/status");
     let v = r.envelope();
     assert!(r.text().contains("parts/top.rhai"), "/status names the file: {v}");
