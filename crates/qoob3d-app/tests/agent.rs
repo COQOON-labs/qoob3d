@@ -1,8 +1,9 @@
 //! R4 without MCP: checks, tasks, throwaway scripts, measure, save, init and
 //! the project render against the real `qoob3d` binary
 //! (docs/requirements/agent.md §4.2–4.4: AG-CK-01..03, AG-SV-04..08,
-//! AG-RD-01; ADR-0054; envelope from docs/requirements/project-app.md §1).
-//! Every test names its requirement IDs.
+//! AG-RD-01; ADR-0054; envelope from docs/requirements/project-app.md §1),
+//! and R5 (§6.1 AG-HD-04, 07, 08, 09, 11; §6.2 AG-TK-05..07 through the
+//! service). Every test names its requirement IDs.
 //!
 //! Test projects use only boxes and cylinders, so every expected number is
 //! derived by hand next to the assertion. Tolerances: `VOL` = 1e-6 relative
@@ -19,10 +20,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use qoob3d_app::live;
 use serde_json::{Value, json};
 use support::{
-    Project, Service, VOL, assert_rel, assert_vec, cli, git, git_init, git_tracked, png_colors,
-    png_size, service_json, wait_until,
+    BIN, Project, Service, VOL, assert_rel, assert_vec, cli, git, git_init, git_tracked,
+    png_colors, png_size, service_json, wait_until,
 };
 
 const POS: f64 = 1e-6;
@@ -623,9 +625,10 @@ fn ag_sv_04_task_updates_follow_the_role_rules() {
     let file = p.read(HAND_MADE_FILE);
     let expected = HAND_MADE.replace("state = \"open\"", "state = \"in_progress\"");
     assert!(file.starts_with(expected.trim_end()), "header and body byte-identical:\n{file}");
+    // AG-TK-07: `<old> -> <new>: <note>`.
     assert!(
-        has_log_line(&file, "agent", "starting"),
-        "log line `- <date> agent: starting`:\n{file}"
+        has_log_line(&file, "agent", "open -> in_progress: starting"),
+        "log line `- <date> agent: open -> in_progress: starting`:\n{file}"
     );
 
     // blocked needs the question.
@@ -653,7 +656,10 @@ fn ag_sv_04_task_updates_follow_the_role_rules() {
 
     // Human: every transition, including done and rejected.
     update_ok(&s, id, &json!({"state": "done", "role": "human", "note": "accepted"}), "done");
-    assert!(has_log_line(&p.read(HAND_MADE_FILE), "human", "accepted"));
+    let file = p.read(HAND_MADE_FILE);
+    assert!(has_log_line(&file, "human", "in_progress -> done: accepted"), "{file}");
+    // Without a note the entry is the arrow alone.
+    assert!(has_log_line(&file, "agent", "blocked -> in_progress"), "{file}");
     update_refused(
         &s,
         id,
@@ -722,13 +728,25 @@ fn ag_sv_04_review_needs_current_parts_and_passed_checks() {
     let ghost = task_in_progress(&s, "Ghosts", &["Ghost"], &["no_such_check"]);
     gate_refused(&s, &ghost, &["Ghost", "no_such_check"]);
 
-    // Neither parts nor checks: the gate needs a note.
+    // AG-TK-06: a task needs at least one part and one check bound; a note
+    // does not replace them (`gate_refused` sends one). Both sides are green
+    // where bound, so only the missing side closes the gate.
     let empty = task_in_progress(&s, "Just think", &[], &[]);
-    let v = update(&s, &empty, &review);
-    assert_refused(&v, &[], "a hand-over without parts, checks and note");
+    gate_refused(&s, &empty, &["part", "check"]);
+    let no_check = task_in_progress(&s, "Unchecked", &["Plate"], &[]);
+    gate_refused(&s, &no_check, &["check"]);
+    let no_part = task_in_progress(&s, "Partless", &[], &["plate_volume"]);
+    gate_refused(&s, &no_part, &["part"]);
+
+    // AG-TK-06: kind `idea` needs a note only.
+    let t = post_ok(&s, "/task", &json!({"title": "Maybe a handle", "kind": "idea"}));
+    let idea = t["id"].as_str().unwrap_or_else(|| panic!("task id: {t}")).to_owned();
+    update_ok(&s, &idea, &json!({"state": "in_progress", "role": "agent"}), "in_progress");
+    let v = update(&s, &idea, &review);
+    assert_refused(&v, &["note"], "an idea handed over without a note");
     assert_eq!(v["error"]["kind"], json!("gate"), "{v}");
     let noted = json!({"state": "review", "role": "agent", "note": "thought about it"});
-    update_ok(&s, &empty, &noted, "review");
+    update_ok(&s, &idea, &noted, "review");
 
     // The gate binds the agent; the human may make every transition (AG-TK-02).
     update_ok(&s, &red, &json!({"state": "review", "role": "human"}), "review");
@@ -769,7 +787,8 @@ fn ag_sv_04_cli_task_commands_act_as_the_human() {
     assert_eq!(task_state(&s, "T-0001"), "done");
     let file = p.read("tasks/0001-print-a-spacer.md");
     assert!(file.contains("state = \"done\""), "{file}");
-    assert!(has_log_line(&file, "human", "printed and fits"), "{file}");
+    // AG-TK-07: `<old> -> <new>: <note>`.
+    assert!(has_log_line(&file, "human", "open -> done: printed and fits"), "{file}");
     let out = cli(&p.dir, &["task", "set", "T-0002", "rejected"], CLI);
     assert_eq!(out.code, Some(0), "{}", out.stdout);
 
@@ -1148,5 +1167,513 @@ fn ag_rd_01_render_project_builds_and_renders_views_sizes_and_parts() {
         let (out, png) = render_project(&p, "invalid.png", extra);
         assert!(out.code.is_some_and(|c| c != 0), "render-project {extra:?} must fail");
         assert!(png.is_none(), "render-project {extra:?} wrote a PNG");
+    }
+}
+
+// ===========================================================================
+// AG-TK-05: binding parts and checks through the service
+// ===========================================================================
+
+/// A free-text task as the human of the R5 run wrote it: nothing bound.
+const FREE_TEXT: &str = "\
++++
+# the comment of the human
+title = \"Plate for the wall\"
+state = \"open\"
+created = \"2026-11-22\"
++++
+
+A plate of 20 x 10 x 10 mm.
+Keep   this line – byte for byte.
+";
+const FREE_TEXT_FILE: &str = "tasks/0001-plate-for-the-wall.md";
+
+/// `text` without the `parts`/`checks` lines of its TOML header.
+fn without_bindings(text: &str) -> String {
+    let mut fences = 0;
+    text.split_inclusive('\n')
+        .filter(|line| {
+            if line.trim_end() == "+++" {
+                fences += 1;
+            }
+            let key = line.trim_start();
+            !(fences == 1 && (key.starts_with("parts") || key.starts_with("checks")))
+        })
+        .collect()
+}
+
+#[test]
+fn ag_tk_05_the_agent_binds_parts_and_checks_while_open_or_in_progress() {
+    // AG-TK-05: "`POST /task/<id>` … accept[s] `parts` and `checks` (replace
+    // the lists; the header lines are rewritten, the rest of the file stays
+    // byte-identical). Unknown names are accepted at binding time and fail
+    // the gate later."
+    // Plate = box(20, 10, 10) = 2000 mm³.
+    let p = Project::new("task-bind", "");
+    p.write("parts/plate.rhai", "part(\"Plate\", #{}, |deps| box(20, 10, 10));\n")
+        .write(
+            "checks/plate.rhai",
+            "check(\"plate_volume\", || {\n    \
+             expect_near(part(\"Plate\").volume(), 2000, 0.001, \"volume\");\n});\n",
+        )
+        .write(FREE_TEXT_FILE, FREE_TEXT);
+    let s = Service::start(&p);
+    let id = "T-0001";
+    build_all(&s);
+    run_checks(&s, None);
+
+    // `role` is required, as for every update (AG-SV-04).
+    update_refused(&s, id, &json!({"parts": ["Plate"]}), &[]);
+    assert_eq!(p.read(FREE_TEXT_FILE), FREE_TEXT, "a refused binding writes nothing");
+
+    // Open: unknown names are accepted.
+    let v =
+        update(&s, id, &json!({"parts": ["Ghost"], "checks": ["no_such_check"], "role": "agent"}));
+    assert_eq!(v["ok"], json!(true), "binding in open: {v}");
+    let t = &v["result"];
+    assert_eq!((&t["parts"], &t["checks"]), (&json!(["Ghost"]), &json!(["no_such_check"])), "{t}");
+    assert_eq!(t["state"], json!("open"), "binding is no state change: {t}");
+    let shown = task(&s, id);
+    assert_eq!((&shown["parts"], &shown["checks"]), (&json!(["Ghost"]), &json!(["no_such_check"])));
+    let listed = get(&s, "/tasks")["result"][0].clone();
+    assert_eq!(listed["parts"], json!(["Ghost"]), "/tasks shows the binding: {listed}");
+    // The rest of the file: byte-identical up to appended log lines.
+    let file = p.read(FREE_TEXT_FILE);
+    assert!(
+        without_bindings(&file).starts_with(&without_bindings(FREE_TEXT)),
+        "only the parts/checks lines of the header may change:\n{file}"
+    );
+
+    // …and fail the gate later, each by name.
+    update_ok(&s, id, &json!({"state": "in_progress", "role": "agent"}), "in_progress");
+    gate_refused(&s, id, &["Ghost", "no_such_check"]);
+
+    // In progress: the lists are replaced, not merged. One list alone
+    // leaves the other.
+    let v = update(&s, id, &json!({"parts": ["Plate"], "role": "agent"}));
+    assert_eq!(v["ok"], json!(true), "binding in in_progress: {v}");
+    assert_eq!(v["result"]["parts"], json!(["Plate"]), "{v}");
+    assert_eq!(v["result"]["checks"], json!(["no_such_check"]), "checks were not sent: {v}");
+    gate_refused(&s, id, &["no_such_check"]);
+    // An empty list unbinds: the gate then asks for a check (AG-TK-06).
+    let v = update(&s, id, &json!({"checks": [], "role": "agent"}));
+    assert_eq!(v["result"]["checks"], json!([]), "{v}");
+    gate_refused(&s, id, &["check"]);
+
+    // Binding and hand-over in one request: the gate sees the new lists.
+    let hand_over = json!({"state": "review", "role": "agent", "note": "plate is ready",
+        "parts": ["Plate"], "checks": ["plate_volume"]});
+    update_ok(&s, id, &hand_over, "review");
+    let shown = task(&s, id);
+    assert_eq!((&shown["parts"], &shown["checks"]), (&json!(["Plate"]), &json!(["plate_volume"])));
+    // AG-TK-06/07: the entry starts with the arrow, lists what was bound and
+    // carries the note.
+    let file = p.read(FREE_TEXT_FILE);
+    let log = file.split_once("\n## Log").map(|(_, l)| l).unwrap_or_default();
+    let entry = log.lines().find(|l| l.contains(" agent: in_progress -> review"));
+    let entry = entry.unwrap_or_else(|| panic!("no hand-over entry:\n{file}"));
+    for word in ["Plate", "plate_volume", "plate is ready"] {
+        assert!(entry.contains(word), "the hand-over entry names {word:?}: {entry}");
+    }
+    assert!(
+        without_bindings(&file)
+            .replace("state = \"review\"", "state = \"open\"")
+            .starts_with(&without_bindings(FREE_TEXT)),
+        "header (but state, parts, checks) and body are byte-identical:\n{file}"
+    );
+
+    // In review the lists are frozen for the agent: the human looks at
+    // exactly what the gate checked. The error names task and state.
+    let before = p.read(FREE_TEXT_FILE);
+    for body in [
+        json!({"parts": [], "role": "agent"}),
+        json!({"checks": ["plate_volume", "other"], "role": "agent"}),
+        json!({"parts": ["Plate"], "checks": ["plate_volume"], "note": "n", "role": "agent"}),
+    ] {
+        update_refused(&s, id, &body, &[id, "review"]);
+        assert_eq!(p.read(FREE_TEXT_FILE), before, "a refused binding writes nothing: {body}");
+    }
+    // Wrong types are refused.
+    update_ok(&s, id, &json!({"state": "in_progress", "role": "agent"}), "in_progress");
+    let before = p.read(FREE_TEXT_FILE);
+    update_refused(&s, id, &json!({"parts": "Plate", "role": "agent"}), &[]);
+    update_refused(&s, id, &json!({"checks": [1], "role": "agent"}), &[]);
+    assert_eq!(p.read(FREE_TEXT_FILE), before);
+    // Blocked, done, rejected: no binding by the agent either.
+    for (state, by) in [("blocked", "agent"), ("done", "human"), ("rejected", "human")] {
+        update_ok(&s, id, &json!({"state": state, "role": by, "note": "why?"}), state);
+        update_refused(&s, id, &json!({"parts": ["Other"], "role": "agent"}), &[id, state]);
+        if state == "blocked" {
+            update_ok(&s, id, &json!({"state": "in_progress", "role": "agent"}), "in_progress");
+        }
+    }
+    assert_eq!(task(&s, id)["parts"], json!(["Plate"]));
+}
+
+// ===========================================================================
+// AG-HD-04: names that are no plain path segment
+// ===========================================================================
+
+/// `(name, height)`: each part is box(10, 10, height) → 100·height mm³,
+/// z ∈ [0, height]. A space, the query and fragment delimiters, a literal
+/// percent sequence. `PctA` is what `Pct%41` decodes to when a client sends
+/// the name unencoded.
+const AWKWARD: [(&str, f64); 5] =
+    [("Crane column", 1.0), ("What?", 2.0), ("Hash#1", 3.0), ("Pct%41", 4.0), ("PctA", 9.0)];
+
+#[test]
+fn ag_hd_04_parts_with_awkward_names_build_load_in_the_app_client_and_render() {
+    // AG-HD-04: "Clients percent-encode every path segment they build from
+    // a name (`/mesh/<part>` …); a part named `Crane column` builds, shows
+    // in the app client and renders."
+    let p = Project::new("names", "[workers]\ncount = 2\n");
+    let source: String = AWKWARD
+        .iter()
+        .map(|(name, h)| format!("part(\"{name}\", #{{}}, |deps| box(10, 10, {h}));\n"))
+        .collect();
+    p.write("parts/names.rhai", &source);
+    let s = Service::start(&p);
+    let r = build_all(&s);
+    for (name, h) in AWKWARD {
+        let part = &r["parts"][name];
+        assert_eq!(part["state"], json!("built"), "{name:?}: {r}");
+        assert_rel(&part["volume"], 100.0 * h, VOL, &format!("volume of {name:?}"));
+    }
+    let st = status(&s);
+    assert!(states(&st, "parts").values().all(|v| v == "current"), "{st}");
+    let keys = by_name(&st["parts"]);
+
+    // The app client (W1): every mesh arrives and is the mesh of that part.
+    let dir = live::ProjectDir::open(&p.dir).expect("project dir");
+    let client = live::Client::connect(&dir, &[BIN.to_owned()], Duration::from_secs(20))
+        .expect("connect to the running service");
+    let listed: BTreeSet<String> =
+        client.status().expect("status").into_iter().map(|part| part.name).collect();
+    assert_eq!(listed, AWKWARD.iter().map(|(n, _)| (*n).to_owned()).collect());
+    for (name, h) in AWKWARD {
+        let mesh = client.mesh(name).unwrap_or_else(|e| panic!("mesh of {name:?}: {e:#}"));
+        assert_eq!(Some(mesh.key.as_str()), keys[name]["key"].as_str(), "key of {name:?}");
+        // A box is planar: its top vertices have exactly z = height (small
+        // integers are exact in f32).
+        let top = mesh.mesh.faces.bounds().expect("not empty").max[2];
+        assert!((f64::from(top) - h).abs() < 1e-6, "{name:?} got the mesh of another part: {top}");
+    }
+
+    // Measure names the part in the body, not in the path: works already,
+    // and stays the reference for the volume.
+    let m = post_ok(&s, "/measure", &json!({"a": "Crane column"}));
+    assert_rel(&m["volume"], 100.0, VOL, "volume of Crane column");
+
+    // render-project loads the meshes with the same client.
+    rendered(&p, "column.png", &["--size", "320x240", "--parts", "Crane column"], (320, 240));
+    rendered(&p, "all.png", &["--size", "320x240"], (320, 240));
+    let selection = "What?,Hash#1,Pct%41";
+    rendered(&p, "three.png", &["--size", "320x240", "--parts", selection], (320, 240));
+}
+
+// ===========================================================================
+// AG-HD-07: task create and update are serialised
+// ===========================================================================
+
+#[test]
+fn ag_hd_07_concurrent_task_creates_and_updates_lose_nothing() {
+    // AG-HD-07: "two simultaneous creates get two numbers; no lost log
+    // line". 20 requests at once, each on its own connection.
+    const N: usize = 20;
+    let p = Project::new("task-race", "");
+    let s = Service::start(&p);
+    let created: Vec<Value> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let s = &s;
+                scope.spawn(move || post(s, "/task", &json!({"title": format!("Task {i}")})))
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("request thread")).collect()
+    });
+    let mut ids = BTreeSet::new();
+    for v in &created {
+        assert_eq!(v["ok"], json!(true), "a concurrent create failed: {v}");
+        ids.insert(v["result"]["id"].as_str().unwrap_or_else(|| panic!("id: {v}")).to_owned());
+    }
+    assert_eq!(ids.len(), N, "every create got its own number: {ids:?}");
+    // 20 files that load (a duplicate number would be a load error, AG-TK-03).
+    let list = get(&s, "/tasks");
+    assert_eq!(list["ok"], json!(true), "the tasks load: {list}");
+    let listed: BTreeSet<String> = list["result"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["id"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(listed, ids);
+    let expected: BTreeSet<String> = (1..=N).map(|n| format!("T-{n:04}")).collect();
+    assert_eq!(ids, expected, "the next free numbers, without gaps");
+    assert_eq!(std::fs::read_dir(p.path("tasks")).expect("tasks/").count(), N, "no stray files");
+    let titles: BTreeSet<String> = list["result"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["title"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(titles.len(), N, "every title arrived once: {titles:?}");
+
+    // 20 notes on one task at once: 20 log lines.
+    let noted: Vec<Value> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let s = &s;
+                let body = json!({"note": format!("note number {i:02}"), "role": "agent"});
+                scope.spawn(move || update(s, "T-0001", &body))
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("request thread")).collect()
+    });
+    for v in &noted {
+        assert_eq!(v["ok"], json!(true), "a concurrent note failed: {v}");
+    }
+    let log = task(&s, "T-0001")["log"].clone();
+    let texts: Vec<&str> =
+        log.as_array().into_iter().flatten().filter_map(|l| l["text"].as_str()).collect();
+    assert_eq!(texts.len(), N, "no lost and no doubled log line: {texts:?}");
+    for i in 0..N {
+        let note = format!("note number {i:02}");
+        assert_eq!(texts.iter().filter(|t| **t == note).count(), 1, "{note:?} in {texts:?}");
+    }
+    // The file itself is intact: header, then one line per note.
+    let file = p.read(by_name_file(&list, "T-0001"));
+    assert_eq!(file.lines().filter(|l| l.contains(" agent: note number ")).count(), N, "{file}");
+    assert_eq!(file.matches("## Log").count(), 1, "one log section:\n{file}");
+}
+
+/// `file` of task `id` in a `/tasks` answer.
+fn by_name_file<'a>(list: &'a Value, id: &str) -> &'a str {
+    let tasks = list["result"].as_array().into_iter().flatten();
+    let task = tasks.into_iter().find(|t| t["id"] == json!(id));
+    task.and_then(|t| t["file"].as_str()).unwrap_or_else(|| panic!("no file of {id}: {list}"))
+}
+
+// ===========================================================================
+// AG-HD-08: save in a sub folder of a larger repository
+// ===========================================================================
+
+#[test]
+fn ag_hd_08_save_refuses_a_project_that_is_a_sub_folder_of_a_repository() {
+    // AG-HD-08: "`/save` commits only paths inside the project folder … and
+    // refuses with kind `git` when the Git top level is not the project
+    // folder." The outer repository has a commit and something else staged:
+    // before R5 `/save` committed that along with the project.
+    let p = a_with_check("save-outer");
+    git_init(&p.root);
+    std::fs::write(p.root.join("notes.txt"), "outer\n").expect("write notes.txt");
+    git(&p.root, &["add", "notes.txt"]).expect("git add notes.txt");
+    git(&p.root, &["commit", "--quiet", "--message", "Outer start"]).expect("outer commit");
+    let base = git(&p.root, &["rev-parse", "HEAD"]).expect("outer HEAD");
+    std::fs::write(p.root.join("staged.txt"), "somebody else's work in progress\n")
+        .expect("write staged.txt");
+    git(&p.root, &["add", "staged.txt"]).expect("git add staged.txt");
+
+    let s = Service::start(&p);
+    let v = post(&s, "/save", &json!({"message": "must not be committed"}));
+    assert_refused(&v, &[], "save in a sub folder of a repository");
+    assert_eq!(v["error"]["kind"], json!("git"), "{v}");
+    // Nothing was committed, nothing was staged or unstaged.
+    assert_eq!(git(&p.root, &["rev-parse", "HEAD"]).as_deref(), Ok(base.as_str()), "{v}");
+    assert_eq!(
+        git(&p.root, &["diff", "--cached", "--name-only"]).as_deref(),
+        Ok("staged.txt"),
+        "the index of the outer repository was changed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(p.root.join("staged.txt")).ok().as_deref(),
+        Some("somebody else's work in progress\n")
+    );
+
+    // Control: once the project is its own repository, `/save` commits
+    // there, only project paths, and the outer repository stays as it was.
+    git_init(&p.dir);
+    let head = save_ok(&s, &p, "Project state");
+    assert_ne!(head, base);
+    let tracked = git_tracked(&p.dir);
+    assert!(tracked.iter().any(|t| t == "parts/a.rhai"), "{tracked:?}");
+    assert!(
+        !tracked.iter().any(|t| t.contains("staged.txt") || t.contains("notes.txt")),
+        "{tracked:?}"
+    );
+    assert_eq!(git(&p.root, &["rev-parse", "HEAD"]).as_deref(), Ok(base.as_str()));
+    assert_eq!(git(&p.root, &["diff", "--cached", "--name-only"]).as_deref(), Ok("staged.txt"));
+}
+
+#[test]
+fn ag_hd_08_save_commits_only_project_paths_not_what_else_is_staged() {
+    // "pathspec on the commit as on the add": something staged that `/save`
+    // never adds (`out/` is excluded, AG-SV-07) must not ride along in the
+    // commit.
+    let p = a_with_check("save-pathspec");
+    git_init(&p.dir);
+    let s = Service::start(&p);
+    post_ok(&s, "/export", &json!({"parts": ["A"], "format": "stl"}));
+    git(&p.dir, &["add", "--force", "out/A.stl"]).expect("stage out/A.stl by hand");
+    save_ok(&s, &p, "State without out/");
+    let tracked = git_tracked(&p.dir);
+    assert!(tracked.iter().any(|t| t == "parts/a.rhai"), "{tracked:?}");
+    assert!(!tracked.iter().any(|t| t.starts_with("out/")), "out/ was committed: {tracked:?}");
+}
+
+// ===========================================================================
+// AG-HD-09: the gate reports load errors as such
+// ===========================================================================
+
+#[test]
+fn ag_hd_09_the_gate_reports_a_broken_file_instead_of_missing_parts() {
+    // AG-HD-09: "The gate reports load errors of part and check files as
+    // such instead of 'part does not exist'." One broken file makes the
+    // whole project unloadable; the agent must learn which file, not that
+    // its (existing, just built) part is gone.
+    let plate = "part(\"Plate\", #{}, |deps| box(20, 10, 10));\n";
+    let p = Project::new("gate-load", "");
+    p.write("parts/plate.rhai", plate).write(
+        "checks/plate.rhai",
+        "check(\"plate_volume\", || {\n    \
+         expect_near(part(\"Plate\").volume(), 2000, 0.001, \"volume\");\n});\n",
+    );
+    let s = Service::start(&p);
+    let id = task_in_progress(&s, "Plate", &["Plate"], &["plate_volume"]);
+    build_all(&s);
+    run_checks(&s, None);
+    let review = json!({"state": "review", "role": "agent", "note": "ready"});
+
+    // Line 1 lacks the closing parenthesis of `part(`: a syntax error.
+    p.write("parts/broken.rhai", "part(\"Broken\", #{}, |deps| box(1, 1, 1);\n");
+    let v = update(&s, &id, &review);
+    assert_refused(&v, &["parts/broken.rhai"], "review while a part file does not load");
+    assert!(!v.to_string().contains("does not exist"), "Plate exists, the project is broken: {v}");
+    assert_eq!(task_state(&s, &id), "in_progress");
+    std::fs::remove_file(p.path("parts/broken.rhai")).expect("remove broken part file");
+
+    // The same for a check file.
+    p.write("checks/broken.rhai", "check(\"broken\", || { expect(true, \"x\") ;\n");
+    let v = update(&s, &id, &review);
+    assert_refused(&v, &["checks/broken.rhai"], "review while a check file does not load");
+    assert!(!v.to_string().contains("does not exist"), "{v}");
+    assert_eq!(task_state(&s, &id), "in_progress");
+    std::fs::remove_file(p.path("checks/broken.rhai")).expect("remove broken check file");
+
+    // Control: with the files gone the same hand-over passes (nothing was
+    // rebuilt in between, so part and check are still current).
+    update_ok(&s, &id, &review, "review");
+}
+
+// ===========================================================================
+// AG-HD-11: one bounding box
+// ===========================================================================
+
+/// The nine numbers `min`, `max`, `size` of a bbox object as bit patterns.
+fn bbox_bits(bbox: &Value, what: &str) -> Vec<u64> {
+    let mut bits = Vec::new();
+    for key in ["min", "max", "size"] {
+        for i in 0..3 {
+            let v =
+                bbox[key][i].as_f64().unwrap_or_else(|| panic!("{what}: bbox.{key}[{i}]: {bbox}"));
+            bits.push(v.to_bits());
+        }
+    }
+    bits
+}
+
+/// A `/run` script that compares `part(name).bbox()` number by number with
+/// `bbox` (from JSON; `parse_float` of the shortest round-trip text gives
+/// the same f64 back) and prints one `true`/`false` per number, then shows
+/// the part.
+fn bbox_script(name: &str, bbox: &Value) -> String {
+    let mut source = format!("let b = part(\"{name}\").bbox();\n");
+    for key in ["min", "max", "size"] {
+        for i in 0..3 {
+            let text = bbox[key][i].as_f64().map(|v| format!("{v:?}")).unwrap_or_default();
+            source.push_str(&format!("print(b.{key}[{i}] == parse_float(\"{text}\"));\n"));
+        }
+    }
+    source.push_str(&format!("show(part(\"{name}\"), \"shown\");\n"));
+    source
+}
+
+#[test]
+fn ag_hd_11_bbox_is_bitwise_the_same_in_build_measure_cache_and_scripts() {
+    // AG-HD-11: "`bbox` is the same in the build result, `/measure` and
+    // scripts for the same key (one code path), tight to 1e-6 mm."
+    //
+    // Round = box(20, 10, 10) with all edges filleted (r = 2): the flat
+    // faces keep their extent, so the box is still x ±10, y ±5, z 0..10.
+    // D = cylinder(10, 5): x/y ±5, z 0..5. Both have curved faces, where a
+    // bounding box from control points or with a tolerance gap is not tight.
+    // Ball = sphere(10): ±5 in every axis. Ring = torus(20, 4): ring radius
+    // 10, tube radius 2 → x/y ±12, z ±2.
+    // Tilted = cylinder(10, 20) rotated by +30° about y (right-handed: the
+    // axis tip (0, 0, 20) moves to (20·sin 30°, 0, 20·cos 30°) = (10, 0, 10√3)).
+    // The end discs (r = 5) are tilted by 30°: they reach ±5·cos 30° in x
+    // and ±5·sin 30° = ±2.5 in z around their centres, ±5 in y.
+    let cos30 = 30f64.to_radians().cos();
+    let tilted_min = [-5.0 * cos30, -5.0, -2.5];
+    let tilted_max = [10.0 + 5.0 * cos30, 5.0, 20.0 * cos30 + 2.5];
+    let p = Project::new("bbox", "[workers]\ncount = 2\n");
+    p.write(
+        "parts/round.rhai",
+        "part(\"Round\", #{}, |deps| {\n    let b = box(20, 10, 10);\n    \
+         fillet(b, all_edges(b), 2)\n});\n",
+    )
+    .write("parts/d.rhai", PART_D)
+    .write(
+        "parts/more.rhai",
+        "part(\"Ball\", #{}, |deps| sphere(10));\n\
+         part(\"Ring\", #{}, |deps| torus(20, 4));\n\
+         part(\"Tilted\", #{}, |deps| cylinder(10, 20).rotate(\"y\", 30));\n",
+    );
+    let s = Service::start(&p);
+    let built = build_all(&s);
+    let cached = build_all(&s);
+    let st = status(&s);
+    let boxes = [
+        ("Round", [-10.0, -5.0, 0.0], [10.0, 5.0, 10.0]),
+        ("D", [-5.0, -5.0, 0.0], [5.0, 5.0, 5.0]),
+        ("Ball", [-5.0; 3], [5.0; 3]),
+        ("Ring", [-12.0, -12.0, -2.0], [12.0, 12.0, 2.0]),
+        ("Tilted", tilted_min, tilted_max),
+    ];
+    for (name, min, max) in boxes {
+        let reference = &built["parts"][name]["bbox"];
+        assert_eq!(built["parts"][name]["state"], json!("built"), "{built}");
+        // Tight: 1e-6 mm against the analytic box.
+        let size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+        assert_vec(&reference["min"], min, POS, &format!("{name} bbox.min (build)"));
+        assert_vec(&reference["max"], max, POS, &format!("{name} bbox.max (build)"));
+        assert_vec(&reference["size"], size, POS, &format!("{name} bbox.size (build)"));
+        let bits = bbox_bits(reference, name);
+
+        // The cached build result and the cache entry of the key (§2.1).
+        assert_eq!(cached["parts"][name]["state"], json!("cached"), "{cached}");
+        let again = bbox_bits(&cached["parts"][name]["bbox"], name);
+        assert_eq!(again, bits, "{name}: cached build result");
+        let key = by_name(&st["parts"])[name]["key"].as_str().unwrap_or_default().to_owned();
+        let entry: Value =
+            serde_json::from_str(&p.read(&format!(".qoob3d/cache/{name}/{key}.json")))
+                .expect("cache json");
+        assert_eq!(bbox_bits(&entry["bbox"], name), bits, "{name}: cache entry");
+
+        // /measure.
+        let measured = post_ok(&s, "/measure", &json!({"a": name}));
+        assert_vec(&measured["bbox"]["min"], min, POS, &format!("{name} bbox.min (measure)"));
+        assert_vec(&measured["bbox"]["max"], max, POS, &format!("{name} bbox.max (measure)"));
+        assert_eq!(bbox_bits(&measured["bbox"], name), bits, "{name}: /measure: {measured}");
+
+        // A script: `part(name).bbox()` and the shape the script shows.
+        let source = bbox_script(name, reference);
+        let run = post_ok(&s, "/run", &json!({"source": source, "wait_s": WAIT_S}));
+        assert_eq!(
+            run["printed"],
+            Value::from(vec!["true"; 9]),
+            "{name}: bbox() in a script\n{source}"
+        );
+        let shown = &run["shapes"][0]["bbox"];
+        assert_eq!(bbox_bits(shown, name), bits, "{name}: shape of /run: {shown}");
     }
 }

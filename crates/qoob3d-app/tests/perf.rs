@@ -168,9 +168,11 @@ fn assert_envelope(v: &Value) {
     }
 }
 
-/// One HTTP/1.1 request to 127.0.0.1:`port` (`Connection: close`).
+/// One HTTP/1.1 request to 127.0.0.1:`port` (`Connection: close`), with the
+/// service token in `X-Qoob3d-Token` when there is one (AG-HD-03).
 fn http(
     port: u16,
+    token: Option<&str>,
     method: &str,
     path: &str,
     body: Option<&Value>,
@@ -181,8 +183,9 @@ fn http(
     s.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
     s.set_write_timeout(Some(timeout)).map_err(|e| e.to_string())?;
     let body = body.map(Value::to_string).unwrap_or_default();
+    let token = token.map(|t| format!("X-Qoob3d-Token: {t}\r\n")).unwrap_or_default();
     let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{token}Connection: close\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
@@ -280,6 +283,14 @@ fn service_json(dir: &Path) -> Option<(u16, u32)> {
     Some((u16::try_from(v["port"].as_u64()?).ok()?, u32::try_from(v["pid"].as_u64()?).ok()?))
 }
 
+/// The token from `.qoob3d/service.json` that every request carries in the
+/// header `X-Qoob3d-Token` (AG-HD-03); `None` if the file has none.
+fn service_token(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(".qoob3d/service.json")).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    v["token"].as_str().map(str::to_owned)
+}
+
 /// Live `qoob3d worker` children of process `parent`.
 fn workers_of(parent: u32) -> Vec<u32> {
     processes()
@@ -294,6 +305,8 @@ fn workers_of(parent: u32) -> Vec<u32> {
 struct Service {
     port: u16,
     pid: u32,
+    /// From `service.json`, sent with every request (AG-HD-03).
+    token: Option<String>,
     child: Child,
     log: PathBuf,
     /// Every worker pid ever seen, killed on drop if still alive.
@@ -316,10 +329,12 @@ impl Service {
         let deadline = Instant::now() + START;
         loop {
             if let Some((port, pid)) = service_json(&p.dir) {
-                let probe = http(port, "GET", "/status", None, Duration::from_secs(1));
+                let token = service_token(&p.dir);
+                let wait = Duration::from_secs(1);
+                let probe = http(port, token.as_deref(), "GET", "/status", None, wait);
                 if pid == child.id() && probe.is_ok_and(|r| r.code == 200) {
                     let seen = std::cell::RefCell::new(BTreeSet::new());
-                    return Self { port, pid, child, log, seen_workers: seen };
+                    return Self { port, pid, token, child, log, seen_workers: seen };
                 }
             }
             if let Ok(Some(status)) = child.try_wait() {
@@ -342,7 +357,7 @@ impl Service {
     }
 
     fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Reply {
-        http(self.port, method, path, body, Duration::from_secs(90))
+        http(self.port, self.token.as_deref(), method, path, body, Duration::from_secs(90))
             .unwrap_or_else(|e| panic!("{method} {path}: {e}\nservice log:\n{}", self.log()))
     }
 
@@ -401,7 +416,8 @@ impl Service {
     /// `POST /shutdown`; waits for the service to exit.
     fn shutdown(&mut self) -> bool {
         self.workers();
-        let sent = http(self.port, "POST", "/shutdown", Some(&json!({})), Duration::from_secs(2));
+        let (token, wait) = (self.token.as_deref(), Duration::from_secs(2));
+        let sent = http(self.port, token, "POST", "/shutdown", Some(&json!({})), wait);
         let child = &mut self.child;
         let gone =
             wait_until(Duration::from_secs(10), || child.try_wait().is_ok_and(|s| s.is_some()));
@@ -876,7 +892,8 @@ impl Drop for Leftover {
             return;
         };
         let workers = workers_of(pid);
-        http(port, "POST", "/shutdown", Some(&json!({})), Duration::from_secs(2)).ok();
+        let (token, wait) = (service_token(&self.0), Duration::from_secs(2));
+        http(port, token.as_deref(), "POST", "/shutdown", Some(&json!({})), wait).ok();
         if !wait_until(Duration::from_secs(10), || !alive(pid)) {
             kill(pid, "KILL");
         }

@@ -74,7 +74,7 @@ fn crane_column_volume() -> f64 {
 }
 
 #[test]
-fn crane_column_reference_volume_matches_the_python_port() {
+fn crane_column_reference_volume_matches_the_m0_report() {
     // Guards the formula itself: the value the M0 probe computed for the
     // same dimensions (docs/concept/m0-report.md).
     assert!((crane_column_volume() - 2575.155811208424).abs() < 1e-9);
@@ -138,7 +138,7 @@ fn stair_volume() -> f64 {
 }
 
 #[test]
-fn stair_reference_volume_matches_the_python_port() {
+fn stair_reference_volume_matches_the_m0_report() {
     assert!((stair_volume() - 1955.3202693815988).abs() < 1e-9);
 }
 
@@ -192,7 +192,7 @@ fn railing_volume() -> f64 {
 }
 
 #[test]
-fn railing_reference_volume_matches_the_python_port() {
+fn railing_reference_volume_matches_the_m0_report() {
     assert!((railing_volume() - 145.625330059956).abs() < 1e-9);
 }
 

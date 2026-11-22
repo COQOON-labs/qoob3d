@@ -1,4 +1,5 @@
-//! Task inbox (R4, pure layer): docs/requirements/agent.md §4.1 (AG-TK-01..04),
+//! Task inbox (R4, pure layer): docs/requirements/agent.md §4.1 (AG-TK-01..04)
+//! and §6.2 (AG-TK-06, AG-TK-07; binding, AG-TK-05, is in `tasks_bind.rs`),
 //! ADR-0054. Module `qoob3d_core::tasks` reads and writes `tasks/NNNN-slug.md`
 //! below a project folder and decides which state transitions a role may make.
 //!
@@ -11,8 +12,11 @@
 //! - Whether a run of replaced characters in a slug collapses to one `-` and
 //!   whether leading/trailing `-` are trimmed is not specified, so exact slugs
 //!   are only asserted for titles where every reading gives the same result.
-//! - The log text of a state change is not specified (only: an entry with
-//!   date and role is appended, and a given note is part of it).
+//! - The log text of a state change is `<old> -> <new>`, followed by
+//!   `: <note>` when a note is given (AG-TK-07). Only for the hand-over to
+//!   review the entry also lists the bound parts and checks (AG-TK-06);
+//!   where in the entry is not specified, so there the tests assert the
+//!   start, the names and the note, not the exact text.
 //! - `X -> X` is not asserted for either role (it may count as "no state
 //!   change").
 //!
@@ -730,8 +734,8 @@ fn ag_tk_03_update_rewrites_only_the_state_line_and_appends_the_log_entry() {
     let new = d.read(LID_FILE);
     let lines = appended_lines(LID, &new);
     assert_eq!(lines.len(), 1, "exactly one log line is appended: {lines:?}");
-    assert!(lines[0].starts_with("- 2026-11-23 agent: "), "{:?}", lines[0]);
-    assert!(lines[0].contains("taking it"), "{:?}", lines[0]);
+    // AG-TK-07: `<old> -> <new>: <note>`.
+    assert_eq!(lines[0], "- 2026-11-23 agent: open -> in_progress: taking it");
     assert_eq!(count_lines(&new, "## Log"), 1, "the existing log section is reused");
     assert!(new.contains("state = \"open\" is also a line of the body."), "body line changed");
     assert!(new.contains("in_progress"), "{new}");
@@ -754,14 +758,15 @@ fn ag_tk_03_update_rewrites_only_the_state_line_and_appends_the_log_entry() {
     assert_eq!(t.log.len(), 3);
     assert_eq!(t.log[..2], before.log[..]);
     assert_eq!((t.log[2].date.as_str(), t.log[2].who.as_str()), (TODAY, "agent"));
-    assert!(t.log[2].text.contains("taking it"), "{:?}", t.log[2]);
+    assert_eq!(t.log[2].text, "open -> in_progress: taking it");
     assert_eq!(loaded(&d, "T-0007"), t, "update returns the task as written");
 }
 
 #[test]
 fn ag_tk_03_update_without_note_still_appends_a_log_entry() {
     // "rewrites only the state line and appends the log entry": the change
-    // itself is logged with date and role; its text is not specified.
+    // itself is logged with date and role, as `<old> -> <new>` (AG-TK-07; a
+    // hand-over to review may also list parts and checks, AG-TK-06).
     let d = Dir::new("update-no-note");
     d.write(LID_FILE, LID);
     let t =
@@ -772,7 +777,7 @@ fn ag_tk_03_update_without_note_still_appends_a_log_entry() {
     assert_eq!((t.log[2].date.as_str(), t.log[2].who.as_str()), (TODAY, "human"));
     let lines = appended_lines(LID, &d.read(LID_FILE));
     assert_eq!(lines.len(), 1, "{lines:?}");
-    assert!(lines[0].starts_with("- 2026-11-23 human: "), "{:?}", lines[0]);
+    assert!(lines[0].starts_with("- 2026-11-23 human: open -> review"), "{:?}", lines[0]);
 }
 
 #[test]
@@ -796,8 +801,7 @@ fn ag_tk_03_update_creates_the_log_section_when_missing() {
     let lines = appended_lines(old, &new);
     assert_eq!(lines.len(), 2, "heading and entry: {lines:?}");
     assert_eq!(lines[0], "## Log");
-    assert!(lines[1].starts_with("- 2026-11-23 human: "), "{:?}", lines[1]);
-    assert!(lines[1].contains("not needed"), "{:?}", lines[1]);
+    assert_eq!(lines[1], "- 2026-11-23 human: open -> rejected: not needed");
     assert_eq!(t.state, TaskState::Rejected);
     assert_eq!(t.body, before.body, "the new section is not part of the body");
     assert_eq!(t.log.len(), 1);
@@ -934,9 +938,23 @@ fn ag_tk_03_update_of_an_unknown_task_is_an_error_naming_it() {
 
 const PROBE_FILE: &str = "tasks/0001-probe.md";
 
-/// Tries `from -> to` as `role` on a task without parts and checks, with a
-/// note (so neither the `blocked` rule nor the gate of AG-TK-04 interferes).
-/// Returns a description if the outcome contradicts AG-TK-02.
+/// A task with one part and one check bound, as the gate of AG-TK-06 needs.
+fn bound(state: TaskState) -> String {
+    format!(
+        "+++\ntitle = \"Probe\"\nstate = \"{}\"\nparts = [\"Lid\"]\nchecks = [\"fit\"]\n+++\n\nBody.\n",
+        state.as_str()
+    )
+}
+
+/// The gate input that lets [`bound`] pass.
+fn green() -> GateInput {
+    gate(&[("Lid", "current")], &[("fit", true)])
+}
+
+/// Tries `from -> to` as `role` on a task with a part and a check that are
+/// fine, with a note (so neither the `blocked` rule nor the gate of
+/// AG-TK-04/06 interferes). Returns a description if the outcome contradicts
+/// AG-TK-02.
 fn transition_mismatch(role: Role, from: TaskState, to: TaskState) -> Option<String> {
     let allowed = match role {
         Role::Human => true,
@@ -944,9 +962,9 @@ fn transition_mismatch(role: Role, from: TaskState, to: TaskState) -> Option<Str
     };
     let label = format!("{} {} -> {}", who(role), from.as_str(), to.as_str());
     let d = Dir::new("matrix");
-    let before = minimal(from);
+    let before = bound(from);
     d.write(PROBE_FILE, &before);
-    let result = update(d.path(), "T-0001", role, Some(to), Some("note"), TODAY, &no_gate());
+    let result = update(d.path(), "T-0001", role, Some(to), Some("note"), TODAY, &green());
     match (allowed, result) {
         (true, Err(e)) => Some(format!("{label}: must be allowed, got: {e}")),
         (false, Ok(_)) => Some(format!("{label}: must be forbidden")),
@@ -1047,7 +1065,8 @@ fn ag_tk_02_agent_blocks_with_a_question_that_lands_in_the_log() {
     assert_eq!(t.state, TaskState::Blocked);
     let entry = t.log.last().expect("log entry");
     assert_eq!((entry.date.as_str(), entry.who.as_str()), (TODAY, "agent"));
-    assert!(entry.text.contains(question), "{entry:?}");
+    // AG-TK-07: `<old> -> <new>: <note>`.
+    assert_eq!(entry.text, format!("in_progress -> blocked: {question}"));
 }
 
 #[test]
@@ -1132,7 +1151,7 @@ fn to_review(content: &str, note: Option<&str>, gate: &GateInput) -> Result<Task
 
 #[test]
 fn ag_tk_04_gate_passes_when_all_parts_are_current_and_all_checks_passed() {
-    // No note needed: parts and checks are not both empty. Entries the task
+    // No note needed: the task has parts and checks. Entries the task
     // does not list (Hook, strength) are none of its business, whatever
     // their state.
     let g = gate(
@@ -1198,40 +1217,171 @@ fn ag_tk_04_every_unmet_condition_is_reported() {
     assert_mentions(&e, &["Arm", "Cap"]);
 }
 
-#[test]
-fn ag_tk_04_only_parts_or_only_checks_need_no_note() {
-    // The note is required only if parts *and* checks are empty.
-    let only_parts = "+++\ntitle = \"P\"\nstate = \"in_progress\"\nparts = [\"Arm\"]\n+++\n";
-    to_review(only_parts, None, &gate(&[("Arm", "current")], &[])).expect("part is current");
-    let only_checks = "+++\ntitle = \"C\"\nstate = \"in_progress\"\nchecks = [\"reach\"]\n+++\n";
-    to_review(only_checks, None, &gate(&[], &[("reach", true)])).expect("check passed");
-    to_review(only_checks, None, &gate(&[], &[("reach", false)])).expect_err("check failed");
+/// An in-progress task of `kind` with the given header lines for parts and
+/// checks (empty string = no line).
+fn kind_file(kind: &str, lists: &str) -> String {
+    format!("+++\ntitle = \"K\"\nkind = \"{kind}\"\nstate = \"in_progress\"\n{lists}+++\n\nBody.\n")
 }
 
 #[test]
-fn ag_tk_04_task_without_parts_and_checks_needs_a_note() {
-    // "if `parts` and `checks` are both empty the gate needs a note": with
-    // nothing measurable the agent has to say what it did. A blank note says
-    // nothing. Other parts and checks of the project do not help.
+fn ag_tk_06_task_and_requirement_need_a_part_and_a_check() {
+    // AG-TK-06: "Gate for kinds `task` and `requirement`: at least one part
+    // **and** at least one check bound". The bound side is green in every
+    // case, so only the missing side can close the gate; a note (the
+    // fallback of R4) does not help any more.
+    let all_green = gate(&[("Arm", "current")], &[("reach", true)]);
+    for kind in ["task", "requirement"] {
+        for note in [None, Some("did everything by hand")] {
+            let only_parts = kind_file(kind, "parts = [\"Arm\"]\n");
+            let e = to_review(&only_parts, note, &all_green)
+                .expect_err(&format!("{kind} without a check, note {note:?}"));
+            assert_mentions(&e, &["T-0001", "check"]);
+
+            let only_checks = kind_file(kind, "checks = [\"reach\"]\n");
+            let e = to_review(&only_checks, note, &all_green)
+                .expect_err(&format!("{kind} without a part, note {note:?}"));
+            assert_mentions(&e, &["T-0001", "part"]);
+
+            // Nothing bound: both conditions are unmet and both are reported
+            // (AG-TK-04: "reports every unmet condition"). Empty lists count
+            // as nothing bound, like missing lines.
+            for lists in ["", "parts = []\nchecks = []\n"] {
+                let e = to_review(&kind_file(kind, lists), note, &all_green)
+                    .expect_err(&format!("{kind} with nothing bound, note {note:?}"));
+                assert_mentions(&e, &["T-0001", "part", "check"]);
+            }
+        }
+        // One of each, both fine: the gate opens without a note.
+        let both = kind_file(kind, "parts = [\"Arm\"]\nchecks = [\"reach\"]\n");
+        let t = to_review(&both, None, &all_green).expect("a part and a check, both green");
+        assert_eq!(t.state, TaskState::Review);
+    }
+}
+
+#[test]
+fn ag_tk_06_default_kind_is_gated_like_a_task() {
+    // AG-TK-01: `kind` defaults to `task`, so a header without `kind` needs
+    // a part and a check as well. This is the first fresh-agent run of R5:
+    // nothing bound, a note, and the gate must not open.
     let plain = minimal(TaskState::InProgress);
     let unrelated = gate(&[("Lid", "current")], &[("fit", true)]);
+    for g in [no_gate(), unrelated] {
+        let e = to_review(&plain, Some("Built a hook, four checks green."), &g)
+            .expect_err("a task without parts and checks");
+        assert_mentions(&e, &["T-0001", "part", "check"]);
+    }
+}
+
+#[test]
+fn ag_tk_06_idea_needs_a_note_only() {
+    // AG-TK-06: "kind `idea` needs a note only". With nothing measurable the
+    // agent has to say what it did; a blank note says nothing. Other parts
+    // and checks of the project do not matter.
+    let idea = kind_file("idea", "");
     for note in [None, Some(""), Some("  \t")] {
         for g in [no_gate(), gate(&[("Lid", "current")], &[("fit", true)])] {
-            let e = to_review(&plain, note, &g).expect_err(&format!("note {note:?}"));
+            let e = to_review(&idea, note, &g).expect_err(&format!("idea with note {note:?}"));
             assert_mentions(&e, &["T-0001", "note"]);
         }
     }
-    let t = to_review(&plain, Some("Compared three hinge ideas, see body."), &unrelated)
-        .expect("a note opens the gate");
+    let t = to_review(&idea, Some("Compared three hinge ideas, see body."), &no_gate())
+        .expect("a note opens the gate of an idea");
     assert_eq!(t.state, TaskState::Review);
-    let t = to_review(&plain, Some("Researched."), &no_gate()).expect("a note opens the gate");
-    assert!(t.log.last().is_some_and(|l| l.text.contains("Researched.")), "{:?}", t.log);
+    let text = &t.log.last().expect("log entry").text;
+    assert!(text.starts_with("in_progress -> review"), "{text:?}");
+    assert!(text.contains("Compared three hinge ideas, see body."), "{text:?}");
+}
+
+#[test]
+fn ag_tk_06_hand_over_log_entry_lists_the_bound_parts_and_checks() {
+    // AG-TK-06: "The log entry of a hand-over to review lists the bound
+    // parts and checks"; AG-TK-07: it starts with `<old> -> <new>` and
+    // carries the note. Whoever reads the log sees what the gate looked at.
+    let g = gate(&[("Lid", "current"), ("Box", "current")], &[("fit", true), ("wall", true)]);
+    for note in [None, Some("ready, see the render")] {
+        let t = to_review(GATED, note, &g).expect("gate is met");
+        let entry = t.log.last().expect("log entry");
+        assert_eq!((entry.date.as_str(), entry.who.as_str()), (TODAY, "agent"));
+        assert!(entry.text.starts_with("in_progress -> review"), "{entry:?}");
+        assert_mentions(&entry.text, &["Lid", "Box", "fit", "wall"]);
+        if let Some(note) = note {
+            assert!(entry.text.contains(note), "{entry:?}");
+        }
+        assert_eq!(t.log.len(), 1, "one entry for the hand-over: {:?}", t.log);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AG-TK-07: log text
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ag_tk_07_state_change_is_logged_as_old_arrow_new_with_the_note() {
+    // "A state change is logged as `<old> -> <new>` followed by `: <note>`
+    // when a note is given". Checked for transitions that are no hand-over
+    // to review (those also list parts and checks, AG-TK-06): the agent's
+    // other four and some of the human's.
+    let moves = [
+        (Role::Agent, TaskState::Open, TaskState::InProgress),
+        (Role::Agent, TaskState::InProgress, TaskState::Blocked),
+        (Role::Agent, TaskState::Blocked, TaskState::InProgress),
+        (Role::Agent, TaskState::Review, TaskState::InProgress),
+        (Role::Human, TaskState::Review, TaskState::Done),
+        (Role::Human, TaskState::Review, TaskState::Rejected),
+        (Role::Human, TaskState::Done, TaskState::Open),
+        (Role::Human, TaskState::Blocked, TaskState::InProgress),
+    ];
+    for (role, from, to) in moves {
+        let arrow = format!("{} -> {}", from.as_str(), to.as_str());
+        let d = Dir::new("log-text");
+        d.write(PROBE_FILE, &bound(from));
+        let t = update(d.path(), "T-0001", role, Some(to), Some("M3 or M4?"), TODAY, &green())
+            .unwrap_or_else(|e| panic!("{arrow}: {e}"));
+        let expected = LogEntry {
+            date: TODAY.to_owned(),
+            who: who(role).to_owned(),
+            text: format!("{arrow}: M3 or M4?"),
+        };
+        assert_eq!(t.log, [expected], "{arrow} with a note");
+        let line = format!("- {TODAY} {}: {arrow}: M3 or M4?", who(role));
+        assert_eq!(count_lines(&d.read(PROBE_FILE), &line), 1, "{}", d.read(PROBE_FILE));
+
+        // Without a note (the agent's `blocked` needs one): only the arrow.
+        // A blank note is no note.
+        if to == TaskState::Blocked && role == Role::Agent {
+            continue;
+        }
+        for note in [None, Some(""), Some("  ")] {
+            let d = Dir::new("log-text-bare");
+            d.write(PROBE_FILE, &bound(from));
+            let t = update(d.path(), "T-0001", role, Some(to), note, TODAY, &green())
+                .unwrap_or_else(|e| panic!("{arrow} with note {note:?}: {e}"));
+            assert_eq!(t.log.len(), 1);
+            assert_eq!(t.log[0].text, arrow, "note {note:?}");
+        }
+    }
+}
+
+#[test]
+fn ag_tk_07_note_only_update_logs_exactly_the_note() {
+    // "a note-only update logs the note": no arrow is added, and an arrow
+    // inside the note is the note's business.
+    for role in [Role::Agent, Role::Human] {
+        let d = Dir::new("log-note");
+        d.write(PROBE_FILE, &bound(TaskState::InProgress));
+        let note = Some("see: a -> b");
+        let t = update(d.path(), "T-0001", role, None, note, TODAY, &green())
+            .expect("a note needs no transition");
+        assert_eq!(t.state, TaskState::InProgress);
+        assert_eq!(t.log.len(), 1);
+        assert_eq!(t.log[0].text, "see: a -> b");
+    }
 }
 
 #[test]
 fn ag_tk_04_a_note_does_not_replace_parts_and_checks() {
-    // The note is the fallback for tasks without parts and checks, not a way
-    // around a red gate.
+    // The note opens the gate of an idea (AG-TK-06); it is no way around a
+    // red gate.
     let e = to_review(GATED, Some("trust me, it fits"), &no_gate()).expect_err("gate is red");
     assert_mentions(&e, &["Lid", "Box", "fit", "wall"]);
 }

@@ -159,6 +159,55 @@ fn ag_pj_01_non_positive_limits_are_errors() {
     }
 }
 
+/// Loads a project whose `qoob3d.toml` is `[project]` plus `body`.
+fn config_with(body: &str) -> Result<Config, String> {
+    let d = Dir::new("hd-01");
+    d.write("qoob3d.toml", &format!("[project]\nname = \"p\"\n{body}"));
+    Config::load(d.path()).map_err(|e| e.to_string())
+}
+
+#[test]
+fn ag_hd_01_time_limit_must_be_finite_and_at_most_a_day() {
+    // AG-HD-01: "`[limits] time_s` must be finite and at most 86400". TOML
+    // has the float literals `inf`, `+inf`, `-inf` and `nan`; 1e20 s is
+    // finite but no duration a job thread can wait for. 86400.5 is exactly
+    // representable (a multiple of 0.5), so it is really above the limit.
+    for value in ["inf", "+inf", "-inf", "nan", "1e20", "1e300", "86401", "86400.5"] {
+        let body = format!("[limits]\ntime_s = {value}\n");
+        let e = config_with(&body).expect_err(&body);
+        assert_mentions(&e, &["qoob3d.toml", "time_s"]);
+    }
+}
+
+#[test]
+fn ag_hd_01_memory_limits_are_at_most_1048576_mb() {
+    // AG-HD-01: "`memory_mb`, `recycle_mb` at most 1048576" (1 TiB in MiB).
+    // 9223372036854775807 = i64::MAX is the largest integer TOML guarantees;
+    // multiplied by 2^20 (MB -> bytes) it overflows u64.
+    for (table, field) in [("limits", "memory_mb"), ("workers", "recycle_mb")] {
+        for value in ["1048577", "4294967296", "9223372036854775807"] {
+            let body = format!("[{table}]\n{field} = {value}\n");
+            let e = config_with(&body).expect_err(&body);
+            assert_mentions(&e, &["qoob3d.toml", field]);
+        }
+    }
+}
+
+#[test]
+fn ag_hd_01_the_largest_allowed_limits_load() {
+    // "at most" is inclusive: 86400 s, 1048576 MB.
+    let c = config_with(
+        "[limits]\ntime_s = 86400\nmemory_mb = 1048576\n[workers]\nrecycle_mb = 1048576\n",
+    )
+    .expect("the limits themselves are allowed");
+    // 86400 is an integer below 2^53, so the comparison is exact.
+    assert!((c.limits.time_s - 86400.0).abs() < f64::EPSILON, "time_s {}", c.limits.time_s);
+    assert_eq!(c.limits.memory_mb, 1_048_576);
+    assert_eq!(c.workers.recycle_mb, 1_048_576);
+    let c = config_with("[limits]\ntime_s = 86400.0\n").expect("86400.0 as a float");
+    assert!((c.limits.time_s - 86400.0).abs() < f64::EPSILON);
+}
+
 // ---------------------------------------------------------------------------
 // AG-PJ-01: part files
 // ---------------------------------------------------------------------------

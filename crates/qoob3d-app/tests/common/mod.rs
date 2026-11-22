@@ -1,6 +1,11 @@
 //! Shared helpers for the project app tests (WA-*, docs/requirements/project-app.md,
 //! ADR-0053): a fake `qoob3d serve` speaking the protocol of section 1
 //! (WA-PR-01..03), a temporary project folder and a qmesh builder (WA-QM-01).
+//!
+//! R5 (docs/requirements/agent.md §6.1): `service.json` carries a token
+//! (AG-HD-03); the fake records the `X-Qoob3d-Token` header of every request
+//! so tests can assert what the client sent, and it decodes percent-encoded
+//! part names in `/mesh/<name>` as the real service does (AG-HD-04).
 
 use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
@@ -110,12 +115,18 @@ impl TempProject {
         dir
     }
 
-    /// `.qoob3d/service.json` as written by the service (section 1).
+    /// `.qoob3d/service.json` as written by the service (section 1), with
+    /// the token of the service on `port` (AG-HD-03, [`token_for`]). Written
+    /// atomically (rename), as the service does: a poller may read it at any
+    /// time.
     pub(crate) fn write_service_json(&self, port: u16) {
         let dir = self.dir.join(".qoob3d");
         std::fs::create_dir_all(&dir).expect("create .qoob3d");
-        std::fs::write(dir.join("service.json"), format!("{{\"port\": {port}, \"pid\": 4242}}"))
-            .expect("write service.json");
+        let text =
+            format!("{{\"port\": {port}, \"pid\": 4242, \"token\": \"{}\"}}", token_for(port));
+        let tmp = dir.join("service.json.test-tmp");
+        std::fs::write(&tmp, text).expect("write service.json");
+        std::fs::rename(&tmp, dir.join("service.json")).expect("rename service.json");
     }
 
     /// A port nobody listens on (bound once, then released).
@@ -134,9 +145,11 @@ impl TempProject {
             "printf '%s\\n' \"$@\" > \"{calls}\"\n\
              if [ \"$#\" != 2 ] || [ \"$1\" != \"serve\" ]; then exit 3; fi\n\
              mkdir -p \"$2/.qoob3d\"\n\
-             printf '{{\"port\": %d, \"pid\": %d}}\\n' {port} $$ > \"$2/.qoob3d/service.json.tmp\"\n\
+             printf '{{\"port\": %d, \"pid\": %d, \"token\": \"%s\"}}\\n' {port} $$ {token} \
+             > \"$2/.qoob3d/service.json.tmp\"\n\
              mv \"$2/.qoob3d/service.json.tmp\" \"$2/.qoob3d/service.json\"\n",
             calls = self.calls_file().display(),
+            token = token_for(port),
         );
         self.script("start.sh", &body)
     }
@@ -180,6 +193,35 @@ pub(crate) fn same_dir(a: &Path, b: &Path) -> bool {
 
 // ------------------------------------------------------------------ fake service
 
+/// The token a fake service on `port` puts into `service.json` (AG-HD-03):
+/// 32 hex characters, different for every port, so a test can tell which
+/// `service.json` a client read.
+pub(crate) fn token_for(port: u16) -> String {
+    format!("{port:032x}")
+}
+
+/// Percent-decoding of a path segment (RFC 3986 §2.1): `%XX` is the byte
+/// with the hex value XX; anything else stands for itself.
+fn percent_decode(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok());
+        match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+            Some(byte) if bytes[i] == b'%' => {
+                out.push(byte);
+                i += 3;
+            }
+            _ => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// One part as the fake service reports it.
 #[derive(Clone)]
 pub(crate) struct FakePart {
@@ -215,8 +257,11 @@ pub(crate) enum Mode {
 struct State {
     parts: Vec<FakePart>,
     mode: Mode,
-    /// Requests in arrival order, e.g. `GET /status`, `GET /mesh/shaft`.
+    /// Requests in arrival order, e.g. `GET /status`, `GET /mesh/shaft`
+    /// (the path as sent, not decoded).
     log: Vec<String>,
+    /// The `X-Qoob3d-Token` header of every request, in arrival order.
+    tokens: Vec<Option<String>>,
     /// Bodies of `POST /build`.
     builds: Vec<String>,
     /// Armed by the test: what the next `POST /build` will do.
@@ -246,6 +291,7 @@ impl FakeService {
             parts,
             mode: Mode::Serve,
             log: Vec::new(),
+            tokens: Vec::new(),
             builds: Vec::new(),
             on_build: None,
             after_build: None,
@@ -295,6 +341,12 @@ impl FakeService {
 
     pub(crate) fn log(&self) -> Vec<String> {
         self.lock().log.clone()
+    }
+
+    /// `(request, X-Qoob3d-Token header)` of every request so far.
+    pub(crate) fn tokens(&self) -> Vec<(String, Option<String>)> {
+        let s = self.lock();
+        s.log.iter().cloned().zip(s.tokens.iter().cloned()).collect()
     }
 
     pub(crate) fn count(&self, request: &str) -> usize {
@@ -352,7 +404,8 @@ fn accept_loop(
     }
 }
 
-fn read_request(stream: &mut TcpStream) -> Option<(String, String, Vec<u8>)> {
+/// Method, path, body and the `X-Qoob3d-Token` header of one request.
+fn read_request(stream: &mut TcpStream) -> Option<(String, String, Vec<u8>, Option<String>)> {
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
@@ -370,11 +423,12 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, Vec<u8>)> {
     let mut lines = head.lines();
     let mut first = lines.next()?.split_whitespace();
     let (method, path) = (first.next()?.to_owned(), first.next()?.to_owned());
-    let length = lines
-        .filter_map(|l| l.split_once(':'))
-        .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, v)| v.trim().parse::<usize>().ok())
-        .unwrap_or(0);
+    let headers: Vec<(&str, &str)> =
+        lines.filter_map(|l| l.split_once(':')).map(|(k, v)| (k.trim(), v.trim())).collect();
+    let header =
+        |name: &str| headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|h| h.1);
+    let length = header("content-length").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+    let token = header("x-qoob3d-token").map(str::to_owned);
     let mut body = buf[head_end..].to_vec();
     while body.len() < length {
         let n = stream.read(&mut chunk).ok()?;
@@ -383,7 +437,7 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, Vec<u8>)> {
         }
         body.extend_from_slice(&chunk[..n]);
     }
-    Some((method, path, body))
+    Some((method, path, body, token))
 }
 
 fn envelope(result: &serde_json::Value) -> Vec<u8> {
@@ -437,26 +491,32 @@ fn status_body(state: &mut State) -> (u16, Vec<u8>) {
 }
 
 fn handle(mut stream: TcpStream, state: &Arc<Mutex<State>>) {
-    let Some((method, path, body)) = read_request(&mut stream) else { return };
+    let Some((method, path, body, token)) = read_request(&mut stream) else { return };
     let request = format!("{method} {path}");
     let lock = || state.lock().expect("fake state poisoned");
-    lock().log.push(request.clone());
+    {
+        let mut s = lock();
+        s.log.push(request.clone());
+        s.tokens.push(token);
+    }
     let mut extra_header = String::new();
     let (code, content_type, payload) = if request == "GET /status" {
         let delay = lock().status_delay;
         std::thread::sleep(delay);
         let (code, payload) = status_body(&mut lock());
         (code, "application/json", payload)
-    } else if let Some(name) = path.strip_prefix("/mesh/").filter(|_| method == "GET") {
+    } else if let Some(segment) = path.strip_prefix("/mesh/").filter(|_| method == "GET") {
+        // The name is one percent-encoded path segment (AG-HD-04).
+        let name = percent_decode(segment);
         let mut s = lock();
         let part = s.parts.iter().find(|p| p.name == name).cloned();
         match part {
             Some(FakePart { mesh: Some(bytes), key, .. }) => {
-                let key = s.header_key_once.remove(name).or(key).unwrap_or_default();
+                let key = s.header_key_once.remove(&name).or(key).unwrap_or_default();
                 extra_header = format!("X-Qoob3d-Key: {key}\r\n");
                 (200, "application/octet-stream", bytes)
             }
-            _ => (404, "application/json", error_envelope("not_found", name)),
+            _ => (404, "application/json", error_envelope("not_found", &name)),
         }
     } else if request == "POST /build" {
         let mut s = lock();

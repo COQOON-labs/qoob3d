@@ -128,6 +128,14 @@ pub(crate) fn service_json(dir: &Path) -> Option<(u16, u32)> {
     Some((u16::try_from(v["port"].as_u64()?).ok()?, u32::try_from(v["pid"].as_u64()?).ok()?))
 }
 
+/// The token from `.qoob3d/service.json` that every request carries in the
+/// header `X-Qoob3d-Token` (AG-HD-03); `None` if the file has none.
+pub(crate) fn service_token(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(".qoob3d/service.json")).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    v["token"].as_str().map(str::to_owned)
+}
+
 /// Stops whatever serves `dir`: `POST /shutdown`, then SIGKILL for the
 /// service, its workers and any process that still names the folder.
 fn stop_service(dir: &Path) {
@@ -136,7 +144,9 @@ fn stop_service(dir: &Path) {
     let mut victims: Vec<u32> = Vec::new();
     if let Some((port, pid)) = service_json(dir) {
         victims.extend(all.iter().filter(|(_, ppid, _)| *ppid == pid).map(|(p, ..)| *p));
-        http(port, "POST", "/shutdown", Some(&json!({})), Duration::from_secs(2)).ok();
+        let token = service_token(dir);
+        let shutdown = Some(&json!({}));
+        http(port, token.as_deref(), "POST", "/shutdown", shutdown, Duration::from_secs(2)).ok();
         if !wait_until(Duration::from_secs(10), || !alive(pid)) {
             victims.push(pid);
         }
@@ -198,9 +208,11 @@ impl Reply {
     }
 }
 
-/// One HTTP/1.1 request to 127.0.0.1:`port` (`Connection: close`).
+/// One HTTP/1.1 request to 127.0.0.1:`port` (`Connection: close`), with the
+/// service token in `X-Qoob3d-Token` when there is one (AG-HD-03).
 fn http(
     port: u16,
+    token: Option<&str>,
     method: &str,
     path: &str,
     body: Option<&Value>,
@@ -211,8 +223,9 @@ fn http(
     s.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
     s.set_write_timeout(Some(timeout)).map_err(|e| e.to_string())?;
     let body = body.map(Value::to_string).unwrap_or_default();
+    let token = token.map(|t| format!("X-Qoob3d-Token: {t}\r\n")).unwrap_or_default();
     let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{token}Connection: close\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
@@ -232,6 +245,8 @@ fn http(
 /// drop stops the service before the folder goes away.
 pub(crate) struct Service {
     port: u16,
+    /// From `service.json`, sent with every request (AG-HD-03).
+    token: Option<String>,
     dir: PathBuf,
     child: Option<Child>,
     log: PathBuf,
@@ -263,9 +278,11 @@ impl Service {
         let deadline = Instant::now() + START;
         loop {
             if let Some((port, _)) = service_json(&p.dir) {
-                let probe = http(port, "GET", "/status", None, Duration::from_secs(1));
+                let token = service_token(&p.dir);
+                let wait = Duration::from_secs(1);
+                let probe = http(port, token.as_deref(), "GET", "/status", None, wait);
                 if probe.is_ok_and(|r| r.code == 200) {
-                    return Self { port, dir: p.dir.clone(), child, log };
+                    return Self { port, token, dir: p.dir.clone(), child, log };
                 }
             }
             if let Some(Ok(Some(status))) = child.as_mut().map(Child::try_wait) {
@@ -285,7 +302,8 @@ impl Service {
 
     /// One request; panics with the tail of the service log if it gets no answer.
     pub(crate) fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Reply {
-        http(self.port, method, path, body, Duration::from_secs(90)).unwrap_or_else(|e| {
+        let (token, wait) = (self.token.as_deref(), Duration::from_secs(90));
+        http(self.port, token, method, path, body, wait).unwrap_or_else(|e| {
             let text = std::fs::read_to_string(&self.log).unwrap_or_default();
             let start = text.len().saturating_sub(3000);
             let tail = text.get(start..).unwrap_or_default();

@@ -1,5 +1,6 @@
 //! R4: the MCP server `qoob3d mcp [DIR]` over stdio against the real binary
-//! (docs/requirements/agent.md §4.5 AG-MC-01..06 and §5 acceptance R4;
+//! (docs/requirements/agent.md §4.5 AG-MC-01..06 and §7 acceptance R4;
+//! §6.2 AG-TK-05..07: the agent binds parts and checks with `task_update`;
 //! ADR-0054). Every test names its requirement IDs.
 //!
 //! Transport: one JSON-RPC 2.0 message per line on stdin/stdout. [`Mcp`]
@@ -409,7 +410,8 @@ const TOOLS: [(&str, &[&str], &[&str]); 19] = [
     ("task_list", &["state"], &[]),
     ("task_get", &["id"], &["id"]),
     ("task_create", &["title", "kind", "body", "parts", "checks"], &["title"]),
-    ("task_update", &["id", "state", "note"], &["id"]),
+    // AG-TK-05: `task_update` accepts `parts` and `checks`.
+    ("task_update", &["id", "state", "note", "parts", "checks"], &["id"]),
     ("file_list", &["dir"], &[]),
     ("file_read", &["path"], &["path"]),
     ("file_write", &["path", "content"], &["path", "content"]),
@@ -557,15 +559,14 @@ fn call_file_and_task_tools(mcp: &mut Mcp, p: &Project) {
     assert_eq!(t["file"], json!("tasks/0002-second-task.md"), "{t}");
     assert!(p.read("tasks/0002-second-task.md").contains("From the agent."));
 
-    // task_update acts as the agent: the log line says so.
+    // task_update acts as the agent: the log line says so, in the form
+    // `<old> -> <new>: <note>` (AG-TK-07).
     let args = json!({"id": "T-0002", "state": "in_progress", "note": "taking it"});
     assert_eq!(mcp.call("task_update", &args).ok()["state"], json!("in_progress"));
     let file = p.read("tasks/0002-second-task.md");
     assert!(file.contains("state = \"in_progress\""), "{file}");
-    assert!(
-        file.lines().any(|l| l.starts_with("- ") && l.ends_with(" agent: taking it")),
-        "{file}"
-    );
+    let line = " agent: open -> in_progress: taking it";
+    assert!(file.lines().any(|l| l.starts_with("- ") && l.ends_with(line)), "{file}");
 }
 
 fn call_build_tools(mcp: &mut Mcp, p: &Project) {
@@ -694,6 +695,58 @@ fn ag_mc_02_task_update_can_never_set_done_or_rejected() {
         assert_eq!(moved.ok()["state"], json!("in_progress"), "{}", moved.envelope);
     }
     assert!(p.read(&files[0]).contains("state = \"in_progress\""));
+    mcp.finish();
+}
+
+#[test]
+fn ag_tk_05_task_update_binds_parts_and_checks_while_open_or_in_progress() {
+    // AG-TK-05: "MCP `task_update` accept[s] `parts` and `checks` (replace
+    // the lists …)" while the task is `open` or `in_progress`. One task in
+    // every state, written by the human without any binding.
+    let from = ["open", "in_progress", "blocked", "review", "done", "rejected"];
+    let p = Project::new("mcp-bind", "");
+    let files: Vec<String> = (1..=from.len()).map(|n| format!("tasks/{n:04}-state.md")).collect();
+    for (file, state) in files.iter().zip(from) {
+        p.write(file, &task_file("State", state));
+    }
+    let mut mcp = Mcp::open(&p);
+    for (n, (file, state)) in files.iter().zip(from).enumerate() {
+        let id = format!("T-{:04}", n + 1);
+        let before = p.read(file);
+        // Unknown names are accepted at binding time (they fail the gate later).
+        let args = json!({"id": id, "parts": ["Hook", "Crane column"], "checks": ["load"]});
+        let bound = mcp.call("task_update", &args);
+        if ["open", "in_progress"].contains(&state) {
+            let t = bound.ok();
+            assert_eq!(t["parts"], json!(["Hook", "Crane column"]), "{state}: {t}");
+            assert_eq!(t["checks"], json!(["load"]), "{state}: {t}");
+            assert_eq!(t["state"], json!(state), "binding is no state change: {t}");
+            let shown = mcp.call("task_get", &json!({"id": id}));
+            assert_eq!(shown.ok()["parts"], json!(["Hook", "Crane column"]), "{state}");
+            assert_eq!(shown.ok()["checks"], json!(["load"]), "{state}");
+            // The human's words stay.
+            let file = p.read(file);
+            assert!(file.contains("\n\nThe words of the human.\n"), "{file}");
+            assert!(file.contains("title = \"State\"\nkind = \"task\""), "{file}");
+        } else {
+            bound.refused(&[id.as_str(), state], &format!("binding in state {state}"));
+            assert_eq!(p.read(file), before, "{file} changed by a refused binding");
+        }
+    }
+    // Replace, not merge; one list alone leaves the other; an empty list clears.
+    let t = mcp.call("task_update", &json!({"id": "T-0001", "parts": ["Plate"]})).ok().clone();
+    assert_eq!((&t["parts"], &t["checks"]), (&json!(["Plate"]), &json!(["load"])), "{t}");
+    let t = mcp.call("task_update", &json!({"id": "T-0001", "checks": []})).ok().clone();
+    assert_eq!((&t["parts"], &t["checks"]), (&json!(["Plate"]), &json!([])), "{t}");
+    // Binding and taking the task in one call.
+    let args = json!({"id": "T-0001", "state": "in_progress", "checks": ["fit"], "note": "mine"});
+    let t = mcp.call("task_update", &args).ok().clone();
+    assert_eq!((&t["state"], &t["checks"]), (&json!("in_progress"), &json!(["fit"])), "{t}");
+    // Wrong types are refused, nothing is bound.
+    update_must_fail(&mut mcp, &json!({"id": "T-0002", "parts": "Hook"}));
+    update_must_fail(&mut mcp, &json!({"id": "T-0002", "checks": [1, 2]}));
+    let shown = mcp.call("task_get", &json!({"id": "T-0002"}));
+    assert_eq!(shown.ok()["parts"], json!(["Hook", "Crane column"]));
     mcp.finish();
 }
 
@@ -1154,12 +1207,13 @@ fn ag_mc_05_resources_serve_the_reference_the_guide_and_examples() {
 }
 
 #[test]
-fn ag_mc_06_the_guide_fits_60_lines_and_names_the_loop() {
+fn ag_mc_06_07_the_guide_fits_120_lines_and_names_the_loop() {
     let p = small_project("mcp-guide");
     let mut mcp = Mcp::open(&p);
     let guide = text_of(&mcp.call("guide", &json!({})));
     let lines = guide.trim().lines().count();
-    assert!((10..=60).contains(&lines), "the guide has {lines} lines (at most 60)");
+    // AG-MC-07 raised the bound of AG-MC-06 from 60 to 120 lines.
+    assert!((10..=120).contains(&lines), "the guide has {lines} lines (at most 120)");
     let lower = guide.to_lowercase();
     // Project layout.
     for folder in ["qoob3d.toml", "parts/", "lib/", "values/", "checks/", "tasks/"] {
@@ -1186,18 +1240,17 @@ fn ag_mc_06_the_guide_fits_60_lines_and_names_the_loop() {
 }
 
 // ===========================================================================
-// §5 acceptance R4: box with lid over MCP
+// §7 acceptance R4 (with the binding of R5, AG-TK-05/06): box with lid over MCP
 // ===========================================================================
 
 const TASK_FILE: &str = "tasks/0001-box-with-lid.md";
-/// The task of the human; it names the parts and checks the gate looks at.
+/// The task of the human: free text. It binds no parts and checks; the
+/// agent binds what it builds (AG-TK-05), and the gate needs that (AG-TK-06).
 const TASK: &str = "\
 +++
 title = \"Box with lid and pin connection, 0.2 mm clearance\"
 kind = \"task\"
 state = \"open\"
-parts = [\"Box\", \"Lid\"]
-checks = [\"pin_clearance\", \"lid_volume\"]
 created = \"2026-11-22\"
 +++
 
@@ -1306,15 +1359,26 @@ fn accept_take_the_task(mcp: &mut Mcp) {
     let t = &open.ok()[0];
     assert_eq!(t["id"], json!("T-0001"), "{}", open.envelope);
     assert_eq!(t["title"], json!("Box with lid and pin connection, 0.2 mm clearance"));
-    assert_eq!(
-        (&t["parts"], &t["checks"]),
-        (&json!(["Box", "Lid"]), &json!(["pin_clearance", "lid_volume"]))
-    );
+    assert_eq!((&t["parts"], &t["checks"]), (&json!([]), &json!([])), "a free-text task");
     let shown = mcp.call("task_get", &json!({"id": "T-0001"}));
     assert!(shown.ok()["body"].as_str().is_some_and(|b| b.contains("0.2 mm clearance")));
 
     let taken = mcp.call("task_update", &json!({"id": "T-0001", "state": "in_progress"}));
     assert_eq!(taken.ok()["state"], json!("in_progress"), "{}", taken.envelope);
+    // AG-TK-06: nothing is bound, so a note alone opens no gate (this is
+    // how the first fresh-agent run of R5 handed over unchecked work).
+    gate_refuses(mcp, &["part", "check"], "review of a task with nothing bound");
+
+    // AG-TK-05: the agent binds what it is going to build and check.
+    let args = json!({"id": "T-0001", "parts": ["Box", "Lid"],
+        "checks": ["pin_clearance", "lid_volume"]});
+    let bound = mcp.call("task_update", &args);
+    assert_eq!(
+        (&bound.ok()["parts"], &bound.ok()["checks"], &bound.ok()["state"]),
+        (&json!(["Box", "Lid"]), &json!(["pin_clearance", "lid_volume"]), &json!("in_progress")),
+        "{}",
+        bound.envelope
+    );
     // Nothing exists yet: the gate names both parts and both checks.
     gate_refuses(mcp, &["Box", "Lid", "pin_clearance", "lid_volume"], "review before any work");
 
@@ -1459,13 +1523,31 @@ fn accept_human_sets_done(mcp: &mut Mcp, p: &Project) {
     assert_eq!(out.code, Some(0), "{}{}", out.stdout, out.stderr);
     assert_eq!(out.envelope()["result"]["state"], json!("done"));
 
+    // Only the `state` line changed and the `parts`/`checks` lines were
+    // added by the binding (AG-TK-05); the human's words are byte-identical.
     let file = p.read(TASK_FILE);
+    let kept: String = file
+        .split_inclusive('\n')
+        .filter(|l| !l.starts_with("parts") && !l.starts_with("checks"))
+        .collect();
     let expected = TASK.replace("state = \"open\"", "state = \"done\"");
-    assert!(file.starts_with(expected.trim_end()), "header and body byte-identical:\n{file}");
+    assert!(kept.starts_with(expected.trim_end()), "header and body byte-identical:\n{file}");
+    for key in ["parts", "checks"] {
+        let lines = file.lines().filter(|l| l.starts_with(key)).count();
+        assert_eq!(lines, 1, "one {key} line in the header:\n{file}");
+    }
     let log: Vec<&str> =
         file.split_once("\n## Log").map(|(_, l)| l.lines().collect()).unwrap_or_default();
-    let agent = log.iter().position(|l| l.ends_with(" agent: Box and lid built, checks pass"));
-    let human = log.iter().position(|l| l.ends_with(" human: printed, the lid fits"));
+    // AG-TK-07: `<old> -> <new>` and the note; AG-TK-06: the hand-over entry
+    // lists the bound parts and checks.
+    let agent = log.iter().position(|l| {
+        let bound = ["Box", "Lid", "pin_clearance", "lid_volume"];
+        l.contains(" agent: in_progress -> review")
+            && l.contains("Box and lid built, checks pass")
+            && bound.iter().all(|name| l.contains(name))
+    });
+    let human =
+        log.iter().position(|l| l.ends_with(" human: review -> done: printed, the lid fits"));
     assert!(agent.is_some() && agent < human, "log in order, agent then human:\n{file}");
 
     let shown = mcp.call("task_get", &json!({"id": "T-0001"}));

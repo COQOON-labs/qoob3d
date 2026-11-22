@@ -5,6 +5,10 @@
 //! Sections: project and service start (WA-OP-*), client protocol (WA-PR-*),
 //! polling (WA-LV-01/02/05), the view model `Live`, CLI and headless render
 //! (WA-OP-01, WA-HL-01), UI with egui_kittest (WA-LV-04/05/06, WA-OP-03).
+//!
+//! R5 hardening of the client (docs/requirements/agent.md §6.1): the token
+//! of `service.json` on every request (AG-HD-03), percent-encoded part names
+//! (AG-HD-04), reconnecting through `service.json` (AG-HD-05).
 
 mod common;
 
@@ -12,7 +16,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{FakePart, FakeService, Mode, TempProject, cube_qmesh, same_dir};
+use common::{FakePart, FakeService, Mode, TempProject, cube_qmesh, same_dir, token_for};
 use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable as _;
@@ -286,6 +290,110 @@ fn build_all_posts_null_parts_and_zero_wait() {
     assert_eq!(body["wait_s"].as_f64(), Some(0.0), "{body}");
 }
 
+// ================================================================== AG-HD-03/04 client
+
+/// AG-HD-03: "The app client, CLI and MCP send the token": every request of
+/// the client carries the token of `service.json` in `X-Qoob3d-Token`, also
+/// the probe of `connect` (the real service answers 403 without it).
+#[test]
+fn client_sends_the_token_of_service_json_with_every_request() {
+    let (_project, fake, client) = connected("token", three_parts());
+    client.status().expect("status");
+    client.mesh("shaft").expect("mesh");
+    client.build_all().expect("build requested");
+    let sent = fake.tokens();
+    let requests: Vec<&str> = sent.iter().map(|(r, _)| r.as_str()).collect();
+    for request in ["GET /status", "GET /mesh/shaft", "POST /build"] {
+        assert!(requests.contains(&request), "{request} was not sent: {requests:?}");
+    }
+    let expected = token_for(fake.port);
+    for (request, token) in &sent {
+        assert_eq!(token.as_deref(), Some(expected.as_str()), "token of `{request}`");
+    }
+}
+
+/// AG-HD-03: the token belongs to the service that wrote `service.json`. A
+/// service started by `connect` (WA-OP-02) is asked with the token it wrote,
+/// not with one of a stale file.
+#[test]
+fn client_uses_the_token_of_the_service_it_started() {
+    let project = TempProject::new("token-start");
+    // Stale file: dead port, and with it another token.
+    project.write_service_json(TempProject::dead_port());
+    let fake = FakeService::start(three_parts());
+    let opened = ProjectDir::open(&project.dir).expect("valid project");
+    let client = Client::connect(&opened, &project.start_script(fake.port), PATIENCE)
+        .expect("service started and reachable");
+    client.status().expect("status");
+    let expected = token_for(fake.port);
+    let sent = fake.tokens();
+    assert!(!sent.is_empty());
+    for (request, token) in &sent {
+        assert_eq!(token.as_deref(), Some(expected.as_str()), "token of `{request}`");
+    }
+}
+
+/// Part names that are no plain path segment: a space, the query and
+/// fragment delimiters, a literal percent sequence (`%41` would decode to
+/// `A`), a slash-free non-ASCII name. Cube sizes 1..5 tell them apart.
+fn awkward_parts() -> Vec<FakePart> {
+    let names = ["Crane column", "What?", "Hash#1", "Pct%41", "Geh\u{e4}use"];
+    let mut parts: Vec<FakePart> = names
+        .iter()
+        .zip(1u8..)
+        .map(|(name, n)| {
+            FakePart::built(name, "current", &format!("k-{n}"), cube_qmesh([0.0; 3], f32::from(n)))
+        })
+        .collect();
+    // What a client that sends `%41` unencoded would get instead of `Pct%41`.
+    parts.push(FakePart::built("PctA", "current", "k-decoy", cube_qmesh([0.0; 3], 99.0)));
+    parts
+}
+
+/// AG-HD-04: "Clients percent-encode every path segment they build from a
+/// name (`/mesh/<part>` …); a part named `Crane column` … shows in the app
+/// client". The fake decodes the segment like the real service; the request
+/// line itself must be valid HTTP (no raw space, `?` or `#` in the segment).
+#[test]
+fn mesh_of_parts_with_awkward_names_is_fetched_with_an_encoded_path() {
+    let (_project, fake, client) = connected("mesh-names", awkward_parts());
+    for (part, n) in awkward_parts().iter().take(5).zip(1u8..) {
+        let name = &part.name;
+        let mesh = client.mesh(name).unwrap_or_else(|e| panic!("mesh of {name:?}: {e:#}"));
+        assert_eq!(mesh.key, format!("k-{n}"), "{name:?}");
+        let max = mesh.mesh.faces.bounds().expect("not empty").max;
+        assert_eq!(max, [f32::from(n); 3], "{name:?} got the mesh of another part");
+    }
+    let log = fake.log();
+    let segments: Vec<&str> = log.iter().filter_map(|r| r.strip_prefix("GET /mesh/")).collect();
+    assert_eq!(segments.len(), 5, "one request per part, each a whole request line: {log:?}");
+    for segment in segments {
+        assert!(
+            segment.is_ascii() && !segment.contains(['?', '#', ' ', '/']),
+            "the name is not percent-encoded: {segment:?}"
+        );
+    }
+    // RFC 3986 §2.1: a space is `%20` in a path (`+` is a form encoding).
+    assert!(log.iter().any(|r| r == "GET /mesh/Crane%20column"), "{log:?}");
+}
+
+/// AG-HD-04 through the poller: the app shows such parts (WA-LV-02).
+#[test]
+fn poller_loads_parts_with_awkward_names() {
+    let (_project, _fake, client) = connected("poll-names", awkward_parts());
+    let poller = Poller::spawn(client, FAST);
+    let mut missing: Vec<String> = awkward_parts().into_iter().map(|p| p.name).collect();
+    let end = Instant::now() + PATIENCE;
+    while !missing.is_empty() {
+        let left = end.checked_duration_since(Instant::now()).unwrap_or_default();
+        match poller.updates().recv_timeout(left) {
+            Ok(Update::Mesh { name, .. }) => missing.retain(|m| *m != name),
+            Ok(_) => {}
+            Err(e) => panic!("no mesh for {missing:?} ({e:?})"),
+        }
+    }
+}
+
 // ================================================================== WA-LV-01/02/05 poller
 
 /// Collects updates for `time`.
@@ -446,6 +554,74 @@ fn poller_reports_unreachable_and_recovers() {
     until(&poller, "unreachable", |u| matches!(u, Update::Unreachable));
     fake.set_mode(Mode::Serve);
     until(&poller, "parts again", |u| matches!(u, Update::Parts(_)));
+}
+
+/// AG-HD-05: "The live poller re-reads `service.json` whenever the service
+/// does not answer and reconnects to a service restarted on another port".
+/// The old service is gone for good; the new one has another port, another
+/// token (AG-HD-03) and a rebuilt part.
+#[test]
+fn poller_reconnects_to_a_service_restarted_on_another_port() {
+    let (project, old, client) = connected("poll-restart", three_parts());
+    let poller = Poller::spawn(client, FAST);
+    until(&poller, "parts", |u| matches!(u, Update::Parts(_)));
+    old.set_mode(Mode::Refuse);
+    until(&poller, "unreachable", |u| matches!(u, Update::Unreachable));
+
+    let mut parts = three_parts();
+    parts[0] = FakePart::built("shaft", "current", "k-shaft-2", cube_qmesh([0.0; 3], 30.0));
+    let new = FakeService::start(parts);
+    assert_ne!(new.port, old.port, "test premise: another port");
+    project.write_service_json(new.port);
+
+    until(&poller, "parts again", |u| matches!(u, Update::Parts(_)));
+    until(
+        &poller,
+        "the rebuilt shaft",
+        |u| matches!(u, Update::Mesh { name, key, .. } if name == "shaft" && key == "k-shaft-2"),
+    );
+    // The poller talks to the new service with the new token, and goes on.
+    let expected = token_for(new.port);
+    let sent = new.tokens();
+    for (request, token) in &sent {
+        assert_eq!(token.as_deref(), Some(expected.as_str()), "token of `{request}`");
+    }
+    let polls = new.count("GET /status");
+    collect(&poller, Duration::from_millis(300));
+    assert!(new.count("GET /status") > polls, "polling the new service continues");
+}
+
+/// AG-HD-05: "a failed first connection is retried every poll interval
+/// (WA-LV-05)". The app's poller (`Poller::open`) cannot start a service
+/// (the program does not exist, so `connect` fails at once) and reports
+/// `Unreachable`; when a service appears later, it connects without the app
+/// being restarted. Bound: the service is found within `PATIENCE` (10 s =
+/// 20 poll intervals of 0.5 s).
+#[test]
+fn poller_retries_a_failed_first_connection() {
+    let project = TempProject::new("poll-late");
+    let opened = ProjectDir::open(&project.dir).expect("valid project");
+    let cmd = vec!["qoob3d-no-such-service-program".to_owned()];
+    let poller = Poller::open(opened, cmd, || {});
+    until(&poller, "unreachable", |u| matches!(u, Update::Unreachable));
+    // Still nothing there for a few poll intervals.
+    assert!(
+        collect(&poller, Duration::from_millis(1200))
+            .iter()
+            .all(|u| matches!(u, Update::Unreachable)),
+        "updates without a service"
+    );
+
+    let fake = FakeService::start(three_parts());
+    project.write_service_json(fake.port);
+    let seen = until(&poller, "parts", |u| matches!(u, Update::Parts(_)));
+    let Some(Update::Parts(parts)) = seen.last() else { unreachable!() };
+    assert_eq!(part_names(parts), ["shaft", "lid", "pin"]);
+    until(&poller, "shaft", |u| matches!(u, Update::Mesh { name, .. } if name == "shaft"));
+    // Polling goes on at the poll interval.
+    let polls = fake.count("GET /status");
+    collect(&poller, Duration::from_millis(1700));
+    assert!(fake.count("GET /status") >= polls + 2, "polling stopped: {:?}", fake.log());
 }
 
 /// WA-LV-01: dropping the poller stops its thread (no requests afterwards).

@@ -1211,8 +1211,11 @@ fn ag_sc_16_every_example_in_the_api_reference_runs() {
         .unwrap_or_else(|e| panic!("{} must exist (AG-SC-16): {e}", path.display()));
     let blocks = rhai_blocks(&doc);
     assert!(!blocks.is_empty(), "no ```rhai examples in {}", path.display());
-    // Examples that import files resolve them relative to docs/.
-    let options = RunOptions { project_dir: Some(docs_dir()), ..RunOptions::default() };
+    // Examples that import files name them under `lib/examples/`, the files
+    // `qoob3d init` creates (AG-MC-08); their master copies are the project
+    // `docs/script-api/` (`docs/script-api/lib/examples/…`).
+    let project = docs_dir().join("script-api");
+    let options = RunOptions { project_dir: Some(project), ..RunOptions::default() };
     let failures: Vec<String> = blocks
         .iter()
         .filter_map(|(line, code)| run(code, &options).err().map(|e| format!("line {line}: {e:?}")))

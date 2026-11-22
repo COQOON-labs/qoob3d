@@ -1,7 +1,8 @@
 //! R2/R3 without MCP: project service, worker processes, cache and CLI
 //! against the real `qoob3d` binary (docs/requirements/agent.md §2, §2.1,
 //! §3.1, §4; envelope and qmesh from docs/requirements/project-app.md;
-//! ADR-0053). Every test names its requirement IDs.
+//! ADR-0053), and the service hardening of R5 (§6.1: AG-HD-01, 02, 03, 06,
+//! 10; ADR-0055). Every test names its requirement IDs.
 //!
 //! Test projects use only simple primitives (`box`, `cylinder`, `move`), so
 //! every volume and bounding box is derived by hand next to the assertion.
@@ -201,25 +202,34 @@ impl Reply {
     }
 }
 
-/// One HTTP/1.1 request to 127.0.0.1:`port` (`Connection: close`).
+/// One HTTP/1.1 request to 127.0.0.1:`port` (`Connection: close`), with the
+/// service token in `X-Qoob3d-Token` when there is one (AG-HD-03).
 fn http(
     port: u16,
+    token: Option<&str>,
     method: &str,
     path: &str,
     body: Option<&Value>,
     timeout: Duration,
 ) -> Result<Reply, String> {
+    let body = body.map(Value::to_string).unwrap_or_default();
+    let token = token.map(|t| format!("X-Qoob3d-Token: {t}\r\n")).unwrap_or_default();
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{token}Connection: close\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    exchange(port, &req, timeout)
+}
+
+/// Sends `request` (a complete HTTP/1.1 request, written by the caller) to
+/// 127.0.0.1:`port` and reads the answer.
+fn exchange(port: u16, request: &str, timeout: Duration) -> Result<Reply, String> {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let mut s = TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect: {e}"))?;
     s.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
     s.set_write_timeout(Some(timeout)).map_err(|e| e.to_string())?;
-    let body = body.map(Value::to_string).unwrap_or_default();
-    let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\
-         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-        body.len()
-    );
-    s.write_all(req.as_bytes()).map_err(|e| format!("write: {e}"))?;
+    s.write_all(request.as_bytes()).map_err(|e| format!("write: {e}"))?;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 65536];
     let end = loop {
@@ -304,11 +314,21 @@ fn service_json(dir: &Path) -> Option<(u16, u32)> {
     Some((u16::try_from(v["port"].as_u64()?).ok()?, u32::try_from(v["pid"].as_u64()?).ok()?))
 }
 
+/// The token from `.qoob3d/service.json` that every request carries in the
+/// header `X-Qoob3d-Token` (AG-HD-03); `None` if the file has none.
+fn service_token(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(".qoob3d/service.json")).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    v["token"].as_str().map(str::to_owned)
+}
+
 /// A running `qoob3d serve` for a project. Drop shuts it down and kills
 /// whatever is left (service and workers), so no test leaks processes.
 struct Service {
     port: u16,
     pid: u32,
+    /// From `service.json`, sent with every request (AG-HD-03).
+    token: Option<String>,
     /// Set when this test spawned `serve` itself (reaped on drop).
     child: Option<Child>,
     log: PathBuf,
@@ -319,11 +339,27 @@ struct Service {
 impl Service {
     /// Spawns `qoob3d serve <DIR>` and waits until it answers `/status`.
     fn start(p: &Project) -> Self {
+        let mut command = Command::new(BIN);
+        command.arg("serve").arg(&p.dir);
+        Self::start_with(p, &mut command)
+    }
+
+    /// As [`Service::start`] with the service limited to `kib` KiB of
+    /// address space (`ulimit -v`, inherited by its workers): a script that
+    /// allocates without bound makes the service fail instead of exhausting
+    /// the machine. `exec` keeps the pid, so `service.json` names the child.
+    /// Where the shell cannot set the limit (macOS) the service runs without.
+    fn start_capped(p: &Project, kib: u64) -> Self {
+        let mut command = Command::new("sh");
+        let script = format!("ulimit -v {kib} 2>/dev/null; exec \"$0\" serve \"$1\"");
+        command.arg("-c").arg(script).arg(BIN).arg(&p.dir);
+        Self::start_with(p, &mut command)
+    }
+
+    fn start_with(p: &Project, command: &mut Command) -> Self {
         let log = p.root.join("serve.log");
         let err = std::fs::File::create(&log).expect("create serve.log");
-        let child = Command::new(BIN)
-            .arg("serve")
-            .arg(&p.dir)
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(err)
@@ -344,10 +380,12 @@ impl Service {
         let deadline = Instant::now() + START;
         loop {
             if let Some((port, pid)) = service_json(&p.dir) {
-                let probe = http(port, "GET", "/status", None, Duration::from_secs(1));
+                let token = service_token(&p.dir);
+                let wait = Duration::from_secs(1);
+                let probe = http(port, token.as_deref(), "GET", "/status", None, wait);
                 if probe.is_ok_and(|r| r.code == 200) {
                     let seen = std::cell::RefCell::new(BTreeSet::new());
-                    return Self { port, pid, child, log, seen_workers: seen };
+                    return Self { port, pid, token, child, log, seen_workers: seen };
                 }
             }
             if let Some(Ok(Some(status))) = child.as_mut().map(Child::try_wait) {
@@ -372,8 +410,19 @@ impl Service {
     }
 
     fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Reply {
-        http(self.port, method, path, body, Duration::from_secs(90))
+        self.try_request(method, path, body, Duration::from_secs(90))
             .unwrap_or_else(|e| panic!("{method} {path}: {e}\nservice log:\n{}", self.log()))
+    }
+
+    /// One request with the service token; `Err` if there is no answer in `timeout`.
+    fn try_request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        timeout: Duration,
+    ) -> Result<Reply, String> {
+        http(self.port, self.token.as_deref(), method, path, body, timeout)
     }
 
     fn get(&self, path: &str) -> Reply {
@@ -438,7 +487,7 @@ impl Service {
     /// `POST /shutdown`; waits for the service to exit (AG-SV-01).
     fn shutdown(&mut self) -> bool {
         self.workers();
-        let sent = http(self.port, "POST", "/shutdown", Some(&json!({})), Duration::from_secs(2));
+        let sent = self.try_request("POST", "/shutdown", Some(&json!({})), Duration::from_secs(2));
         let pid = self.pid;
         let gone = match self.child.as_mut() {
             Some(c) => {
@@ -716,7 +765,8 @@ fn ag_pj_05_ag_sv_01_endless_part_is_killed_after_the_time_limit_while_status_an
     let mut running_polls = 0;
     for i in 0..20 {
         let t = Instant::now();
-        let r = http(s.port, "GET", "/status", None, Duration::from_secs(1))
+        let r = s
+            .try_request("GET", "/status", None, Duration::from_secs(1))
             .unwrap_or_else(|e| panic!("poll {i}: {e}"));
         let took = t.elapsed();
         assert!(took < Duration::from_millis(100), "poll {i}: /status took {took:?}");
@@ -1187,7 +1237,8 @@ fn ag_sv_01_shutdown_removes_service_json_and_stops_all_workers() {
     assert_normal_builds(&s);
     let workers = s.workers();
     assert!(!workers.is_empty(), "workers stay warm after a build (§2.1)");
-    let r = http(s.port, "POST", "/shutdown", Some(&json!({})), Duration::from_secs(5))
+    let r = s
+        .try_request("POST", "/shutdown", Some(&json!({})), Duration::from_secs(5))
         .expect("/shutdown");
     r.ok();
     let child = s.child.as_mut().expect("own child");
@@ -1335,4 +1386,460 @@ fn ag_sv_02_cli_starts_the_service_on_demand_and_prints_envelopes() {
     assert_eq!(out.code, Some(1), "a failed part gives exit 1: {}", out.stdout);
     assert_eq!(out.envelope()["result"]["parts"]["Bad"]["state"], json!("failed"));
     drop(s);
+}
+
+// ===========================================================================
+// R5 hardening (agent.md §6.1): AG-HD-01, 02, 03, 06, 10
+// ===========================================================================
+
+/// Rewrites `qoob3d.toml` of a project named `name` with `extra`.
+fn write_config(p: &Project, name: &str, extra: &str) {
+    p.write("qoob3d.toml", &format!("[project]\nname = \"{name}\"\nunits = \"mm\"\n{extra}"));
+}
+
+/// The kind of the load error in a `/status` answer, whichever way the
+/// envelope carries it (`result.error` as in §3.1 or the envelope's `error`).
+fn load_error_kind(v: &Value) -> Option<&str> {
+    v["result"]["error"]["kind"].as_str().or_else(|| v["error"]["kind"].as_str())
+}
+
+#[test]
+fn ag_hd_01_a_time_limit_out_of_range_never_hangs_the_job_queue() {
+    // AG-HD-01: `time_s = inf` and `1e20` are config errors naming the field,
+    // and "no config value can panic the service or a job thread". Before
+    // R5 both values loaded and the job thread died converting them to a
+    // duration; the queue then never answered again.
+    //
+    // A panic inside a job thread ("fails that job with kind `crash` and
+    // returns the worker to the pool") cannot be provoked from outside once
+    // the config is validated; that half of the requirement needs a unit
+    // test next to the job runner (see the report of the test author).
+    let p = Project::new("hd-01", "[limits]\ntime_s = inf\n[workers]\ncount = 1\n");
+    p.write("parts/normal.rhai", NORMAL);
+    let s = Service::start(&p);
+    for value in ["inf", "1e20"] {
+        write_config(&p, "hd-01", &format!("[limits]\ntime_s = {value}\n[workers]\ncount = 1\n"));
+        // The build must be refused or fail, at once: `wait_s` = 10 bounds
+        // the answer, so a hanging job shows as a running job, not as a
+        // hanging test.
+        let build = json!({"parts": null, "wait_s": 10});
+        let r = s
+            .try_request("POST", "/build", Some(&build), Duration::from_secs(30))
+            .unwrap_or_else(|e| panic!("time_s = {value}: /build did not answer: {e}"));
+        let v = r.envelope();
+        assert_ne!(v["result"]["state"], json!("running"), "time_s = {value}: the job hangs: {v}");
+        let failed = v["result"]["parts"]
+            .as_object()
+            .is_some_and(|m| m.values().any(|part| part["state"] == json!("failed")));
+        assert!(v["ok"] == json!(false) || failed, "time_s = {value} was accepted: {v}");
+        assert!(r.text().contains("time_s"), "time_s = {value}: the error names the field: {v}");
+        // The service answers and reports the config error.
+        let st = s.get("/status");
+        assert_eq!(st.code, 200);
+        assert!(
+            st.text().contains("time_s"),
+            "time_s = {value}: /status names the field: {}",
+            st.text()
+        );
+    }
+    // With a valid file the same service builds: nothing is stuck.
+    write_config(&p, "hd-01", "[limits]\ntime_s = 60\n[workers]\ncount = 1\n");
+    assert_normal_builds(&s);
+    assert_eq!(s.status()["workers"]["busy"], json!(0));
+}
+
+/// Address-space cap for services that are fed a memory bomb: 4 000 000 KiB
+/// (about 3.8 GiB). With the limit of AG-HD-02 missing, the bomb fails the
+/// service at the cap instead of exhausting the machine.
+const BOMB_CAP_KIB: u64 = 4_000_000;
+
+/// AG-HD-02: 16 B doubled 40 times = 16 TiB at the top level of a file.
+const STRING_BOMB: &str = "\
+let s = \"0123456789abcdef\";
+for i in 0..40 { s += s; }
+";
+/// One element doubled 40 times = 2^40 elements.
+const ARRAY_BOMB: &str = "\
+let a = [0];
+for i in 0..40 { a += a; }
+";
+
+/// Starts a (capped) service on a project whose file `rel` is `source` and
+/// expects it alive, with `/status` reporting the load error of that file.
+fn assert_bomb_is_a_load_error(tag: &str, rel: &str, source: &str) {
+    let p = Project::new(tag, "[workers]\ncount = 1\n");
+    p.write("parts/normal.rhai", NORMAL).write(rel, source);
+    // `start_capped` already needs an answer to `/status`.
+    let s = Service::start_capped(&p, BOMB_CAP_KIB);
+    for round in 0..3 {
+        let t = Instant::now();
+        let r = s
+            .try_request("GET", "/status", None, Duration::from_secs(10))
+            .unwrap_or_else(|e| panic!("{rel}, round {round}: /status: {e}\n{}", s.log()));
+        // Crossing a size limit costs a handful of operations.
+        assert!(t.elapsed() < Duration::from_secs(5), "{rel}: /status took {:?}", t.elapsed());
+        assert_eq!(r.code, 200, "{rel}: {}", r.text());
+        let v = r.envelope();
+        assert!(r.text().contains(rel), "{rel}: /status names the file: {v}");
+        assert_eq!(load_error_kind(&v), Some("load"), "{rel}: a load error: {v}");
+    }
+    assert!(alive(s.pid), "{rel}: the service died");
+    // Without the bomb the same service builds the project.
+    std::fs::remove_file(p.path(rel)).expect("remove the bomb");
+    assert_normal_builds(&s);
+}
+
+#[test]
+fn ag_hd_02_a_string_bomb_at_the_top_level_of_a_part_file_is_a_load_error() {
+    // "A part file whose top level doubles a string 40 times leaves the
+    // service alive and `/status` answering with the load error naming the
+    // file." The part declared after the loop is never reached.
+    let source = format!("{STRING_BOMB}part(\"Bomb\", #{{}}, |deps| box(1, 1, 1));\n");
+    assert_bomb_is_a_load_error("hd-02-string", "parts/bomb.rhai", &source);
+}
+
+#[test]
+fn ag_hd_02_an_array_bomb_at_the_top_level_of_a_part_file_is_a_load_error() {
+    // "array 10000 elements": the same bomb with an array, also when the
+    // loop is the last statement of the file and nothing reads the array.
+    assert_bomb_is_a_load_error("hd-02-array", "parts/bomb.rhai", ARRAY_BOMB);
+}
+
+#[test]
+fn ag_hd_02_a_string_bomb_in_a_check_file_is_a_load_error() {
+    // "Declaration discovery in the service (`PartMode::Declare` and check
+    // discovery)": check files are evaluated by the service as well.
+    let source = format!("{STRING_BOMB}check(\"late\", || {{ expect(true, \"never\"); }});\n");
+    assert_bomb_is_a_load_error("hd-02-check", "checks/bomb.rhai", &source);
+}
+
+#[test]
+fn ag_hd_02_discovery_stops_after_a_million_operations() {
+    // "`max_operations` 1000000" for discovery: 2 000 000 loop iterations
+    // (at least one operation each) at the top level never reach the part
+    // declaration; a worker run (50 000 000, AG-SC-02) would.
+    let p = Project::new("hd-02-ops", "[workers]\ncount = 1\n");
+    p.write("parts/normal.rhai", NORMAL).write(
+        "parts/slow.rhai",
+        "let n = 0;\nfor i in 0..2000000 { n += 1; }\npart(\"Late\", #{}, |deps| box(1, 1, 1));\n",
+    );
+    let s = Service::start(&p);
+    let r = s.get("/status");
+    let v = r.envelope();
+    assert!(r.text().contains("parts/slow.rhai"), "/status names the file: {v}");
+    assert_eq!(load_error_kind(&v), Some("load"), "{v}");
+    assert!(!r.text().contains("\"Late\""), "the part after the loop is not declared: {v}");
+}
+
+/// HTTP status of a hand-written request: `host` as `Host` header (none if
+/// `None`), `headers` verbatim. POST carries the body `{}`.
+fn status_code(
+    port: u16,
+    method: &str,
+    path: &str,
+    host: Option<&str>,
+    headers: &[(&str, &str)],
+) -> u16 {
+    let mut request = format!("{method} {path} HTTP/1.1\r\n");
+    if let Some(host) = host {
+        request.push_str(&format!("Host: {host}\r\n"));
+    }
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    let body = if method == "POST" { "{}" } else { "" };
+    request.push_str(&format!(
+        "Connection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    ));
+    exchange(port, &request, Duration::from_secs(10))
+        .unwrap_or_else(|e| panic!("{method} {path} (Host {host:?}, {headers:?}): {e}"))
+        .code
+}
+
+#[test]
+fn ag_hd_03_requests_need_the_token_and_a_local_host_and_no_origin() {
+    // AG-HD-03 (ADR-0055): "The service writes a random token (32 hex
+    // characters) into `service.json` and requires it in the header
+    // `X-Qoob3d-Token` on every request; requests carrying an `Origin`
+    // header, or whose `Host` is not `127.0.0.1:<port>` or
+    // `localhost:<port>`, are refused with 403 before routing."
+    let p = Project::abcd("hd-03");
+    let s = Service::start(&p);
+    let token = service_token(&p.dir).expect("service.json has a token");
+    assert_eq!(token.len(), 32, "32 hex characters: {token:?}");
+    assert!(token.chars().all(|c| c.is_ascii_hexdigit()), "32 hex characters: {token:?}");
+    // The file still carries port and pid (project-app.md §1).
+    assert_eq!(service_json(&p.dir), Some((s.port, s.pid)));
+
+    let port = s.port;
+    let local = format!("127.0.0.1:{port}");
+    let name = format!("localhost:{port}");
+    let good = [("X-Qoob3d-Token", token.as_str())];
+    // The premise: with token and local host the service answers.
+    assert_eq!(status_code(port, "GET", "/status", Some(&local), &good), 200);
+    assert_eq!(status_code(port, "GET", "/status", Some(&name), &good), 200, "Host localhost");
+    // Header names are case-insensitive (RFC 9110 §5.1).
+    let lower = [("x-qoob3d-token", token.as_str())];
+    assert_eq!(status_code(port, "GET", "/status", Some(&local), &lower), 200);
+
+    // No token, an empty one, a wrong one (one character changed, a prefix,
+    // 32 zeros): 403 on every endpoint, also on unknown ones ("before
+    // routing": not 404, not 400).
+    let flipped = if token.starts_with('0') { "1" } else { "0" };
+    let wrong = format!("{flipped}{}", &token[1..]);
+    let zeros = "0".repeat(32);
+    let bad_tokens: [Option<&str>; 5] =
+        [None, Some(""), Some(wrong.as_str()), Some(&token[..31]), Some(zeros.as_str())];
+    let endpoints = [
+        ("GET", "/status"),
+        ("GET", "/mesh/A"),
+        ("GET", "/tasks"),
+        ("GET", "/no/such/endpoint"),
+        ("POST", "/build"),
+        ("POST", "/run"),
+        ("POST", "/task"),
+        ("POST", "/save"),
+        ("POST", "/shutdown"),
+    ];
+    for bad in bad_tokens {
+        let headers: Vec<(&str, &str)> = bad.iter().map(|t| ("X-Qoob3d-Token", *t)).collect();
+        for (method, path) in endpoints {
+            let code = status_code(port, method, path, Some(&local), &headers);
+            assert_eq!(code, 403, "{method} {path} with token {bad:?}");
+        }
+    }
+    // The token in the query or in another header is no token.
+    let query = format!("/status?token={token}");
+    assert_eq!(status_code(port, "GET", &query, Some(&local), &[]), 403);
+    let other = [("Authorization", token.as_str())];
+    assert_eq!(status_code(port, "GET", "/status", Some(&local), &other), 403);
+
+    // An `Origin` header marks a request from a web page: refused although
+    // the token is right, whatever the origin says.
+    for origin in ["http://evil.example", "null", local.as_str(), "http://localhost:3000", ""] {
+        let headers = [("X-Qoob3d-Token", token.as_str()), ("Origin", origin)];
+        for (method, path) in [("GET", "/status"), ("POST", "/build"), ("POST", "/shutdown")] {
+            let code = status_code(port, method, path, Some(&local), &headers);
+            assert_eq!(code, 403, "{method} {path} with Origin {origin:?}");
+        }
+    }
+
+    // A foreign `Host` (DNS rebinding): refused although the token is right.
+    let other_port = format!("127.0.0.1:{}", if port == 65535 { 65534 } else { port + 1 });
+    let rebound = format!("evil.example:{port}");
+    let suffix = format!("127.0.0.1:{port}.evil.example");
+    let hosts = [
+        "evil.example",
+        rebound.as_str(),
+        other_port.as_str(),
+        "127.0.0.1",
+        "localhost",
+        suffix.as_str(),
+    ];
+    for host in hosts {
+        let code = status_code(port, "GET", "/status", Some(host), &good);
+        assert_eq!(code, 403, "Host {host:?}");
+    }
+    // No `Host` at all is not a local host either.
+    assert_eq!(status_code(port, "GET", "/status", None, &good), 403, "no Host header");
+
+    // None of the refused requests reached a route: nothing was built, no
+    // task was created, and the refused /shutdown did not stop the service.
+    let st = s.status();
+    assert!(states(&st).values().all(|v| v == "never_built"), "a refused /build ran: {st}");
+    assert_eq!(st["jobs"].as_array().map(Vec::len), Some(0), "a refused request made a job: {st}");
+    assert!(!p.path("tasks").exists(), "a refused POST /task created a task");
+    assert!(alive(s.pid));
+}
+
+#[test]
+fn ag_hd_03_the_token_is_random_per_start() {
+    // "a random token": two services never share one, and a restart of the
+    // same project gets a new one (ADR-0055: "generates a random token per
+    // start"). 32 hex characters are 128 bits; equal tokens by chance are
+    // impossible in practice.
+    let (p1, p2) = (Project::new("hd-03-a", ""), Project::new("hd-03-b", ""));
+    let first = Service::start(&p1);
+    let second = Service::start(&p2);
+    let t1 = service_token(&p1.dir).expect("token of the first service");
+    let t2 = service_token(&p2.dir).expect("token of the second service");
+    assert_ne!(t1, t2, "two services share a token");
+    // A token opens only its own service.
+    let host = format!("127.0.0.1:{}", second.port);
+    let foreign = [("X-Qoob3d-Token", t1.as_str())];
+    assert_eq!(status_code(second.port, "GET", "/status", Some(&host), &foreign), 403);
+
+    // Drop shuts the first service down and waits for it.
+    drop(first);
+    assert!(service_json(&p1.dir).is_none(), "the first service stopped");
+    let again = Service::start(&p1);
+    let t3 = service_token(&p1.dir).expect("token after the restart");
+    assert_ne!(t3, t1, "the restarted service reuses its token");
+    again.status();
+}
+
+#[test]
+fn ag_hd_03_cli_and_app_client_send_the_token() {
+    // "The app client, CLI and MCP send the token." (MCP: every test of
+    // tests/mcp.rs runs against a service that requires it.)
+    let p = Project::abcd("hd-03-clients");
+    let s = Service::start(&p);
+    assert!(service_token(&p.dir).is_some(), "the service requires a token");
+    let before = service_json(&p.dir);
+
+    let out = cli(&p.dir, &["build", "--wait", "60"], Duration::from_secs(90));
+    assert_eq!(out.code, Some(0), "{}{}", out.stdout, out.stderr);
+    assert_eq!(built_cached(&out.envelope()["result"]).0, set(&["A", "B", "C", "D"]));
+    let out = cli(&p.dir, &["status"], Duration::from_secs(90));
+    assert_eq!(out.code, Some(0), "{}{}", out.stdout, out.stderr);
+    assert_eq!(out.envelope()["ok"], json!(true));
+    // A client that is refused must not "repair" the situation by starting
+    // a second service.
+    assert_eq!(service_json(&p.dir), before, "the CLI used the running service");
+
+    check_live_client(&p, &s.status());
+    assert_eq!(service_json(&p.dir), before, "the app client used the running service");
+}
+
+/// V imports its module through a variable: line 3 is
+/// `    import m as form;`, `import` at column 5, its path `m` at column 12.
+const PART_VAR_IMPORT: &str = "\
+part(\"V\", #{}, |deps| {
+    let m = \"lib/form\";
+    import m as form;
+    form::make()
+});
+";
+
+#[test]
+fn ag_hd_06_import_through_a_variable_is_a_script_error_never_a_stale_part() {
+    // AG-HD-06: "`import` with a non-literal path is refused with a script
+    // error at its position." The scan for the cache key reads literal
+    // paths only; before R5 such a part built, its key ignored the module,
+    // and after a change of the module `/status` still said `current` and
+    // `/build` served the old geometry from the cache.
+    let p = Project::new("hd-06", "[workers]\ncount = 1\n");
+    p.write("parts/v.rhai", PART_VAR_IMPORT)
+        .write("lib/form.rhai", LIB_FORM)
+        .write("parts/normal.rhai", NORMAL);
+    let s = Service::start(&p);
+    s.build(None);
+    // form::make() becomes box(4, 4, 5) = 80 mm³ instead of 64 mm³.
+    p.write("lib/form.rhai", "fn make() { box(4, 4, 5) }\n");
+    let st = s.status();
+    let r = s.build(None);
+    let v = &r["parts"]["V"];
+    if let Some(volume) = v["volume"].as_f64() {
+        assert_rel(volume, 80.0, VOL, "V is served with stale geometry (the old module)");
+    }
+    if states(&st)["V"] == "current" {
+        let measured = s.post("/measure", &json!({"a": "V"})).envelope();
+        let volume = measured["result"]["volume"].as_f64().unwrap_or(f64::NAN);
+        assert_rel(volume, 80.0, VOL, "V is `current` with stale geometry (the old module)");
+    }
+
+    // The requirement itself: a script error at the import.
+    assert_eq!(error_kind(&r, "V"), "script", "{r}");
+    let e = &v["error"];
+    assert_eq!(e["file"], json!("parts/v.rhai"), "{e}");
+    assert_eq!(e["line"].as_u64(), Some(3), "{e}");
+    // Column of the statement or of its path expression (7 further).
+    assert!([Some(5), Some(12)].contains(&e["column"].as_u64()), "{e}");
+    assert_eq!(states(&s.status())["V"], "failed");
+    // Other parts are unaffected.
+    assert_normal_builds(&s);
+}
+
+#[test]
+fn ag_hd_06_import_through_a_variable_at_the_top_level_is_a_load_error_with_position() {
+    // The same at the top level of a part file, which discovery evaluates:
+    // the error names the file and the line of the import (line 2).
+    let p = Project::new("hd-06-top", "[workers]\ncount = 1\n");
+    p.write(
+        "parts/top.rhai",
+        "let m = \"lib/form\";\nimport m as form;\npart(\"T\", #{}, |deps| form::make());\n",
+    )
+    .write("lib/form.rhai", LIB_FORM);
+    let s = Service::start(&p);
+    let r = s.get("/status");
+    let v = r.envelope();
+    assert!(r.text().contains("parts/top.rhai"), "/status names the file: {v}");
+    assert!(r.text().contains("line 2") || r.text().contains("\"line\":2"), "and the line: {v}");
+    let parts = v["result"]["parts"].as_array().cloned().unwrap_or_default();
+    assert!(!parts.iter().any(|part| part["state"] == json!("current")), "{v}");
+    let r = s.post("/build", &json!({"parts": null, "wait_s": WAIT_S}));
+    let v = r.envelope();
+    let built = v["result"]["built"].as_array().is_some_and(|b| !b.is_empty());
+    assert!(!built, "a part with a non-literal import was built: {v}");
+}
+
+#[test]
+fn ag_hd_06_changing_a_module_resolved_inside_a_module_rebuilds_the_part() {
+    // "Changing any resolved module rebuilds the part": P imports lib/shape,
+    // whose function imports lib/dims when it runs. P = box(W, 4, 4) with
+    // W = 4 → 64 mm³; W = 6 → 96 mm³.
+    let p = Project::new("hd-06-nested", "[workers]\ncount = 1\n");
+    p.write(
+        "parts/p.rhai",
+        "import \"lib/shape\" as shape;\npart(\"P\", #{}, |deps| shape::make());\n",
+    )
+    .write(
+        "lib/shape.rhai",
+        "fn make() {\n    import \"lib/dims\" as dims;\n    box(dims::W, 4, 4)\n}\n",
+    )
+    .write("lib/dims.rhai", "export const W = 4;\n")
+    .write("parts/normal.rhai", NORMAL);
+    let s = Service::start(&p);
+    let r = s.build(None);
+    assert_built(&r, "P", "built", 64.0, ([-2.0, -2.0, 0.0], [2.0, 2.0, 4.0]));
+    assert_eq!(built_cached(&s.build(None)), (set(&[]), set(&["Normal", "P"])));
+    let key = key_of(&s.status(), "P");
+
+    p.write("lib/dims.rhai", "export const W = 6;\n");
+    assert_eq!(states(&s.status())["P"], "outdated", "the module P resolved changed");
+    let r = s.build(None);
+    assert_eq!(built_cached(&r), (set(&["P"]), set(&["Normal"])));
+    assert_built(&r, "P", "built", 96.0, ([-3.0, -2.0, 0.0], [3.0, 2.0, 4.0]));
+    assert_ne!(key_of(&s.status(), "P"), key);
+}
+
+#[test]
+fn ag_hd_10_status_lists_at_most_the_20_newest_jobs_with_their_kind() {
+    // AG-HD-10: "`/status` lists at most the 20 newest jobs, each with
+    // `kind` (`build`, `check`, `run`)". 25 builds, then one check run and
+    // one throwaway script: 27 jobs at least.
+    let p = Project::new("hd-10", "[workers]\ncount = 1\n");
+    p.write("parts/normal.rhai", NORMAL).write(
+        "checks/normal.rhai",
+        "check(\"normal_volume\", || {\n    \
+         expect_near(part(\"Normal\").volume(), 6000, 0.001, \"volume\");\n});\n",
+    );
+    let s = Service::start(&p);
+    for _ in 0..25 {
+        s.build(Some(&["Normal"]));
+    }
+    let jobs = s.status()["jobs"].as_array().cloned().expect("jobs");
+    assert_eq!(jobs.len(), 20, "25 builds were made, the 20 newest are listed");
+    assert!(jobs.iter().all(|j| j["kind"] == json!("build")), "{jobs:?}");
+
+    let checked = s.post("/check", &json!({"names": null, "wait_s": WAIT_S})).ok();
+    assert_eq!(checked["passed"].as_u64(), Some(1), "{checked}");
+    s.post("/run", &json!({"source": "print(1);", "wait_s": WAIT_S})).ok();
+    let st = s.status();
+    let jobs = st["jobs"].as_array().cloned().expect("jobs");
+    assert_eq!(jobs.len(), 20, "{st}");
+    let mut kinds = std::collections::BTreeMap::new();
+    for j in &jobs {
+        assert!(j.get("id").is_some() && j["state"].is_string(), "job entry {j}");
+        let kind = j["kind"].as_str().unwrap_or_else(|| panic!("job without kind: {j}"));
+        assert!(["build", "check", "run"].contains(&kind), "kind of {j}");
+        *kinds.entry(kind.to_owned()).or_insert(0) += 1;
+    }
+    // The newest jobs are the check and the script; they pushed old builds out.
+    assert_eq!(kinds.get("run"), Some(&1), "the newest job is listed: {st}");
+    assert!(kinds.get("check").is_some_and(|n| *n >= 1), "the check job is listed: {st}");
+    assert!(kinds.get("build").is_some_and(|n| *n <= 18), "old builds were dropped: {st}");
+    let ids: BTreeSet<String> = jobs.iter().map(|j| j["id"].to_string()).collect();
+    assert_eq!(ids.len(), jobs.len(), "no job twice: {st}");
 }
