@@ -1,0 +1,72 @@
+{
+  "fall_kransaeule_alle_kanten_runden": {
+    "ok": true,
+    "gueltig": true,
+    "volumen": 2575.2505732712193,
+    "koerper": 1,
+    "flaechen": 40,
+    "dauer_s": 1.63903852500016
+  },
+  "fall_reling_knoten_runden": {
+    "ok": true,
+    "gueltig": true,
+    "volumen": 143.9840963205772,
+    "koerper": 1,
+    "flaechen": 47,
+    "kanten": 26,
+    "dauer_s": 2.1362814680001065
+  },
+  "fall_treppe_wangenkanten_runden": {
+    "ok": false,
+    "fehler": "ValueError: Failed creating a fillet with radius of 0.2, try a smaller value or use max_fillet() to find the largest valid fillet radius",
+    "spur": "illet(kanten, 0.2)), kanten=len(kanten))\n                            ^^^^^^^^^^^^^^^^^^^\n  File \"/home/user/qoob3d/werft/.venv/lib/python3.12/site-packages/build123d/operations_generic.py\", line 449, in fillet\n    new_part = target.fillet(radius, list(object_list))\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/user/qoob3d/werft/.venv/lib/python3.12/site-packages/build123d/topology/three_d.py\", line 371, in fillet\n    raise ValueError(\nValueError: Failed creating a fillet with radius of 0.2, try a smaller value or use max_fillet() to find the largest valid fillet radius\n",
+    "dauer_s": 2.6825109230003363
+  },
+  "fall_rumpf_schale": {
+    "ok": false,
+    "fehler": "RuntimeError: offset Error, an alternative kind may resolve this error",
+    "spur": "\n    return _ergebnis(offset(rumpf, amount=-20, openings=[deck]))\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/user/qoob3d/werft/.venv/lib/python3.12/site-packages/build123d/operations_generic.py\", line 699, in offset\n    solid.offset_3d(openings_in_this_solid, amount, kind=kind).fix()\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/user/qoob3d/werft/.venv/lib/python3.12/site-packages/build123d/topology/three_d.py\", line 679, in offset_3d\n    raise RuntimeError(\nRuntimeError: offset Error, an alternative kind may resolve this error\n",
+    "dauer_s": 1.6443570739997995
+  },
+  "fall_loft_rumpf_schale": {
+    "ok": false,
+    "fehler": "RuntimeError: offset Error, an alternative kind may resolve this error",
+    "spur": "\n    erg = _ergebnis(offset(rumpf, amount=-1.2, openings=[oben]))\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/user/qoob3d/werft/.venv/lib/python3.12/site-packages/build123d/operations_generic.py\", line 699, in offset\n    solid.offset_3d(openings_in_this_solid, amount, kind=kind).fix()\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/user/qoob3d/werft/.venv/lib/python3.12/site-packages/build123d/topology/three_d.py\", line 679, in offset_3d\n    raise RuntimeError(\nRuntimeError: offset Error, an alternative kind may resolve this error\n",
+    "dauer_s": 1.7320967360001305
+  },
+  "fall_loft_rumpf_halbiert_schale": {
+    "ok": true,
+    "gueltig": true,
+    "volumen": 8.496155194761388e-14,
+    "koerper": 1,
+    "flaechen": 5,
+    "dauer_s": 6.327794229999654
+  },
+  "fall_200_bohrungen": {
+    "ok": true,
+    "gueltig": true,
+    "volumen": 55758.84991765415,
+    "koerper": 1,
+    "flaechen": 206,
+    "soll": 55758.84991765378,
+    "abw_prozent": 6.654976544017082e-13,
+    "einzeln_s": 5.9640603520001605,
+    "einmal_s": 0.3038401079998039,
+    "einmal_volumen": 55758.84991765415,
+    "dauer_s": 8.06042629500007
+  },
+  "fall_zu_grosser_radius": {
+    "ok": true,
+    "erwarteter_fehler": "ValueError: Failed creating a fillet with radius of 0.8, try a smaller value or use max_fillet() to find the largest valid fillet radius",
+    "dauer_s": 1.6305125520002548
+  },
+  "fall_rohr_enger_radius": {
+    "ok": true,
+    "gueltig": true,
+    "volumen": 9.988374102368866,
+    "koerper": 1,
+    "flaechen": 5,
+    "hinweis": "Erwartet: ungueltig oder Fehler; ok=True hiesse, der Kern merkt es nicht",
+    "dauer_s": 1.7667569380000714
+  }
+}
