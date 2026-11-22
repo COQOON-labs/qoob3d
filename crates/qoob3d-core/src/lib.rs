@@ -9,6 +9,7 @@ pub mod generate;
 pub mod mesh;
 pub mod printer;
 pub mod profile;
+pub mod project;
 pub mod qmesh;
 pub mod stl;
 

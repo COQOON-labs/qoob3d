@@ -40,6 +40,8 @@ Document model and shared pure data types. Used by all other crates.
   checks sizes against the input before allocating.
 - `src/stl.rs`: binary STL import (WA-LV-03): exact welding, normals from the winding,
   feature edges > 30° plus open edges.
+- `src/project/`: script project folder (AG-PJ-01..04, ADR-0053): `qoob3d.toml`, `values/*.toml`
+  with mandatory source/status, imports (never outside the project), build graph, cache key.
 - `tests/fixtures/`: `format_v1.qbd`, `format_v2.qbd` (all feature and curve kinds).
 - `src/printer/mod.rs`: `PrinterProfile`, `BedGeometry` (ADR-0021).
 - `src/printer/data.rs`: **generated** by `cargo xtask printers` from OrcaSlicer profiles –
