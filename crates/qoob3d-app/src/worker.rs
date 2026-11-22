@@ -99,6 +99,8 @@ pub(crate) enum ErrorKind {
     /// Service requests: unknown endpoint, part or job; malformed request.
     NotFound,
     BadRequest,
+    /// No or a wrong token, an `Origin` header or a foreign `Host` (AG-HD-03).
+    Forbidden,
     /// Review or save refused: parts or checks are not green (AG-TK-04, AG-SV-07).
     Gate,
     /// `git` failed or the project is no repository (AG-SV-07).
@@ -216,11 +218,6 @@ fn build(request: &Request, name: &str) -> Result<(String, Value), PartError> {
     let source = std::fs::read(dir.join(&file)).map_err(|e| io_error(&file, e))?;
     let text = String::from_utf8(source.clone())
         .map_err(|e| load_error(format!("{}: {e}", file.display())))?;
-    let modules = project::resolve_imports(dir, &file)
-        .map_err(load_error)?
-        .iter()
-        .map(|m| std::fs::read(dir.join(m)).map_err(|e| io_error(m, e)))
-        .collect::<Result<Vec<_>, _>>()?;
     let deps: BTreeMap<String, PathBuf> =
         request.deps.iter().map(|(n, p)| (n.clone(), dir.join(p))).collect();
     let dependency_keys = depends
@@ -244,6 +241,13 @@ fn build(request: &Request, name: &str) -> Result<(String, Value), PartError> {
     let Some((_, shape)) = output.shapes.iter().find(|(n, _)| n == name) else {
         return Err(load_error(format!("{}: part {name:?} was not built", file.display())));
     };
+    // AG-HD-06: the key hashes the modules the engine resolved in this run,
+    // not what a scan of the source guesses.
+    let modules = output
+        .modules_read
+        .iter()
+        .map(|m| std::fs::read(dir.join(m)).map_err(|e| io_error(m, e)))
+        .collect::<Result<Vec<_>, _>>()?;
     let key = project::cache_key(&KeyInputs {
         program_version: key_version(&request.mesh),
         part_file: source,
@@ -274,11 +278,12 @@ fn build(request: &Request, name: &str) -> Result<(String, Value), PartError> {
         "solids": shape.solid_count(),
         "duration_s": start.elapsed().as_secs_f64(),
         "values_read": output.values_read,
+        "modules_read": output.modules_read,
         "warnings": warnings,
     });
     // The `.json` comes last and atomically: it marks the entry complete.
     let json_path = base.with_extension("json");
-    crate::service::write_atomic(&json_path, meta.to_string().as_bytes())
+    qoob3d_core::fs::write_atomic(&json_path, meta.to_string().as_bytes())
         .map_err(|e| io_error(&json_path, e))?;
     Ok((key, meta))
 }

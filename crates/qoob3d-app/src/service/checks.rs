@@ -8,8 +8,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use qoob3d_core::project::{self, KeyInputs};
 use qoob3d_core::tasks::GateInput;
@@ -29,9 +29,13 @@ pub(crate) struct CheckSource {
     fingerprint: String,
 }
 
-/// Declared check names by file, valid while the fingerprint is unchanged.
+/// Declared check names by file (or why the file does not load), valid
+/// while the fingerprint is unchanged.
 #[derive(Default)]
-pub(crate) struct CheckFiles(Mutex<HashMap<PathBuf, (String, Vec<String>)>>);
+pub(crate) struct CheckFiles(Mutex<HashMap<PathBuf, (String, Declared)>>);
+
+/// The check names a file declares, or why it does not load.
+type Declared = Result<Vec<String>, String>;
 
 /// The last run of a check.
 pub(crate) struct CheckRecord {
@@ -66,18 +70,18 @@ pub(crate) fn load(dir: &Path, cache: &CheckFiles) -> Result<Vec<CheckSource>, S
             values_read: Vec::new(),
             dependency_keys: Vec::new(),
         });
-        let mut cache = cache.0.lock().expect("check file cache lock poisoned");
+        let mut cache = cache.0.lock().unwrap_or_else(PoisonError::into_inner);
         let names = match cache.get(&file) {
             Some((f, names)) if *f == fingerprint => names.clone(),
             _ => {
-                let names: Vec<String> =
-                    declarations(dir, &file, &text)?.checks.into_iter().map(|c| c.name).collect();
+                let names = declarations(dir, &file, &text)
+                    .map(|o| o.checks.into_iter().map(|c| c.name).collect::<Vec<_>>());
                 cache.insert(file.clone(), (fingerprint.clone(), names.clone()));
                 names
             }
         };
         drop(cache);
-        for name in names {
+        for name in names? {
             if let Some(first) = sources.iter().find(|s| s.name == name) {
                 return Err(format!(
                     "check {name:?} is declared in {} and in {}",
@@ -205,10 +209,17 @@ impl Service {
     }
 
     /// What the review gate looks at (AG-TK-04): the state of every part
-    /// and the result of every check that is neither stale nor missing.
-    pub(crate) fn gate_input(&self) -> GateInput {
+    /// and the result of every check that is neither stale nor missing;
+    /// and the load errors of the part and check files (AG-HD-09).
+    pub(crate) fn gate_input(&self) -> (GateInput, Vec<String>) {
         let snapshot = Snapshot::load(&self.dir, &self.declarations);
-        let sources = load(&self.dir, &self.check_files).unwrap_or_default();
+        let sources = load(&self.dir, &self.check_files);
+        let load_errors: Vec<String> = [snapshot.as_ref().err(), sources.as_ref().err()]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+        let sources = sources.unwrap_or_default();
         let mut st = self.lock();
         let parts = snapshot
             .map(|s| views(&self.dir, &s, &mut st.records))
@@ -224,6 +235,6 @@ impl Service {
                 _ => None,
             })
             .collect();
-        GateInput { parts, checks }
+        (GateInput { parts, checks }, load_errors)
     }
 }

@@ -1,7 +1,8 @@
 //! Text of a task file (AG-TK-01): header between two `+++` lines, body, log.
 //!
 //! Reading never normalizes and writing only patches: an update replaces the
-//! value of the header's `state` line and appends to the end, so everything
+//! value of the header's `state` line, rewrites the `parts`/`checks` lines
+//! when they are bound (AG-TK-05) and appends to the end, so everything else
 //! the human wrote stays byte-identical (AG-TK-03).
 
 use std::ops::Range;
@@ -9,7 +10,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use super::{LogEntry, Role, Task, TaskError, TaskKind, TaskState};
+use super::{Change, LogEntry, Role, Task, TaskError, TaskKind, TaskState};
 
 /// The heading that ends the body and starts the log.
 const LOG_HEADING: &str = "## Log";
@@ -206,32 +207,61 @@ fn with_state(header: &str, state: TaskState) -> String {
     }
 }
 
-/// `text` (a task file that parses) with the state set to `state` if given
-/// and one log entry appended; the `## Log` section is created when missing.
-/// Everything else is copied byte for byte.
+/// The header lines holding the array `key` (several when the array is
+/// spread over lines): from the line `key = …` to the first line where the
+/// lines so far are complete TOML.
+fn list_lines(header: &str, key: &str) -> Option<Range<usize>> {
+    let is_key = |line: &str| {
+        line.trim_start().strip_prefix(key).is_some_and(|rest| rest.trim_start().starts_with('='))
+    };
+    let (start, _) = lines(header).find(|(_, line)| is_key(line))?;
+    lines(&header[start..])
+        .map(|(offset, line)| start..start + offset + line.len())
+        .find(|range| header[range.clone()].parse::<toml::Table>().is_ok())
+}
+
+/// `header` with the array `key` written as one line `key = [..]`, in place
+/// of the old lines or at the end of the header.
+fn with_list(header: &str, key: &str, items: &[String]) -> String {
+    let line = format!("{key} = {}\n", toml_strings(items));
+    match list_lines(header, key) {
+        Some(old) => format!("{}{line}{}", &header[..old.start], &header[old.end..]),
+        None => format!("{header}{line}"),
+    }
+}
+
+/// `text` (a task file that parses) with the lists and the state of `change`
+/// set where given and the log entries appended; the `## Log` section is
+/// created when missing. Everything else is copied byte for byte.
 pub(super) fn updated(
     text: &str,
-    state: Option<TaskState>,
+    change: &Change<'_>,
     date: &str,
     role: Role,
-    entry: &str,
+    entries: &[String],
 ) -> String {
     let Some(layout) = layout(text) else {
         return text.to_owned();
     };
-    let mut out = String::with_capacity(text.len() + entry.len() + 64);
-    out.push_str(&text[..layout.header.start]);
-    match state {
-        Some(state) => out.push_str(&with_state(&text[layout.header.clone()], state)),
-        None => out.push_str(&text[layout.header.clone()]),
+    let mut header = text[layout.header.clone()].to_owned();
+    if let Some(parts) = change.parts {
+        header = with_list(&header, "parts", parts);
     }
-    out.push_str(&text[layout.header.end..]);
+    if let Some(checks) = change.checks {
+        header = with_list(&header, "checks", checks);
+    }
+    if let Some(state) = change.state {
+        header = with_state(&header, state);
+    }
+    let mut out = format!("{}{header}{}", &text[..layout.header.start], &text[layout.header.end..]);
     if !out.ends_with('\n') {
         out.push('\n');
     }
     if layout.log_heading.is_none() {
         out.push_str(&format!("\n{LOG_HEADING}\n"));
     }
-    out.push_str(&format!("- {date} {}: {entry}\n", role.as_str()));
+    for entry in entries {
+        out.push_str(&format!("- {date} {}: {entry}\n", role.as_str()));
+    }
     out
 }

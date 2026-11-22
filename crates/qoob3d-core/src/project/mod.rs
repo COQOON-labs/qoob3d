@@ -22,6 +22,13 @@ pub use values::{Value, ValueStatus, Values};
 /// Name of the project file in the project root.
 const CONFIG_FILE: &str = "qoob3d.toml";
 
+/// Longest time limit of a job: one day (AG-HD-01).
+const MAX_TIME_S: f64 = 86400.0;
+
+/// Largest memory limit: 1 TiB, so the value in bytes fits every integer type
+/// it meets (AG-HD-01).
+const MAX_MEMORY_MB: u64 = 1_048_576;
+
 /// Why a project could not be loaded. Every variant names the file, id or
 /// parts concerned, so the message alone locates the problem.
 #[derive(Debug, thiserror::Error)]
@@ -149,7 +156,8 @@ impl Config {
     /// Reads `<root>/qoob3d.toml`; a folder without it is no project.
     ///
     /// # Errors
-    /// Missing or malformed file, units other than mm, non-positive limits,
+    /// Missing or malformed file, units other than mm, limits that are not
+    /// positive or above their maximum (AG-HD-01),
     /// `[cache] keep = 0`, non-positive mesh settings.
     pub fn load(root: &Path) -> Result<Self, ProjectError> {
         let file = PathBuf::from(CONFIG_FILE);
@@ -163,12 +171,17 @@ impl Config {
         if raw.project.units != "mm" {
             return Err(invalid("units must be \"mm\""));
         }
-        // TOML allows `nan`, which no comparison catches.
-        if raw.limits.time_s.is_nan() || raw.limits.time_s <= 0.0 {
-            return Err(invalid("[limits] time_s must be greater than 0"));
+        // TOML allows `nan` and `inf`; a job thread must be able to wait for
+        // the limit (AG-HD-01).
+        let time_s = raw.limits.time_s;
+        if !(time_s.is_finite() && time_s > 0.0 && time_s <= MAX_TIME_S) {
+            return Err(invalid("[limits] time_s must be greater than 0 and at most 86400"));
         }
-        if raw.limits.memory_mb == 0 {
-            return Err(invalid("[limits] memory_mb must be greater than 0"));
+        if !(1..=MAX_MEMORY_MB).contains(&raw.limits.memory_mb) {
+            return Err(invalid("[limits] memory_mb must be greater than 0 and at most 1048576"));
+        }
+        if raw.workers.recycle_mb > MAX_MEMORY_MB {
+            return Err(invalid("[workers] recycle_mb must be at most 1048576"));
         }
         if raw.workers.count == 0 {
             return Err(invalid("[workers] count must be greater than 0"));

@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::cli::{ProjectCommand as Command, TaskCommand};
-use crate::live::{Client, ProjectDir, START_TIMEOUT, service_command_from_env};
+use crate::live::{Client, ProjectDir, START_TIMEOUT, segment, service_command_from_env};
 
 /// Requests that do not wait for builds.
 const QUICK: Duration = Duration::from_secs(30);
@@ -36,20 +36,6 @@ pub fn run(command: &Command) -> i32 {
         .is_some_and(|parts| parts.values().any(|p| p["state"] == "failed"));
     let check_failed = envelope["result"]["failed"].as_u64() > Some(0);
     if envelope["ok"] == json!(true) && !part_failed && !check_failed { 0 } else { 1 }
-}
-
-/// `text` as one segment of a request path: everything but unreserved
-/// characters is percent-encoded, so ids never change the path.
-pub(crate) fn segment(text: &str) -> String {
-    let mut out = String::new();
-    for b in text.bytes() {
-        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
-            out.push(char::from(b));
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
 }
 
 fn task(client: &Client, command: &TaskCommand) -> anyhow::Result<Value> {

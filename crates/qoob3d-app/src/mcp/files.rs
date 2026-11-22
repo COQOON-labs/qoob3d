@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::service::write_atomic;
+use qoob3d_core::fs::write_atomic;
 
 const FOLDERS: [&str; 5] = ["parts", "lib", "values", "checks", "tasks"];
 const CONFIG: &str = "qoob3d.toml";

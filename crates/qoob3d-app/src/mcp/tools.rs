@@ -9,8 +9,7 @@ use serde_json::{Map, Value, json};
 
 use super::resources::{GUIDE, api_reference};
 use super::{INVALID_PARAMS, RpcError, Server, files, render};
-use crate::live::{Client, START_TIMEOUT, service_command_from_env};
-use crate::service_cli::segment;
+use crate::live::{Client, START_TIMEOUT, segment, service_command_from_env};
 
 /// Requests that do not wait for workers.
 const QUICK: Duration = Duration::from_secs(30);
@@ -84,7 +83,8 @@ const TOOLS: [Tool; 19] = [
     ),
     (
         "task_get",
-        "One task with its body (the human's words) and its log.",
+        "One task with its body (the human's words) and its log, and `project`: the part and \
+         check names of the project with their states.",
         &[("id", Kind::Text, true, "Task id, e.g. T-0001.")],
     ),
     (
@@ -100,14 +100,28 @@ const TOOLS: [Tool; 19] = [
     ),
     (
         "task_update",
-        "Change the state of a task and/or add a note to its log, as the agent. Allowed: open -> \
-         in_progress, in_progress -> blocked (note = your question), blocked -> in_progress, \
-         in_progress -> review (gate: parts current, checks passed), review -> in_progress. Only \
-         the human sets done or rejected.",
+        "Change the state of a task, bind parts and checks to it and/or add a note to its log, \
+         as the agent. Allowed: open -> in_progress, in_progress -> blocked (note = your \
+         question), blocked -> in_progress, in_progress -> review (gate: at least one part and \
+         one check bound, parts current, checks passed; an idea needs a note only), review -> \
+         in_progress. Only the human sets done or rejected.",
         &[
             ("id", Kind::Text, true, "Task id, e.g. T-0001."),
             ("state", Kind::AgentState, false, "The new state."),
             ("note", Kind::Text, false, "Log entry; required for blocked (the question)."),
+            (
+                "parts",
+                Kind::Names,
+                false,
+                "Replaces the parts bound to the task (the ones you built for it); only while \
+                 the task is open or in_progress.",
+            ),
+            (
+                "checks",
+                Kind::Names,
+                false,
+                "Replaces the checks bound to the task; only while it is open or in_progress.",
+            ),
         ],
     ),
     (
@@ -166,9 +180,17 @@ const TOOLS: [Tool; 19] = [
     (
         "render",
         "Render built parts (stale ones are built first) as a PNG image, orthographic, camera \
-         fitted to the parts. Returns the image and its path under out/renders/.",
+         fitted to the parts. Returns the image, its path under out/renders/, the bbox of the \
+         rendered parts and per view where the camera looks along and which axis is up.",
         &[
             ("view", Kind::Text, false, "iso (default), front, back, left, right, top or bottom."),
+            (
+                "views",
+                Kind::Names,
+                false,
+                "2 to 6 views, e.g. [\"iso\", \"front\", \"top\"]: one contact sheet image with \
+                 a label per view instead of `view`; width and height are the size of one view.",
+            ),
             ("parts", Kind::Names, false, "Part names; all parts without it."),
             ("width", Kind::Integer, false, "Image width in pixels (default 1024)."),
             ("height", Kind::Integer, false, "Image height in pixels (default 768)."),
@@ -300,16 +322,14 @@ impl Server {
                 )),
             },
             "task_list" => self.task_list(args["state"].as_str()),
-            "task_get" => {
-                self.service("GET", &format!("/task/{}", segment(text("id"))), None, QUICK)
-            }
+            "task_get" => self.task_get(text("id")),
             "task_create" => {
                 let body = pick(args, &["title", "kind", "body", "parts", "checks"]);
                 self.service("POST", "/task", Some(body), QUICK)
             }
             "task_update" => {
                 // Whatever the caller sends: over MCP the role is the agent.
-                let mut body = pick(args, &["state", "note"]);
+                let mut body = pick(args, &["state", "note", "parts", "checks"]);
                 body["role"] = json!("agent");
                 self.service("POST", &format!("/task/{}", segment(text("id"))), Some(body), QUICK)
             }
@@ -336,10 +356,12 @@ impl Server {
                 self.service("POST", "/export", Some(pick(args, &["parts", "format"])), LONG)
             }
             "save_state" => self.service("POST", "/save", Some(pick(args, &["message"])), LONG),
-            "render" => match render::render(dir, args) {
-                Ok((result, png)) => Ok(Reply::Image(result, png)),
-                Err(message) => Err(Refusal("render", message)),
-            },
+            "render" => {
+                let (mut result, png) =
+                    render::render(dir, args).map_err(|message| Refusal("render", message))?;
+                result["bbox"] = self.bbox(&args["parts"])?;
+                Ok(Reply::Image(result, png))
+            }
             _ => Err(bad_request(format!("the tool {name:?} is not implemented"))),
         }
     }
@@ -365,6 +387,48 @@ impl Server {
         body["wait_s"] = json!(wait_s);
         let wait = Duration::try_from_secs_f64(wait_s).unwrap_or(Duration::ZERO);
         self.service("POST", path, Some(body), wait + WAIT_MARGIN)
+    }
+
+    /// `GET /task/<id>` plus `project`: names and states of the parts and
+    /// checks from `/status`, so a new task needs no status call (AG-MC-10).
+    fn task_get(&self, id: &str) -> Result<Reply, Refusal> {
+        let mut reply = self.service("GET", &format!("/task/{}", segment(id)), None, QUICK)?;
+        if let Reply::Envelope(envelope) = &mut reply
+            && envelope["ok"] == json!(true)
+            && let Reply::Envelope(status) = self.service("GET", "/status", None, QUICK)?
+        {
+            let states = |key: &str| -> Vec<Value> {
+                let list = status["result"][key].as_array().into_iter().flatten();
+                list.map(|e| json!({"name": e["name"], "state": e["state"]})).collect()
+            };
+            envelope["result"]["project"] =
+                json!({"parts": states("parts"), "checks": states("checks")});
+        }
+        Ok(reply)
+    }
+
+    /// The bounding box `{min, max, size}` of `parts` (all if null) from
+    /// their build results (AG-MC-09); the render has just built them.
+    fn bbox(&self, parts: &Value) -> Result<Value, Refusal> {
+        let body = json!({"parts": parts, "wait_s": DEFAULT_WAIT_S});
+        let Reply::Envelope(built) = self.waiting("/build", body)? else {
+            return Ok(Value::Null);
+        };
+        let selected = |name: &String| parts.as_array().is_none_or(|p| p.contains(&json!(name)));
+        let results = built["result"]["parts"].as_object().into_iter().flatten();
+        let boxes: Vec<&Value> =
+            results.filter(|(name, _)| selected(name)).map(|(_, part)| &part["bbox"]).collect();
+        let corner = |key: &str, pick: fn(f64, f64) -> f64| -> Option<Vec<f64>> {
+            let axis = |i: usize| {
+                boxes.iter().map(|b| b[key][i].as_f64()).reduce(|a, b| Some(pick(a?, b?)))?
+            };
+            (0..3).map(axis).collect()
+        };
+        let (Some(min), Some(max)) = (corner("min", f64::min), corner("max", f64::max)) else {
+            return Ok(Value::Null);
+        };
+        let size: Vec<f64> = min.iter().zip(&max).map(|(lo, hi)| hi - lo).collect();
+        Ok(json!({"min": min, "max": max, "size": size}))
     }
 
     /// `GET /tasks`, filtered by `state` here.

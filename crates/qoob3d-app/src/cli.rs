@@ -94,6 +94,10 @@ pub enum Command {
         out: PathBuf,
         #[arg(long, value_enum, default_value_t = View::Iso)]
         view: View,
+        /// Several views, comma separated: one contact sheet with a label
+        /// per view instead of `--view` (AG-MC-09).
+        #[arg(long, value_enum, value_delimiter = ',', conflicts_with = "view")]
+        views: Vec<View>,
         /// Image size, e.g. 1024x768.
         #[arg(long, value_parser = parse_size, default_value = "1024x768")]
         size: [u32; 2],

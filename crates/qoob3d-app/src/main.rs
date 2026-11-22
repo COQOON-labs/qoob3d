@@ -22,8 +22,11 @@ fn main() -> anyhow::Result<()> {
         Some(cli::Command::Worker) => return worker::run(),
         Some(cli::Command::Bench { dir }) => std::process::exit(service::bench(dir)),
         Some(cli::Command::Init { dir }) => return init::run(dir),
-        Some(cli::Command::RenderProject { dir, out, view, size, parts }) => {
-            return project_render::run(dir, out, (*view).into(), *size, parts);
+        Some(cli::Command::RenderProject { dir, out, view, views, size, parts }) => {
+            let one = [*view];
+            let views = if views.is_empty() { &one[..] } else { views };
+            let views: Vec<_> = views.iter().map(|v| (*v).into()).collect();
+            return project_render::run(dir, out, &views, *size, parts);
         }
         Some(cli::Command::Mcp { dir }) => return mcp::run(dir.as_deref()),
         Some(cli::Command::Project(command)) => std::process::exit(service_cli::run(command)),

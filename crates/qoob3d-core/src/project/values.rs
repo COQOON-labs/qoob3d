@@ -1,5 +1,6 @@
 //! Target values `values/*.toml` (AG-PJ-03): every entry has a value, a
-//! source and a status, so each number in a model is traceable.
+//! source and a status, so each number in a model is traceable; `unit` is
+//! optional documentation (AG-MC-07).
 //!
 //! An entry is a table holding at least one non-table key; tables holding
 //! only tables are namespaces. `[crane.column]` therefore is the entry
@@ -26,6 +27,8 @@ pub struct Value {
     pub value: serde_json::Value,
     pub source: String,
     pub status: ValueStatus,
+    /// Documentation of the unit, e.g. `"mm"`; scripts get the bare value.
+    pub unit: Option<String>,
     /// File that defines the value, relative to the project root.
     pub file: PathBuf,
 }
@@ -110,7 +113,9 @@ fn collect(
 
 /// Reads one entry; the error is the message without file and id.
 fn entry(file: &Path, id: String, table: &toml::Table) -> Result<Value, String> {
-    if let Some(key) = table.keys().find(|k| !matches!(k.as_str(), "value" | "source" | "status")) {
+    if let Some(key) =
+        table.keys().find(|k| !matches!(k.as_str(), "value" | "source" | "status" | "unit"))
+    {
         return Err(format!("unknown key {key:?}"));
     }
     let value = table.get("value").ok_or("missing value")?;
@@ -131,5 +136,10 @@ fn entry(file: &Path, id: String, table: &toml::Table) -> Result<Value, String> 
             ));
         }
     };
-    Ok(Value { id, value, source, status, file: file.to_owned() })
+    let unit = match table.get("unit").map(toml::Value::as_str) {
+        None => None,
+        Some(Some(unit)) => Some(unit.to_owned()),
+        Some(None) => return Err("unit must be a string".to_owned()),
+    };
+    Ok(Value { id, value, source, status, unit, file: file.to_owned() })
 }

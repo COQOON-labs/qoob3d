@@ -42,7 +42,9 @@ kernel connection come together.
   `build`, `status`, `export`, `values`, `bench`, `check`, `task list|show|new|set`, `init`,
   `render-project`, `mcp`.
 - `src/service.rs` + `src/service/`: `qoob3d serve` (AG-SV-01, ADR-0053): routes and envelope,
-  single instance via `.qoob3d/service.lock`; `http.rs` minimal server side HTTP; `jobs.rs` job
+  single instance via `.qoob3d/service.lock`; **every request needs the token of this start**
+  (`service.json`, header `X-Qoob3d-Token`), a local `Host` and no `Origin`, else 403 before
+  routing (`Service::allowed`, AG-HD-03, ADR-0055); `http.rs` minimal server side HTTP; `jobs.rs` job
   queue and parallel part scheduling, cache hits; `pool.rs` warm workers, time/memory/crash
   limits, replacement, recycling above `[workers] recycle_mb` (AG-PF-03); `snapshot.rs` part
   discovery (`PartMode::Declare`, no OCCT), keys, states, cache eviction (`evict`, AG-PF-04);
@@ -56,25 +58,43 @@ kernel connection come together.
   `/run` and `/measure`; `save.rs` `/save` (`git` executable, never adds `.qoob3d/`, `out/`);
   `tasks.rs` `/tasks`, `/task/<id>` on `qoob3d_core::tasks` (`role` is required). `/status`
   stays lock-short: check states come from records, never from a run.
+  R5 hardening (agent.md §6.1): job threads run inside `jobs::caught` (a panic is a `crash`
+  of that job or part) and hold workers through `pool::Lease` (dropped without `give`, the
+  worker is replaced); locks recover from poisoning; `/status` lists the 20 newest jobs with
+  `kind`; task create/update/bind run under `Service::task_writes`; `POST /task/<id>` takes
+  `parts`/`checks` (binding) and reports load errors of part and check files as the gate
+  error; `/save` needs the project folder to be the Git top level and commits with the
+  pathspec of the add. The cache key hashes the modules the engine resolved in the last
+  build (`modules_read` in the cache `.json`, `snapshot::Reads`), the literal scan only
+  before the first build (AG-HD-06). Declaration results are cached per file **including
+  load errors**, so a file that hits the discovery limits is not evaluated on every poll.
 - `src/worker.rs`: `qoob3d worker` (AG-PJ-05): request/answer types of the JSON-line protocol
   (answers start with `{"job":`, foreign stdout lines from OCCT are skipped), builds one part and
   writes its cache entry, writes STEP. Exits when stdin closes. `worker/probe.rs`: `Probe`
   requests that write nothing: one check, a throwaway script, measures of one or two parts.
 - `src/service_cli.rs`: CLI clients against the service of the working directory (AG-SV-02),
-  `check` (exit 1 if a check failed) and `task …` as role human; `segment` percent-encodes ids.
+  `check` (exit 1 if a check failed) and `task …` as role human.
 - `src/mcp.rs` + `src/mcp/`: `qoob3d mcp [DIR]` (AG-MC-01..06): JSON-RPC 2.0 over stdio, one
   line per message, synchronous; **stdout carries only protocol messages** (never `println!`
   there, logs go to stderr). `tools.rs` tool table (schemas) and dispatch: service tools hand
   the service envelope through (service started on demand, `task_update` always as role
-  agent); `files.rs` confined file tools (AG-MC-03: allowed folders and extensions, 1 MiB, any
+  agent, also binds `parts`/`checks`; `task_get` adds `project` from `/status`; `render` adds
+  the `bbox` from the build results); `files.rs` confined file tools (AG-MC-03: allowed folders and extensions, 1 MiB, any
   symlink on the path refused, task files read-only); `render.rs` runs `render-project` as a
-  child process and returns the PNG as base64; `resources.rs` embeds `docs/script-api.md`,
-  `mcp/guide.md` (at most 60 lines) and the kernel example scripts.
-- `src/init.rs`: `qoob3d init <DIR>` (AG-SV-08). `src/project_render.rs`: `qoob3d
-  render-project` (AG-RD-01): build through the service, load meshes, render orthographic.
+  child process and returns the PNG as base64 (`views`: 2 to 6 views as one contact sheet;
+  the view table there must match `guide.md`); `resources.rs` embeds `docs/script-api.md`,
+  `mcp/guide.md` (at most 120 lines; its minimal project is built by `tests/mcp_guide.rs`)
+  and the kernel example scripts.
+- `src/init.rs`: `qoob3d init <DIR>` (AG-SV-08); writes `lib/examples/` from the master
+  copies in `docs/script-api/lib/examples/`. `src/project_render.rs`: `qoob3d
+  render-project` (AG-RD-01): build through the service, load meshes, render orthographic;
+  `--views a,b` gives a contact sheet (`project_render/sheet.rs`, built-in 5x7 label font).
 - `src/live.rs`: script project shown live (W1, ADR-0053, docs/requirements/project-app.md):
-  `ProjectDir`, minimal std::net HTTP `Client` (service start via `QOOB3D_SERVICE_CMD`), `Poller`
-  thread (HTTP never on the UI thread), view model `Live`, headless `build_and_load`.
+  `ProjectDir`, minimal std::net HTTP `Client` (service start via `QOOB3D_SERVICE_CMD`; port
+  and token from `service.json`, read again when the service does not answer; `segment`
+  percent-encodes names in paths), `Poller` thread (HTTP never on the UI thread; retries a
+  failed first connection every interval), view model `Live`, headless `build_and_load`.
+  **Every client of the service goes through `live::Client`**, so it sends the token.
 - `src/app.rs`: `QoobApp` (eframe::App), `Mode` (model/plane pick/sketch), dialogs
   (unsaved, error), keyboard shortcuts, kernel polling, status line.
 - `src/panels.rs`: toolbar (file, undo/redo, sketch tools, CREATE, CONSTRUCT,
@@ -100,10 +120,11 @@ kernel connection come together.
 - `tests/service.rs`: service, workers, cache and CLI against the real binary (R2/R3).
 - `tests/agent.rs`, `tests/mcp.rs` (+ `tests/common/agent.rs`): R4 against the real binary:
   checks, tasks, run, measure, save, init, render-project; the MCP server and the acceptance.
+  `tests/mcp_guide.rs`: guide, served reference, contact sheet, `task_get` (R5).
 - `tests/perf.rs`: recycling, cache eviction, tessellation settings, bench (P1, AG-PF-03..06).
 - `tests/modeling.rs`: every shape end to end through the UI, export, editing; screenshots
   of dialog and model (60 Hz steps for double-clicks).
 
 ## Relevant ADRs
 
-ADR-0005, ADR-0008, ADR-0013, ADR-0015, ADR-0017, ADR-0018, ADR-0019, ADR-0020, ADR-0021, ADR-0022, ADR-0023, ADR-0027, ADR-0029, ADR-0033, ADR-0034, ADR-0035, ADR-0053, ADR-0054
+ADR-0005, ADR-0008, ADR-0013, ADR-0015, ADR-0017, ADR-0018, ADR-0019, ADR-0020, ADR-0021, ADR-0022, ADR-0023, ADR-0027, ADR-0029, ADR-0033, ADR-0034, ADR-0035, ADR-0053, ADR-0054, ADR-0055

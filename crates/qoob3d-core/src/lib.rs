@@ -5,6 +5,7 @@
 pub mod document;
 pub mod export;
 pub mod expr;
+pub mod fs;
 pub mod generate;
 pub mod mesh;
 pub mod printer;

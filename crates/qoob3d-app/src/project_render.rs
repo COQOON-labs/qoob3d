@@ -1,7 +1,10 @@
 //! `qoob3d render-project` (AG-RD-01, ADR-0054): what an agent looks at.
 //! The service (started on demand) builds the selected parts if they are
 //! stale; their cached meshes are rendered headless, orthographic, with the
-//! camera fitted to them.
+//! camera fitted to them. Several views become one contact sheet with a
+//! label per view (AG-MC-09).
+
+mod sheet;
 
 use std::path::Path;
 use std::time::Duration;
@@ -17,7 +20,8 @@ use crate::live::{BUILD_TIMEOUT, Client, ProjectDir, START_TIMEOUT, service_comm
 /// Margin over the build wait for the answer of the build request.
 const ANSWER_MARGIN: Duration = Duration::from_secs(30);
 
-/// Renders `parts` (all if empty) of the project in `dir` into the PNG `out`.
+/// Renders `parts` (all if empty) of the project in `dir` into the PNG `out`:
+/// one view as it is, several as a contact sheet of cells of `size`.
 ///
 /// # Errors
 /// No project, no service, an unknown or failed part (named), nothing to
@@ -25,7 +29,7 @@ const ANSWER_MARGIN: Duration = Duration::from_secs(30);
 pub fn run(
     dir: &Path,
     out: &Path,
-    view: ViewPreset,
+    views: &[ViewPreset],
     size: [u32; 2],
     parts: &[String],
 ) -> anyhow::Result<()> {
@@ -54,12 +58,23 @@ pub fn run(
     if meshes.is_empty() {
         bail!("no part of {} to render", project.dir().display());
     }
-    let view = RenderView {
-        preset: view,
+    let view = |preset: &ViewPreset| RenderView {
+        preset: *preset,
         orthographic: true,
         zoom: 1.0,
         printer: None,
         build_volume: false,
     };
-    headless_render::run(out, view, size, Some(ShapeMesh::merge(&meshes)))
+    let scene = ShapeMesh::merge(&meshes);
+    if let [single] = views {
+        return headless_render::run(out, view(single), size, Some(scene));
+    }
+    let render_views: Vec<RenderView> = views.iter().map(view).collect();
+    let images = headless_render::render_views(&scene, &render_views, size)?;
+    let labels: Vec<&str> = views.iter().map(|v| v.name()).collect();
+    let (sheet_size, sheet) = sheet::compose(&images, &labels, size);
+    headless_render::write_png(out, sheet_size, &sheet)
+        .with_context(|| format!("writing {}", out.display()))?;
+    println!("wrote {} (contact sheet of {})", out.display(), labels.join(", "));
+    Ok(())
 }

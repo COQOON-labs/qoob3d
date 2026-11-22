@@ -4,14 +4,15 @@
 //! time, resident memory and cancellation. A worker that exceeds a limit is
 //! killed, one that dies on its own is a crash; both are replaced, so the
 //! pool keeps its size. A worker that is too large after its job is replaced
-//! as well (recycling, AG-PF-03).
+//! as well (recycling, AG-PF-03). A job thread that panics while it holds a
+//! worker gives it up through [`Lease`], so the pool never shrinks (AG-HD-01).
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use qoob3d_core::project::Limits;
@@ -65,6 +66,36 @@ impl Worker {
     fn end(mut self) -> Option<ExitStatus> {
         self.child.kill().ok();
         self.child.wait().ok()
+    }
+}
+
+/// A busy worker on loan to one `run`. Dropped without `give` (an early
+/// return or a panic of the job thread), the worker is replaced: its state
+/// is unknown.
+struct Lease<'a> {
+    pool: &'a Pool,
+    worker: Option<Worker>,
+}
+
+impl Lease<'_> {
+    /// The worker is idle again.
+    fn give(mut self) {
+        if let Some(worker) = self.worker.take() {
+            self.pool.give(worker);
+        }
+    }
+
+    /// Ends the worker and puts a fresh one in its place.
+    fn retire(mut self) -> Option<ExitStatus> {
+        self.worker.take().and_then(|worker| self.pool.retire(worker))
+    }
+}
+
+impl Drop for Lease<'_> {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            self.pool.retire(worker);
+        }
     }
 }
 
@@ -133,14 +164,19 @@ impl Pool {
         limits: &Limits,
         cancel: &AtomicBool,
     ) -> Result<Answer, PartError> {
-        let mut worker = self.take(cancel)?;
-        let line = serde_json::to_string(request).expect("a request serialises");
+        let mut lease = Lease { pool: self, worker: Some(self.take(cancel)?) };
+        let Some(worker) = lease.worker.as_mut() else {
+            return Err(crash(None));
+        };
+        let line = serde_json::to_string(request)
+            .map_err(|e| PartError::new(ErrorKind::BadRequest, format!("request: {e}")))?;
         if writeln!(worker.stdin, "{line}").and_then(|()| worker.stdin.flush()).is_err() {
-            let status = self.retire(worker);
-            return Err(crash(status));
+            return Err(crash(lease.retire()));
         }
         let start = Instant::now();
-        let time_limit = Duration::from_secs_f64(limits.time_s);
+        // The config bounds `time_s` (AG-HD-01); a value that still is no
+        // duration counts as no time at all.
+        let time_limit = Duration::try_from_secs_f64(limits.time_s).unwrap_or(Duration::ZERO);
         loop {
             match worker.answers.recv_timeout(POLL) {
                 Ok(answer) if answer.job == request.job => {
@@ -149,45 +185,41 @@ impl Pool {
                     if rss > self.recycle_mb {
                         tracing::info!(rss, limit = self.recycle_mb, "recycling a worker");
                         self.recycled.fetch_add(1, Ordering::SeqCst);
-                        self.retire(worker);
+                        lease.retire();
                     } else {
-                        self.give(worker);
+                        lease.give();
                     }
                     return Ok(answer);
                 }
                 Ok(_) => continue,
-                Err(RecvTimeoutError::Disconnected) => {
-                    let status = self.retire(worker);
-                    return Err(crash(status));
-                }
+                Err(RecvTimeoutError::Disconnected) => return Err(crash(lease.retire())),
                 Err(RecvTimeoutError::Timeout) => {}
             }
             let rss = resident_mb(worker.child.id());
             self.peak_mb.fetch_max(rss.unwrap_or(0), Ordering::SeqCst);
-            let error = if cancel.load(Ordering::SeqCst) {
-                PartError::new(ErrorKind::Cancelled, "cancelled")
-            } else if start.elapsed() >= time_limit {
+            // Dropping the lease on these returns kills and replaces the worker.
+            if cancel.load(Ordering::SeqCst) {
+                return Err(PartError::new(ErrorKind::Cancelled, "cancelled"));
+            }
+            if start.elapsed() >= time_limit {
                 let message = format!("time limit of {} s exceeded, worker killed", limits.time_s);
-                PartError::new(ErrorKind::TimeLimit, message)
-            } else if let Some(rss) = rss
+                return Err(PartError::new(ErrorKind::TimeLimit, message));
+            }
+            if let Some(rss) = rss
                 && rss > limits.memory_mb
             {
                 let message = format!(
                     "memory limit of {} MB exceeded ({rss} MB resident), worker killed",
                     limits.memory_mb
                 );
-                PartError::new(ErrorKind::MemoryLimit, message)
-            } else {
-                continue;
-            };
-            self.retire(worker);
-            return Err(error);
+                return Err(PartError::new(ErrorKind::MemoryLimit, message));
+            }
         }
     }
 
     /// An idle, live worker; waits while all are busy.
     fn take(&self, cancel: &AtomicBool) -> Result<Worker, PartError> {
-        let mut idle = self.idle.lock().expect("pool lock poisoned");
+        let mut idle = self.idle.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
             if cancel.load(Ordering::SeqCst) || self.closed.load(Ordering::SeqCst) {
                 return Err(PartError::new(ErrorKind::Cancelled, "cancelled"));
@@ -198,7 +230,7 @@ impl Pool {
                 if !matches!(w.child.try_wait(), Ok(None)) {
                     drop(idle);
                     self.retire(w);
-                    idle = self.idle.lock().expect("pool lock poisoned");
+                    idle = self.idle.lock().unwrap_or_else(PoisonError::into_inner);
                     continue;
                 }
                 return Ok(w);
@@ -206,12 +238,13 @@ impl Pool {
             if self.total.load(Ordering::SeqCst) == 0 {
                 return Err(PartError::new(ErrorKind::Crash, "no worker process could be started"));
             }
-            idle = self.available.wait_timeout(idle, POLL).expect("pool lock poisoned").0;
+            idle =
+                self.available.wait_timeout(idle, POLL).unwrap_or_else(PoisonError::into_inner).0;
         }
     }
 
     fn give(&self, worker: Worker) {
-        self.idle.lock().expect("pool lock poisoned").push(worker);
+        self.idle.lock().unwrap_or_else(PoisonError::into_inner).push(worker);
         self.busy.fetch_sub(1, Ordering::SeqCst);
         self.available.notify_one();
     }
@@ -238,7 +271,7 @@ impl Pool {
     /// cancellation. Waits up to `wait` for them.
     pub(crate) fn close(&self, wait: Duration) {
         self.closed.store(true, Ordering::SeqCst);
-        let idle = std::mem::take(&mut *self.idle.lock().expect("pool lock poisoned"));
+        let idle = std::mem::take(&mut *self.idle.lock().unwrap_or_else(PoisonError::into_inner));
         self.total.fetch_sub(idle.len(), Ordering::SeqCst);
         for w in idle {
             w.end();

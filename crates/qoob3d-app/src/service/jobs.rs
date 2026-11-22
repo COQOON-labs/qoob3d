@@ -4,9 +4,10 @@
 //! complete cache entry is `cached`, not built again.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -60,6 +61,15 @@ pub(crate) struct Job {
 }
 
 impl Job {
+    /// `build`, `check` or `run` (AG-HD-10).
+    pub(crate) fn kind(&self) -> &'static str {
+        match self.work {
+            Work::Build(_) => "build",
+            Work::Check(_) => "check",
+            Work::Run(_) => "run",
+        }
+    }
+
     /// `GET /job/<id>` (§3.1).
     pub(crate) fn json(&self, id: u64) -> Value {
         let mut j = json!({
@@ -130,6 +140,19 @@ impl Outcome {
     }
 }
 
+/// Runs `work`; a panic in it becomes an error of kind `crash` instead of
+/// taking the thread (and with it the job queue) down (AG-HD-01).
+fn caught<T>(work: impl FnOnce() -> T) -> Result<T, PartError> {
+    std::panic::catch_unwind(AssertUnwindSafe(work)).map_err(|panic| {
+        let text = panic
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        PartError::new(ErrorKind::Crash, format!("the job thread panicked: {text}"))
+    })
+}
+
 impl Service {
     /// Queues a build of `parts` (`None` = all) and returns the job id.
     ///
@@ -186,7 +209,7 @@ impl Service {
             if left.is_zero() {
                 return false;
             }
-            st = self.changed.wait_timeout(st, left).expect("service lock poisoned").0;
+            st = self.changed.wait_timeout(st, left).unwrap_or_else(PoisonError::into_inner).0;
         }
     }
 
@@ -228,7 +251,7 @@ impl Service {
                         self.changed.notify_all();
                         break id;
                     }
-                    st = self.changed.wait(st).expect("service lock poisoned");
+                    st = self.changed.wait(st).unwrap_or_else(PoisonError::into_inner);
                 }
             };
             self.run_job(id);
@@ -241,14 +264,15 @@ impl Service {
         else {
             return;
         };
-        let output = match &work {
+        let output = caught(|| match &work {
             Work::Run(source) => self.run_script(source, &cancel).map(Some),
             Work::Build(parts) => self.build_job(id, parts.as_deref(), &cancel).map(|_| None),
             Work::Check(names) => self
                 .build_job(id, None, &cancel)
                 .and_then(|snapshot| self.run_checks(&snapshot, names.as_deref(), &cancel))
                 .map(Some),
-        };
+        })
+        .flatten();
         let mut st = self.lock();
         if let Some(job) = st.jobs.get_mut(&id) {
             match output {
@@ -306,7 +330,7 @@ impl Service {
                     let dependency_keys: Vec<String> =
                         part.depends.iter().map(|d| done[d.as_str()].0.clone()).collect();
                     let reads = record(&mut self.lock().records, &self.dir, &part.name).reads();
-                    let key = snapshot.key(part, &reads, dependency_keys);
+                    let key = snapshot.key(&self.dir, part, &reads, dependency_keys);
                     let failed_dependency = part.depends.iter().find(|d| !done[d.as_str()].1);
                     let outcome = if cancel.load(Ordering::SeqCst) {
                         Outcome::Cancelled
@@ -337,12 +361,18 @@ impl Service {
                         };
                         let tx = tx.clone();
                         scope.spawn(move || {
-                            let outcome =
-                                Outcome::from_worker(self.pool.run(&request, limits, cancel));
-                            if let Outcome::Built { key, .. } = &outcome {
-                                let keep = snapshot.config.cache.keep;
-                                evict(&self.dir, &part.name, key, keep);
-                            }
+                            // Caught here, so the part fails and the loop
+                            // below still gets its message (AG-HD-01).
+                            let outcome = caught(|| {
+                                let run = self.pool.run(&request, limits, cancel);
+                                let outcome = Outcome::from_worker(run);
+                                if let Outcome::Built { key, .. } = &outcome {
+                                    let keep = snapshot.config.cache.keep;
+                                    evict(&self.dir, &part.name, key, keep);
+                                }
+                                outcome
+                            })
+                            .unwrap_or_else(Outcome::Failed);
                             tx.send((part, key, outcome)).ok();
                         });
                         running += 1;

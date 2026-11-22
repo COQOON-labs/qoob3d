@@ -4,9 +4,9 @@
 //! - Corners are welded by exact position (`-0.0` counts as `0.0`), so the
 //!   triangles share edges again.
 //! - Normals come from the winding, never from the file (many writers store
-//!   zeros). A corner's normal averages the triangles around it that lie
-//!   within the feature angle of its own triangle, so flat faces stay flat and
-//!   smooth surfaces stay smooth; a corner gets one output vertex per normal.
+//!   zeros). The triangles around a corner are grouped by the feature angle
+//!   and a group shares the average normal, so flat faces stay flat and
+//!   smooth surfaces stay smooth; a corner gets one output vertex per group.
 //! - Feature edges: welded edges whose two triangle normals differ by more
 //!   than [`FEATURE_ANGLE_DEG`], plus open and non-manifold edges.
 //!
@@ -100,15 +100,19 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-/// Per-corner normals averaged over the triangles around the corner that
-/// lie within the feature angle; one output vertex per (corner, normal).
+/// Per-corner normals: the triangles around a corner are grouped once (a
+/// triangle joins the first group whose first triangle lies within the
+/// feature angle, so the work per corner is valence × groups, not valence²)
+/// and every group averages its triangles; one output vertex per group, in
+/// order of first use.
 fn shaded_faces(
     points: &[[f32; 3]],
     triangles: &[[u32; 3]],
     normals: &[[f32; 3]],
     cos_limit: f32,
 ) -> TriMesh {
-    // Triangles around each welded corner, as offsets into one flat list.
+    // Triangle corners around each welded corner, as offsets into one flat
+    // list; `slot_of` finds a triangle corner in it again.
     let mut first = vec![0u32; points.len() + 1];
     for &i in triangles.iter().flatten() {
         first[i as usize + 1] += 1;
@@ -118,34 +122,47 @@ fn shaded_faces(
     }
     let mut fill = first.clone();
     let mut around = vec![0u32; 3 * triangles.len()];
+    let mut slot_of = vec![0u32; 3 * triangles.len()];
     for (t, tri) in triangles.iter().enumerate() {
-        for &i in tri {
+        for (k, &i) in tri.iter().enumerate() {
             around[fill[i as usize] as usize] = t as u32;
+            slot_of[3 * t + k] = fill[i as usize];
             fill[i as usize] += 1;
+        }
+    }
+
+    // Groups of all corners in one list: (first triangle, summed normal).
+    let mut groups: Vec<(u32, [f32; 3])> = Vec::new();
+    let mut group_of = vec![0u32; around.len()];
+    for corner in first.windows(2) {
+        let start = groups.len();
+        for slot in corner[0] as usize..corner[1] as usize {
+            let t = around[slot] as usize;
+            let found = groups[start..]
+                .iter()
+                .position(|(seed, _)| dot(normals[*seed as usize], normals[t]) >= cos_limit);
+            let group = start
+                + found.unwrap_or_else(|| {
+                    groups.push((t as u32, [0.0; 3]));
+                    groups.len() - 1 - start
+                });
+            let n = area_normal(points, triangles[t]);
+            groups[group].1 = std::array::from_fn(|k| groups[group].1[k] + n[k]);
+            group_of[slot] = group as u32;
         }
     }
 
     let mut out =
         TriMesh { indices: Vec::with_capacity(3 * triangles.len()), ..TriMesh::default() };
-    let mut vertex: HashMap<(u32, [u32; 3]), u32> = HashMap::new();
-    for (t, tri) in triangles.iter().enumerate() {
-        for &i in tri {
-            let range = first[i as usize] as usize..first[i as usize + 1] as usize;
-            let mut sum = [0.0f32; 3];
-            for &other in &around[range] {
-                if dot(normals[other as usize], normals[t]) >= cos_limit {
-                    let n = area_normal(points, triangles[other as usize]);
-                    sum = std::array::from_fn(|k| sum[k] + n[k]);
-                }
-            }
-            let n = normalize(sum);
-            let index = *vertex.entry((i, n.map(f32::to_bits))).or_insert_with(|| {
-                out.positions.push(points[i as usize]);
-                out.normals.push(n);
-                out.positions.len() as u32 - 1
-            });
-            out.indices.push(index);
-        }
+    let mut vertex: Vec<Option<u32>> = vec![None; groups.len()];
+    for (&i, &slot) in triangles.iter().flatten().zip(&slot_of) {
+        let group = group_of[slot as usize] as usize;
+        let index = *vertex[group].get_or_insert_with(|| {
+            out.positions.push(points[i as usize]);
+            out.normals.push(normalize(groups[group].1));
+            out.positions.len() as u32 - 1
+        });
+        out.indices.push(index);
     }
     out
 }

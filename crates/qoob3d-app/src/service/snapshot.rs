@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use qoob3d_core::project::{self, Config, Graph, KeyInputs, PartDecl, Values};
 use qoob3d_kernel::script::{self, DeclaredPart, PartMode, RunOptions, RunOutput};
@@ -48,9 +48,14 @@ pub(crate) fn declarations(dir: &Path, file: &Path, text: &str) -> Result<RunOut
     script::run(text, &options).map_err(|e| format!("{}: {e}", file.display()))
 }
 
+/// What a part file declares, or why it does not load.
+type Declared = Result<Vec<DeclaredPart>, String>;
+
 /// Declarations by file, valid while the file and module bytes are unchanged.
+/// A load error is kept as well: `/status` is polled, and a file that runs
+/// into the limits of discovery (AG-HD-02) must not cost that run every time.
 #[derive(Default)]
-pub(crate) struct Declarations(Mutex<HashMap<PathBuf, (String, Vec<DeclaredPart>)>>);
+pub(crate) struct Declarations(Mutex<HashMap<PathBuf, (String, Declared)>>);
 
 /// One declared part with the inputs of its cache key.
 pub(crate) struct PartSource {
@@ -124,22 +129,32 @@ impl Snapshot {
         self.parts.iter().find(|p| p.name == name)
     }
 
-    /// Cache key of `part` with the current values of the ids `reads` and
-    /// the keys of its dependencies (§2.1).
+    /// Cache key of `part` with the current values and module files that
+    /// its last build read (`reads`) and the keys of its dependencies (§2.1).
+    /// Before the first build the modules are the literal imports found by
+    /// the scan (AG-HD-06).
     pub(crate) fn key(
         &self,
+        dir: &Path,
         part: &PartSource,
-        reads: &[String],
+        reads: &Reads,
         dependency_keys: Vec<String>,
     ) -> String {
         let values_read = reads
+            .values
             .iter()
             .map(|id| (id.clone(), self.values.get(id).map_or(Value::Null, |v| v.value.clone())))
             .collect();
+        // A module that is gone hashes as empty: the key changes, the part
+        // is outdated and its build reports the missing file.
+        let modules = reads.modules.as_ref().map_or_else(
+            || part.modules.clone(),
+            |files| files.iter().map(|m| std::fs::read(dir.join(m)).unwrap_or_default()).collect(),
+        );
         project::cache_key(&KeyInputs {
             program_version: key_version(&self.config.mesh),
             part_file: part.source.clone(),
-            modules: part.modules.clone(),
+            modules,
             values_read,
             dependency_keys,
         })
@@ -188,7 +203,7 @@ fn declared(
     source: &[u8],
     modules: &[Vec<u8>],
     cache: &Declarations,
-) -> Result<Vec<DeclaredPart>, String> {
+) -> Declared {
     let fingerprint = project::cache_key(&KeyInputs {
         program_version: String::new(),
         part_file: source.to_vec(),
@@ -196,16 +211,17 @@ fn declared(
         values_read: Vec::new(),
         dependency_keys: Vec::new(),
     });
-    let mut cache = cache.0.lock().expect("declaration cache lock poisoned");
+    let mut cache = cache.0.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some((f, parts)) = cache.get(file)
         && *f == fingerprint
     {
-        return Ok(parts.clone());
+        return parts.clone();
     }
-    let text = std::str::from_utf8(source).map_err(|e| format!("{}: {e}", file.display()))?;
-    let parts = declare(dir, file, text)?;
+    let parts = std::str::from_utf8(source)
+        .map_err(|e| format!("{}: {e}", file.display()))
+        .and_then(|text| declare(dir, file, text));
     cache.insert(file.to_owned(), (fingerprint, parts.clone()));
-    Ok(parts)
+    parts
 }
 
 // ------------------------------------------------------------------ state
@@ -221,14 +237,31 @@ pub(crate) struct Record {
     scanned: bool,
 }
 
+/// What the last successful build of a part read: the inputs of its cache
+/// key that only a run can know.
+#[derive(Debug, Default)]
+pub(crate) struct Reads {
+    /// Value ids.
+    values: Vec<String>,
+    /// Module files the engine resolved, relative to the project; `None`
+    /// before the first build.
+    modules: Option<Vec<PathBuf>>,
+}
+
 impl Record {
-    /// Value ids the last successful build read.
-    pub(crate) fn reads(&self) -> Vec<String> {
-        self.built
-            .as_ref()
-            .and_then(|(_, meta)| meta["values_read"].as_object())
+    /// What the last successful build read.
+    pub(crate) fn reads(&self) -> Reads {
+        let Some((_, meta)) = &self.built else {
+            return Reads::default();
+        };
+        let values = meta["values_read"]
+            .as_object()
             .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let modules = meta["modules_read"]
+            .as_array()
+            .map(|files| files.iter().filter_map(Value::as_str).map(PathBuf::from).collect());
+        Reads { values, modules }
     }
 }
 
@@ -334,7 +367,7 @@ pub(crate) fn views(
             .iter()
             .map(|d| keys.get(d.as_str()).cloned().unwrap_or_default())
             .collect();
-        let expected = snapshot.key(part, &r.reads(), dependency_keys);
+        let expected = snapshot.key(dir, part, &r.reads(), dependency_keys);
         let mut error = None;
         let state = if r.failed.as_ref().is_some_and(|(k, _)| *k == expected) {
             error = r.failed.as_ref().map(|(_, e)| e.clone());

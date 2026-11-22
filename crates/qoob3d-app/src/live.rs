@@ -5,7 +5,9 @@
 //!
 //! HTTP is a minimal HTTP/1.1 client over `std::net` (localhost only, one
 //! request per connection, `Connection: close`, timeouts) and never runs on
-//! the UI thread (WA-LV-01).
+//! the UI thread (WA-LV-01). Port and token of the service come from
+//! `.qoob3d/service.json` (ADR-0055) and are read again whenever the service
+//! does not answer (AG-HD-05).
 
 use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
@@ -59,15 +61,35 @@ impl ProjectDir {
         self.dir.join(".qoob3d").join("service.json")
     }
 
-    /// Port from `.qoob3d/service.json`, `None` if missing or invalid.
-    fn port(&self) -> Option<u16> {
-        #[derive(Deserialize)]
-        struct ServiceJson {
-            port: u16,
-        }
+    /// Port and token from `.qoob3d/service.json`, `None` if missing or
+    /// invalid.
+    fn service(&self) -> Option<ServiceJson> {
         let text = std::fs::read_to_string(self.service_json()).ok()?;
-        serde_json::from_str::<ServiceJson>(&text).ok().map(|s| s.port)
+        serde_json::from_str(&text).ok()
     }
+}
+
+/// What the service wrote into `.qoob3d/service.json` (ADR-0055).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct ServiceJson {
+    port: u16,
+    /// Sent as `X-Qoob3d-Token` with every request (AG-HD-03).
+    #[serde(default)]
+    token: Option<String>,
+}
+
+/// `text` as one segment of a request path (AG-HD-04): everything but
+/// unreserved characters is percent-encoded, so a name never changes the path.
+pub(crate) fn segment(text: &str) -> String {
+    let mut out = String::new();
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// The program that starts the service (WA-OP-02): the words of
@@ -117,7 +139,8 @@ pub struct PartMesh {
 /// Connection to a running service on 127.0.0.1.
 #[derive(Debug, Clone)]
 pub struct Client {
-    addr: SocketAddr,
+    project: ProjectDir,
+    service: ServiceJson,
 }
 
 impl Client {
@@ -147,9 +170,18 @@ impl Client {
 
     /// The service from `service.json`, if it answers in time.
     fn probe(project: &ProjectDir) -> Option<Self> {
-        let client = Self { addr: SocketAddr::from((Ipv4Addr::LOCALHOST, project.port()?)) };
+        let client = Self { project: project.clone(), service: project.service()? };
         let response = client.request("GET", "/status", None, STATUS_TIMEOUT).ok()?;
         envelope::<StatusResult>(&response).ok().map(|_| client)
+    }
+
+    /// Reads `service.json` again (AG-HD-05): a restarted service has
+    /// another port and token.
+    fn reload(&mut self) {
+        if let Some(service) = self.project.service().filter(|s| *s != self.service) {
+            tracing::info!(port = service.port, "project service restarted, reconnecting");
+            self.service = service;
+        }
     }
 
     /// `GET /status` (WA-PR-01).
@@ -160,7 +192,8 @@ impl Client {
 
     /// `GET /mesh/<name>` (WA-PR-02).
     pub fn mesh(&self, name: &str) -> anyhow::Result<PartMesh> {
-        let response = self.request("GET", &format!("/mesh/{name}"), None, REQUEST_TIMEOUT)?;
+        let response =
+            self.request("GET", &format!("/mesh/{}", segment(name)), None, REQUEST_TIMEOUT)?;
         if response.code != 200 {
             envelope::<serde_json::Value>(&response)?;
             bail!("mesh of {name}: HTTP {}", response.code);
@@ -197,15 +230,17 @@ impl Client {
         body: Option<&[u8]>,
         timeout: Duration,
     ) -> anyhow::Result<Response> {
-        let mut stream = TcpStream::connect_timeout(&self.addr, timeout)
-            .with_context(|| format!("connecting to the service at {}", self.addr))?;
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, self.service.port));
+        let mut stream = TcpStream::connect_timeout(&addr, timeout)
+            .with_context(|| format!("connecting to the service at {addr}"))?;
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
         let body = body.unwrap_or_default();
+        let token = self.service.token.as_deref().unwrap_or_default();
         let head = format!(
-            "{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\
-             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-            self.addr,
+            "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nX-Qoob3d-Token: {token}\r\n\
+             Connection: close\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\n\r\n",
             body.len()
         );
         stream.write_all(head.as_bytes())?;
@@ -345,30 +380,37 @@ pub struct Poller {
 impl Poller {
     /// Polls `client` every `interval`.
     pub fn spawn(client: Client, interval: Duration) -> Self {
-        Self::start(move || Some(client), interval, || {})
+        let mut client = Some(client);
+        Self::start(move || client.take(), interval, || {})
     }
 
     /// For the app (WA-OP-02/03): connects (starting the service if needed)
     /// and requests one build of all parts in the background, then polls
     /// every [`POLL_INTERVAL`]. `notify` runs after every update (repaint).
+    ///
+    /// A failed first connection is retried every interval (AG-HD-05); the
+    /// retries only look for a running service, they start none.
     pub fn open(project: ProjectDir, cmd: Vec<String>, notify: impl Fn() + Send + 'static) -> Self {
-        let connect = move || match Client::connect(&project, &cmd, START_TIMEOUT) {
-            Ok(client) => {
-                if let Err(err) = client.build_all() {
-                    tracing::warn!("build request failed: {err:#}");
-                }
-                Some(client)
+        let mut first = true;
+        let connect = move || {
+            let client = if std::mem::take(&mut first) {
+                Client::connect(&project, &cmd, START_TIMEOUT)
+                    .map_err(|err| tracing::error!("project service: {err:#}"))
+                    .ok()?
+            } else {
+                Client::probe(&project)?
+            };
+            if let Err(err) = client.build_all() {
+                tracing::warn!("build request failed: {err:#}");
             }
-            Err(err) => {
-                tracing::error!("project service: {err:#}");
-                None
-            }
+            Some(client)
         };
         Self::start(connect, POLL_INTERVAL, notify)
     }
 
+    /// `connect` is called every `interval` until it returns a client.
     fn start(
-        connect: impl FnOnce() -> Option<Client> + Send + 'static,
+        mut connect: impl FnMut() -> Option<Client> + Send + 'static,
         interval: Duration,
         notify: impl Fn() + Send + 'static,
     ) -> Self {
@@ -382,11 +424,19 @@ impl Poller {
                     notify();
                     sent
                 };
-                let Some(client) = connect() else {
-                    send(Update::Unreachable);
-                    return;
+                let mut reported = false;
+                let client = loop {
+                    if let Some(client) = connect() {
+                        break client;
+                    }
+                    if !std::mem::replace(&mut reported, true) && !send(Update::Unreachable) {
+                        return;
+                    }
+                    if stopped.recv_timeout(interval) != Err(RecvTimeoutError::Timeout) {
+                        return;
+                    }
                 };
-                poll_loop(&client, interval, &stopped, send);
+                poll_loop(client, interval, &stopped, send);
             })
             .expect("spawning the live poller thread");
         Self { updates, _stop: stop }
@@ -398,9 +448,10 @@ impl Poller {
 }
 
 /// One status request per `interval`; meshes only for parts whose key
-/// differs from the key of the mesh last loaded (WA-LV-02).
+/// differs from the key of the mesh last loaded (WA-LV-02). When the service
+/// does not answer, `service.json` is read again (AG-HD-05).
 fn poll_loop(
-    client: &Client,
+    mut client: Client,
     interval: Duration,
     stopped: &Receiver<()>,
     send: impl Fn(Update) -> bool,
@@ -441,6 +492,7 @@ fn poll_loop(
                 }
             }
             Err(err) => {
+                client.reload();
                 if reachable {
                     tracing::warn!("project service not reachable: {err:#}");
                     reachable = false;

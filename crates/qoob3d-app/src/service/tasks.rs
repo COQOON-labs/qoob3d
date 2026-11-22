@@ -1,10 +1,12 @@
 //! Task endpoints (AG-SV-04, ADR-0054): the task inbox of
 //! `qoob3d_core::tasks` over HTTP. The review gate is evaluated here, from
 //! the service's own part and check states, never from what a client says.
+//! Creating and changing tasks is serialised (AG-HD-07).
 
+use std::sync::PoisonError;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use qoob3d_core::tasks::{self, Role, Task, TaskError, TaskKind, TaskState, Tasks};
+use qoob3d_core::tasks::{self, Change, Role, Task, TaskError, TaskKind, TaskState, Tasks};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -30,6 +32,11 @@ struct UpdateBody {
     state: Option<String>,
     #[serde(default)]
     note: Option<String>,
+    /// Replace the bound parts and checks (AG-TK-05).
+    #[serde(default)]
+    parts: Option<Vec<String>>,
+    #[serde(default)]
+    checks: Option<Vec<String>>,
     role: String,
 }
 
@@ -93,6 +100,7 @@ impl Service {
                 ))
             })?,
         };
+        let _writing = self.task_writes.lock().unwrap_or_else(PoisonError::into_inner);
         let task = tasks::create(
             &self.dir,
             &request.title,
@@ -126,9 +134,24 @@ impl Service {
                     .ok_or_else(|| Failure::bad_request(format!("unknown state {name:?}")))
             })
             .transpose()?;
-        let gate = self.gate_input();
-        let note = request.note.as_deref();
-        let task = tasks::update(&self.dir, id, role, state, note, &today(), &gate)?;
+        let (gate, load_errors) = self.gate_input();
+        // AG-HD-09: a project that does not load has no part states; say so
+        // instead of calling every part missing.
+        if role == Role::Agent && state == Some(TaskState::Review) && !load_errors.is_empty() {
+            let message = format!(
+                "task {id} cannot go to review: the project does not load: {}",
+                load_errors.join("; ")
+            );
+            return Err(Failure::new(400, ErrorKind::Gate, message));
+        }
+        let change = Change {
+            parts: request.parts.as_deref(),
+            checks: request.checks.as_deref(),
+            state,
+            note: request.note.as_deref(),
+        };
+        let _writing = self.task_writes.lock().unwrap_or_else(PoisonError::into_inner);
+        let task = tasks::apply(&self.dir, id, role, &change, &today(), &gate)?;
         Ok(view(&task, true))
     }
 }

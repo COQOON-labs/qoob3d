@@ -9,7 +9,8 @@ IDs `WA-<area>-<no>` are stable; code and tests refer to them.
 ## 1. Service protocol used by the app
 
 The service is `qoob3d serve <DIR>` (agent requirements AG-SV-*). It listens on 127.0.0.1;
-the port is in `<DIR>/.qoob3d/service.json` as `{"port": <u16>, "pid": <u32>}`. Every JSON
+port and token are in `<DIR>/.qoob3d/service.json` as `{"port": <u16>, "pid": <u32>,
+"token": <32 hex characters>}`. Every JSON
 answer has the envelope `{"ok": bool, "duration_s": f64, "warnings": [str], "result": …}`,
 with `"error": {"kind", "message"}` when `ok` is false.
 
@@ -18,6 +19,7 @@ with `"error": {"kind", "message"}` when `ok` is false.
 | WA-PR-01 | `GET /status` → `result.parts` is a list of `{"name", "file", "state", "key"}`. `state` ∈ `current`, `outdated`, `failed`, `never_built`. `key` is the cache key of the last successful build (string) or `null`. Other fields may exist and are ignored. |
 | WA-PR-02 | `GET /mesh/<name>` → the mesh of the last successful build in the binary format of section 3 (`Content-Type: application/octet-stream`); HTTP 404 with the JSON envelope if the part has never been built. Response header `X-Qoob3d-Key` carries the cache key of that mesh. |
 | WA-PR-03 | `POST /build` with `{"parts": null, "wait_s": 0}` starts a build of all parts and returns at once. |
+| WA-PR-04 | Every request carries the token of `service.json` in the header `X-Qoob3d-Token`, a `Host` of `127.0.0.1:<port>` (or `localhost:<port>`) and no `Origin` header; anything else is answered with HTTP 403 before routing (AG-HD-03, ADR-0055). The token is new at every service start, so a client that gets no answer reads `service.json` again for port and token (AG-HD-05). Names in a path (`/mesh/<name>`) are percent-encoded as one segment (AG-HD-04). |
 
 ## 2. App behaviour
 
@@ -30,7 +32,7 @@ with `"error": {"kind", "message"}` when `ok` is false.
 | WA-LV-02 | For each part whose `key` differs from the key of the mesh last loaded, the thread fetches `GET /mesh/<name>` and hands the mesh to the UI. Parts with unchanged key are not fetched again. Parts that disappear from the status disappear from the view; a part that returns is fetched again. | MUST |
 | WA-LV-03 | STL import: a binary STL turns into a `ShapeMesh` (`qoob3d_core::stl::read_binary`): vertices welded by exact position, normals computed from the winding, feature edges = edges whose two triangle normals differ by more than 30° plus open edges. Malformed input (shorter than the declared count) is an error, never a panic, and never allocates for an absurd declared count. | MUST |
 | WA-LV-04 | The browser panel lists the project parts with name and state (English: up to date / outdated / error / never built; German: aktuell / veraltet / Fehler / nie gebaut); a part in state `failed` is marked in the error color; the eye (👁) toggles visibility. All texts via `tr()`. | MUST |
-| WA-LV-05 | If the service stops answering, the panel shows "service not reachable" and the last meshes stay visible; when it answers again, polling continues. | MUST |
+| WA-LV-05 | If the service stops answering, the panel shows "service not reachable" and the last meshes stay visible; when it answers again, polling continues. The poller reads `service.json` again while there is no answer, so it follows a service restarted on another port; a failed first connection is retried every poll interval (AG-HD-05; the retries look for a running service, they start none). | MUST |
 | WA-LV-06 | The first time meshes arrive, the camera fits all parts. Later updates do not move the camera. | SHOULD |
 | WA-HL-01 | `qoob3d --project <DIR> --render <PNG>` renders headless: start/connect the service (WA-OP-02), build all parts and wait until no part is `outdated` or `never_built` (at most 120 s), load all meshes, render, exit 0. Parts in state `failed` are named on stderr and lead to exit 1 after rendering; the PNG is still written. | MUST |
 

@@ -1,6 +1,8 @@
 //! `qoob3d init <DIR>` (AG-SV-08, ADR-0054): the skeleton of a script
 //! project. A folder that already is a project is refused; anything else
-//! in the folder stays as it is.
+//! in the folder stays as it is. `lib/examples/` gets the two files the
+//! examples of the script API reference read, so every example runs as
+//! written (AG-MC-08).
 
 use std::path::Path;
 
@@ -10,6 +12,12 @@ use anyhow::{Context as _, bail};
 const FOLDERS: [&str; 5] = ["parts", "lib", "values", "checks", "tasks"];
 /// What Git must not track: service data and generated output.
 const IGNORED: [&str; 2] = [".qoob3d/", "out/"];
+/// `(path, content)` of the files the reference examples import; the master
+/// copies live beside the reference.
+const EXAMPLES: [(&str, &[u8]); 2] = [
+    ("lib/examples/fdm.rhai", include_bytes!("../../../docs/script-api/lib/examples/fdm.rhai")),
+    ("lib/examples/block.step", include_bytes!("../../../docs/script-api/lib/examples/block.step")),
+];
 
 /// Creates the skeleton in `dir`.
 ///
@@ -23,6 +31,18 @@ pub fn run(dir: &Path) -> anyhow::Result<()> {
     for folder in FOLDERS {
         let path = dir.join(folder);
         std::fs::create_dir_all(&path).with_context(|| format!("creating {}", path.display()))?;
+    }
+    for (file, content) in EXAMPLES {
+        let path = dir.join(file);
+        if let Some(folder) = path.parent() {
+            std::fs::create_dir_all(folder)
+                .with_context(|| format!("creating {}", folder.display()))?;
+        }
+        // A file of the same name that is already there is the user's.
+        if !path.exists() {
+            std::fs::write(&path, content)
+                .with_context(|| format!("writing {}", path.display()))?;
+        }
     }
     let full = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     let name = full.file_name().map_or_else(|| "project".into(), |n| n.to_string_lossy());

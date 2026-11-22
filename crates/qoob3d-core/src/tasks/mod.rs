@@ -1,24 +1,30 @@
-//! Task inbox (docs/requirements/agent.md §4.1, AG-TK-01..04, ADR-0054): the
-//! files `tasks/NNNN-slug.md` of a project, and which state changes a role
-//! may make.
+//! Task inbox (docs/requirements/agent.md §4.1 and §6.2, AG-TK-01..07,
+//! ADR-0054): the files `tasks/NNNN-slug.md` of a project, and which state
+//! changes a role may make.
 //!
 //! Pure logic: the review gate gets the part and check states as input
 //! ([`GateInput`]), the service fills it from what it built and ran. Paths
 //! handed out are relative to the project root.
 //!
-//! Points the requirement leaves open, decided here:
+//! Points the requirements leave open, decided here:
 //!
 //! - In `tasks/`, sub folders and files not ending in `.md` are ignored; a
 //!   `.md` file whose name is not `NNNN-slug.md` is an error.
 //! - Unknown header keys are an error. `created` is kept as written, it is
 //!   not checked to be a date.
-//! - A new state equal to the current one is no state change. An update with
-//!   neither a state change nor a note is an error.
+//! - A new state equal to the current one is no state change. A change with
+//!   neither a state change, a note nor a list is an error.
 //! - The review gate and "blocked needs a note" bind the agent only; the
 //!   human may set every state without conditions.
-//! - Log text of a state change: `<old> -> <new>`, followed by `: <note>` if
-//!   a note is given. A note alone is the entry as it is. Notes are flattened
-//!   to one line.
+//! - Log text (AG-TK-07): a state change is `<old> -> <new>`, followed by
+//!   `: <note>` if a note is given; a hand-over to review lists the bound
+//!   parts and checks in between (`in_progress -> review: parts [A] checks
+//!   [x]: <note>`, AG-TK-06). A note alone is the entry as it is. Binding is
+//!   logged as `bound parts [A, B] checks [x]`. Entries are flattened to one
+//!   line.
+//! - Binding (AG-TK-05): the agent binds while the task is `open` or
+//!   `in_progress`, the human in every state. A change with lists and a new
+//!   state binds first, so the gate sees the new lists.
 //! - Numbers end at 9999 (four digits); the next `create` is an error.
 
 mod text;
@@ -55,9 +61,15 @@ pub enum TaskError {
     Transition { id: String, role: Role, from: TaskState, to: TaskState },
     #[error("task {id}: the state blocked needs a note with the question")]
     NoteRequired { id: String },
+    #[error(
+        "task {id}: the role {} may not bind parts and checks while the task is {}",
+        role.as_str(),
+        state.as_str()
+    )]
+    BindState { id: String, role: Role, state: TaskState },
     #[error("task {id} cannot go to review: {}", problems.join("; "))]
     Gate { id: String, problems: Vec<String> },
-    #[error("task {id}: nothing to change, give a new state or a note")]
+    #[error("task {id}: nothing to change, give a new state, a note, parts or checks")]
     NothingToChange { id: String },
     #[error("a task needs a non-empty title")]
     EmptyTitle,
@@ -233,10 +245,11 @@ impl Tasks {
     }
 }
 
-/// The unmet conditions of the gate `in_progress -> review` (AG-TK-04);
-/// empty means the task may be handed over. Every part of the task must be
-/// `current`, every check must have passed; a task with neither needs a
-/// non-blank note instead. A note never replaces parts or checks.
+/// The unmet conditions of the gate `in_progress -> review` (AG-TK-04,
+/// AG-TK-06); empty means the task may be handed over. Every part of the task
+/// must be `current`, every check must have passed. A task or requirement
+/// needs at least one part and one check bound; an idea needs a non-blank
+/// note. A note never replaces parts or checks.
 #[must_use]
 pub fn gate_problems(task: &Task, note: Option<&str>, gate: &GateInput) -> Vec<String> {
     let mut problems = Vec::new();
@@ -254,9 +267,17 @@ pub fn gate_problems(task: &Task, note: Option<&str>, gate: &GateInput) -> Vec<S
             None => problems.push(format!("check {check:?} has no current result")),
         }
     }
-    if task.parts.is_empty() && task.checks.is_empty() && flat_note(note).is_none() {
-        problems
-            .push("a task without parts and checks needs a note saying what was done".to_owned());
+    if task.kind == TaskKind::Idea {
+        if flat_note(note).is_none() {
+            problems.push("an idea needs a note saying what was done".to_owned());
+        }
+        return problems;
+    }
+    if task.parts.is_empty() {
+        problems.push("no part is bound to the task (bind at least one with `parts`)".to_owned());
+    }
+    if task.checks.is_empty() {
+        problems.push("no check is bound to the task (bind at least one with `checks`)".to_owned());
     }
     problems
 }
@@ -285,6 +306,13 @@ pub fn create(
     if title.trim().is_empty() {
         return Err(TaskError::EmptyTitle);
     }
+    let folder = dir.join(TASKS_DIR);
+    let io = |source| TaskError::Io { path: folder.clone(), source };
+    std::fs::create_dir_all(&folder).map_err(io)?;
+    // Two creators must not pick the same number (AG-HD-07). The lock is on
+    // the folder itself, so no lock file shows up among the tasks; it is
+    // released when `_lock` is dropped.
+    let _lock = std::fs::File::open(&folder).and_then(|f| f.lock().map(|()| f)).map_err(io)?;
     let number = task_files(dir)?.last().map_or(1, |(highest, _)| highest + 1);
     if number > 9999 {
         return Err(TaskError::NumbersUsedUp);
@@ -292,10 +320,20 @@ pub fn create(
     let file = Path::new(TASKS_DIR).join(format!("{number:04}-{}.md", slug(title)));
     let content = text::new_file(title, kind, body, parts, checks, date);
     let task = text::parse(&file, number, &content)?;
-    let folder = dir.join(TASKS_DIR);
-    std::fs::create_dir_all(&folder).map_err(|source| TaskError::Io { path: folder, source })?;
     write_atomic(&dir.join(&file), &content)?;
     Ok(task)
+}
+
+/// What one request changes on a task; `None` leaves that side alone.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Change<'a> {
+    /// Replaces the bound parts (AG-TK-05).
+    pub parts: Option<&'a [String]>,
+    /// Replaces the bound checks.
+    pub checks: Option<&'a [String]>,
+    /// Equal to the current state counts as no state change.
+    pub state: Option<TaskState>,
+    pub note: Option<&'a str>,
 }
 
 /// Changes the state of task `id` and/or appends a note to its log, and
@@ -303,20 +341,56 @@ pub fn create(
 /// changes and one log line is appended; the rest of the file stays
 /// byte-identical (AG-TK-03).
 ///
-/// `new_state` equal to the current state counts as no state change. `gate`
-/// is only consulted when the agent moves the task to `review`.
-///
 /// # Errors
-/// Unknown task, transition forbidden for the role, agent sets `blocked`
-/// without a note, unmet review gate (all conditions listed), neither a
-/// state change nor a note, `date` not shaped `YYYY-MM-DD`, read or write
-/// failure. A refused update writes nothing.
+/// As [`apply`].
 pub fn update(
     dir: &Path,
     id: &str,
     role: Role,
     new_state: Option<TaskState>,
     note: Option<&str>,
+    date: &str,
+    gate: &GateInput,
+) -> Result<Task, TaskError> {
+    let change = Change { state: new_state, note, ..Change::default() };
+    apply(dir, id, role, &change, date, gate)
+}
+
+/// Replaces the bound parts and/or checks of task `id` (AG-TK-05) and logs
+/// it. The header lines `parts`/`checks` are rewritten as one-line arrays
+/// (added when missing); the rest of the file stays byte-identical. Names are
+/// not checked here, an unknown one fails the gate later.
+///
+/// # Errors
+/// As [`apply`].
+pub fn bind(
+    dir: &Path,
+    id: &str,
+    role: Role,
+    parts: Option<&[String]>,
+    checks: Option<&[String]>,
+    date: &str,
+) -> Result<Task, TaskError> {
+    let change = Change { parts, checks, ..Change::default() };
+    apply(dir, id, role, &change, date, &GateInput::default())
+}
+
+/// Applies `change` to task `id` in one write and returns the task as
+/// written: the lists are bound first, then the state change is judged, so
+/// the gate (only consulted when the agent moves the task to `review`) sees
+/// the new lists.
+///
+/// # Errors
+/// Unknown task, the agent binds outside `open`/`in_progress`, transition
+/// forbidden for the role, agent sets `blocked` without a note, unmet review
+/// gate (all conditions listed), nothing to change, `date` not shaped
+/// `YYYY-MM-DD`, a header this module cannot patch, read or write failure. A
+/// refused change writes nothing.
+pub fn apply(
+    dir: &Path,
+    id: &str,
+    role: Role,
+    change: &Change<'_>,
     date: &str,
     gate: &GateInput,
 ) -> Result<Task, TaskError> {
@@ -329,37 +403,83 @@ pub fn update(
     let old = read_text(&path)?;
     let task = text::parse(&file, number, &old)?;
 
-    let new_state = new_state.filter(|state| *state != task.state);
-    let flat = flat_note(note);
-    if let Some(to) = new_state {
-        check_transition(&task, role, to, note, gate)?;
+    let binds = change.parts.is_some() || change.checks.is_some();
+    let may_bind =
+        role == Role::Human || matches!(task.state, TaskState::Open | TaskState::InProgress);
+    if binds && !may_bind {
+        return Err(TaskError::BindState { id: id.to_owned(), role, state: task.state });
     }
-    // The log text is the note as given (`- <date> <who>: <note>`); only a
-    // state change without a note is described by its states.
-    let entry = match (new_state, flat) {
-        (_, Some(note)) => note,
-        (Some(to), None) => format!("{} -> {}", task.state.as_str(), to.as_str()),
-        (None, None) => return Err(TaskError::NothingToChange { id: id.to_owned() }),
-    };
+    let mut bound = task.clone();
+    if let Some(parts) = change.parts {
+        bound.parts = parts.to_vec();
+    }
+    if let Some(checks) = change.checks {
+        bound.checks = checks.to_vec();
+    }
+
+    let new_state = change.state.filter(|state| *state != task.state);
+    if let Some(to) = new_state {
+        check_transition(&bound, role, to, change.note, gate)?;
+    }
+    let entries = log_entries(&bound, change, new_state);
+    if entries.is_empty() {
+        return Err(TaskError::NothingToChange { id: id.to_owned() });
+    }
     if !text::is_date(date) {
         return Err(TaskError::InvalidDate { date: date.to_owned() });
     }
 
-    let new = text::updated(&old, new_state, date, role, &entry);
+    let new = text::updated(&old, &Change { state: new_state, ..*change }, date, role, &entries);
     let written = text::parse(&file, number, &new)?;
-    // A `state` line this module cannot patch (e.g. a quoted key) must not
-    // end in a file that says something else than was asked for.
-    if written.state != new_state.unwrap_or(task.state) {
+    // A line this module cannot patch (e.g. a quoted key) must not end in a
+    // file that says something else than was asked for.
+    let patched = [
+        ("state", written.state == new_state.unwrap_or(task.state)),
+        ("parts", written.parts == bound.parts),
+        ("checks", written.checks == bound.checks),
+    ];
+    if let Some((key, _)) = patched.iter().find(|(_, ok)| !ok) {
         return Err(TaskError::File {
             file,
-            message: "the `state` line of the header cannot be rewritten".to_owned(),
+            message: format!("the `{key}` line of the header cannot be rewritten"),
         });
     }
     write_atomic(&path, &new)?;
     Ok(written)
 }
 
-/// AG-TK-02 and AG-TK-04 for a real state change of `task` to `to`.
+/// The log lines of a change (see the module comment): the binding, then the
+/// state change or the note. `task` already has the new lists.
+fn log_entries(task: &Task, change: &Change<'_>, new_state: Option<TaskState>) -> Vec<String> {
+    let lists = |parts: Option<&[String]>, checks: Option<&[String]>| {
+        let list = |name: &str, items: Option<&[String]>| {
+            items.map(|items| format!("{name} [{}]", items.join(", ")))
+        };
+        [list("parts", parts), list("checks", checks)].into_iter().flatten().collect::<Vec<_>>()
+    };
+    let mut entries = Vec::new();
+    if change.parts.is_some() || change.checks.is_some() {
+        entries.push(format!("bound {}", lists(change.parts, change.checks).join(" ")));
+    }
+    let note = flat_note(change.note);
+    if let Some(to) = new_state {
+        let mut entry = format!("{} -> {}", task.state.as_str(), to.as_str());
+        if to == TaskState::Review {
+            let bound = lists(Some(&task.parts), Some(&task.checks));
+            entry.push_str(&format!(": {}", bound.join(" ")));
+        }
+        if let Some(note) = &note {
+            entry.push_str(&format!(": {note}"));
+        }
+        entries.push(entry);
+    } else if let Some(note) = note {
+        entries.push(note);
+    }
+    // A name with a line break must not break the log line.
+    entries.into_iter().filter_map(|entry| flat_note(Some(&entry))).collect()
+}
+
+/// AG-TK-02, AG-TK-04 and AG-TK-06 for a real state change of `task` to `to`.
 fn check_transition(
     task: &Task,
     role: Role,
@@ -458,15 +578,8 @@ fn read_text(path: &Path) -> Result<String, TaskError> {
     std::fs::read_to_string(path).map_err(|source| TaskError::Io { path: path.to_owned(), source })
 }
 
-/// Writes via a temporary file in the same folder and a rename, so a reader
-/// (or a crash) never sees half a task. The temporary name does not end in
-/// `.md`, a leftover is therefore no task file.
+/// [`crate::fs::write_atomic`] with the path in the error.
 fn write_atomic(path: &Path, content: &str) -> Result<(), TaskError> {
-    let temp = path.with_extension("md.tmp");
-    let io = |path: &Path| {
-        let path = path.to_owned();
-        move |source| TaskError::Io { path, source }
-    };
-    std::fs::write(&temp, content).map_err(io(&temp))?;
-    std::fs::rename(&temp, path).map_err(io(path))
+    crate::fs::write_atomic(path, content.as_bytes())
+        .map_err(|source| TaskError::Io { path: path.to_owned(), source })
 }

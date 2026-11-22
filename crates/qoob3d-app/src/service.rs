@@ -4,6 +4,8 @@
 //! runner thread; builds run in `qoob3d worker` processes (`pool.rs`), never
 //! in this process. One service per folder: `.qoob3d/service.lock` is held
 //! with an OS file lock, which also makes a stale `service.json` harmless.
+//! Every request needs the token of this start from `service.json`, a local
+//! `Host` and no `Origin` (AG-HD-03, ADR-0055).
 
 mod bench;
 mod checks;
@@ -16,14 +18,17 @@ pub(crate) mod snapshot;
 mod tasks;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::hash::{BuildHasher as _, RandomState};
+use std::io::Read as _;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
 use qoob3d_core::export::{self, ExportObject};
+use qoob3d_core::fs::write_atomic;
 use qoob3d_core::project::{Config, Limits, Mesh, ValueStatus, Values, Workers};
 use qoob3d_core::qmesh;
 use serde::Deserialize;
@@ -41,14 +46,21 @@ use crate::worker::{ErrorKind, PartError, Request};
 const STOP_WAIT: Duration = Duration::from_secs(3);
 /// Read timeout of a client connection.
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Jobs listed by `/status`, the newest ones (AG-HD-10).
+const STATUS_JOBS: usize = 20;
 
 pub(crate) struct Service {
     dir: PathBuf,
     port: u16,
+    /// Random per start; required in `X-Qoob3d-Token` (AG-HD-03).
+    token: String,
     pool: Pool,
     declarations: Declarations,
     check_files: CheckFiles,
     state: Mutex<State>,
+    /// Held while a task file is created or changed, so two requests never
+    /// pick the same number or lose each other's log line (AG-HD-07).
+    task_writes: Mutex<()>,
     /// Signalled on every job change.
     changed: Condvar,
     stopping: AtomicBool,
@@ -66,16 +78,18 @@ struct State {
     checks: HashMap<String, CheckRecord>,
 }
 
-/// Writes `bytes` to `path` through a temporary file and a rename, so
-/// readers never see a half-written file.
-///
-/// # Errors
-/// Writing or renaming failed.
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+/// 32 hex characters (128 bits) nobody outside can guess. The source is the
+/// OS random device; where it cannot be read, two `RandomState` hashers,
+/// which std keys from OS randomness (SipHash with 128 secret key bits each).
+fn random_token() -> String {
+    let mut bytes = [0u8; 16];
+    let device = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes));
+    if device.is_err() {
+        let half = || RandomState::new().hash_one(std::process::id()).to_le_bytes();
+        bytes[..8].copy_from_slice(&half());
+        bytes[8..].copy_from_slice(&half());
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Runs the service for the project in `dir` until `/shutdown`.
@@ -109,6 +123,8 @@ pub fn serve(dir: &Path) -> anyhow::Result<()> {
         pool: Pool::start(exe, workers.count, workers.recycle_mb),
         dir,
         port,
+        token: random_token(),
+        task_writes: Mutex::new(()),
         declarations: Declarations::default(),
         check_files: CheckFiles::default(),
         state: Mutex::new(State::default()),
@@ -117,7 +133,7 @@ pub fn serve(dir: &Path) -> anyhow::Result<()> {
         requests: AtomicU64::new(0),
     });
     let service_json = data.join("service.json");
-    let info = json!({"port": port, "pid": std::process::id()}).to_string();
+    let info = json!({"port": port, "pid": std::process::id(), "token": service.token}).to_string();
     write_atomic(&service_json, info.as_bytes()).context("writing service.json")?;
     tracing::info!(port, dir = %service.dir.display(), "project service listening");
 
@@ -190,8 +206,24 @@ struct ExportBody {
 }
 
 impl Service {
+    /// The state, also after a job thread panicked while holding the lock
+    /// (AG-HD-01): every update of the state is complete in itself.
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().expect("service lock poisoned")
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// AG-HD-03: the token of this start, sent as a header; a `Host` that
+    /// is this service (not a name a web page resolved to 127.0.0.1); no
+    /// `Origin`, which browsers add to requests of pages.
+    fn allowed(&self, request: &http::Request) -> bool {
+        let token = request.token.as_deref().unwrap_or_default().as_bytes();
+        // Compared without an early exit, so timing tells nothing.
+        let same = token.len() == self.token.len()
+            && token.iter().zip(self.token.as_bytes()).fold(0, |d, (a, b)| d | (a ^ b)) == 0;
+        let local = request.host.as_deref().is_some_and(|host| {
+            host == format!("127.0.0.1:{}", self.port) || host == format!("localhost:{}", self.port)
+        });
+        same && local && !request.origin
     }
 
     fn next_request(&self) -> u64 {
@@ -202,7 +234,12 @@ impl Service {
         stream.set_read_timeout(Some(CLIENT_TIMEOUT)).ok();
         let start = Instant::now();
         let reply = match http::read_request(&stream) {
-            Ok(request) => self.route(&request, start),
+            Ok(request) if self.allowed(&request) => self.route(&request, start),
+            Ok(_) => {
+                let message = "missing or wrong X-Qoob3d-Token (see .qoob3d/service.json), \
+                               a foreign Host or an Origin header";
+                envelope(Err(Failure::new(403, ErrorKind::Forbidden, message)), start)
+            }
             Err(e) => envelope(Err(Failure::bad_request(e)), start),
         };
         if let Err(e) = http::write_reply(&mut stream, reply) {
@@ -258,8 +295,13 @@ impl Service {
         let snapshot = Snapshot::load(&self.dir, &self.declarations);
         let declared = checks::load(&self.dir, &self.check_files);
         let mut st = self.lock();
-        let jobs: Vec<Value> =
-            st.jobs.iter().map(|(id, j)| json!({"id": id, "state": j.state})).collect();
+        let first = st.jobs.len().saturating_sub(STATUS_JOBS);
+        let jobs: Vec<Value> = st
+            .jobs
+            .iter()
+            .skip(first)
+            .map(|(id, j)| json!({"id": id, "state": j.state, "kind": j.kind()}))
+            .collect();
         let mut result = json!({
             "project": Value::Null,
             "parts": [],
@@ -413,6 +455,7 @@ impl Service {
                     "value": v.value,
                     "source": v.source,
                     "status": status_name(v.status),
+                    "unit": v.unit,
                     "file": v.file.display().to_string(),
                 })
             })
