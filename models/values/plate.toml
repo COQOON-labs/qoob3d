@@ -1,0 +1,23 @@
+[plate.width]
+value = 60
+unit = "mm"
+source = "reference model, chosen freely"
+status = "assumption"
+
+[plate.depth]
+value = 40
+unit = "mm"
+source = "reference model, chosen freely"
+status = "assumption"
+
+[plate.thickness]
+value = 5
+unit = "mm"
+source = "reference model, chosen freely"
+status = "assumption"
+
+[plate.hole]
+value = 12
+unit = "mm"
+source = "reference model, chosen freely"
+status = "assumption"

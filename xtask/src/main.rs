@@ -7,7 +7,7 @@
 //! cargo xtask screenshot [dir] UI screenshot + scene renders for visual review (ADR-0018)
 //! cargo xtask i18n             translation keys complete and used keys defined (ADR-0020)
 //! cargo xtask printers <dir>   regenerate the printer database from OrcaSlicer (ADR-0021)
-//! cargo xtask models [--write] reference models: build, measure, export (ADR-0033)
+//! cargo xtask models           reference project: build, check, export (ADR-0033)
 //! cargo xtask hygiene          source rules beyond clippy (ADR-0037)
 //! cargo xtask commits <revs>   commit policy for a revision range (ADR-0037)
 //! cargo xtask commits --message <file>  same for one message (commit-msg hook)
@@ -53,7 +53,6 @@ fn main() -> ExitCode {
             }
         }
         Some("selftest") => report("selftest", selftest::run(&root)),
-        Some("models") if flag("--write") => report("models", models::write(&root)),
         Some("models") => models_step(&root),
         Some("printers") => {
             if let Some(dir) = args.get(1) {
@@ -65,7 +64,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask <check [--fast] | arch | docs [--fix] | i18n | hygiene | selftest | commits <revs> | harness-changes <base> <head> | setup | models [--write] | printers <dir> | screenshot [dir]>"
+                "usage: cargo xtask <check [--fast] | arch | docs [--fix] | i18n | hygiene | selftest | commits <revs> | harness-changes <base> <head> | setup | models | printers <dir> | screenshot [dir]>"
             );
             return ExitCode::from(2);
         }
@@ -215,8 +214,8 @@ fn hooks_installed(root: &Path) -> bool {
     configured
 }
 
-/// Writes `ui.png` (whole app via egui_kittest) and scene renders of the
-/// standard views into `dir` (default `target/screenshots`).
+/// Writes `ui.png` (whole app via egui_kittest) and a contact sheet of the
+/// reference project into `dir` (default `target/screenshots`).
 fn screenshot(root: &Path, dir: Option<PathBuf>) -> bool {
     let dir = dir.unwrap_or_else(|| root.join("target/screenshots"));
     if let Err(err) = std::fs::create_dir_all(&dir) {
@@ -238,29 +237,16 @@ fn screenshot(root: &Path, dir: Option<PathBuf>) -> bool {
     if !ok {
         return false;
     }
-    let binary = cargo_target(root).join("debug/qoob3d");
-    for view in ["iso", "front", "top"] {
-        let out = dir.join(format!("scene-{view}.png"));
-        let args = ["--render", &out.to_string_lossy(), "--view", view, "--size", "1200x800"];
-        if !run(root, &binary.to_string_lossy(), &args) {
-            return false;
-        }
-    }
-    // Every reference model (ADR-0033).
-    let models = root.join("models");
-    let mut names: Vec<String> = std::fs::read_dir(&models)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| e.file_name().to_str()?.strip_suffix(".qbd").map(str::to_string))
-        .collect();
-    names.sort();
-    for name in names {
-        let file = models.join(format!("{name}.qbd"));
-        let out = dir.join(format!("model-{name}.png"));
-        let args =
-            [&*file.to_string_lossy(), "--render", &out.to_string_lossy(), "--size", "900x600"];
-        if !run(root, &binary.to_string_lossy(), &args) {
+    // The reference project (ADR-0033) from three sides.
+    let out = dir.join("reference.png");
+    let args = ["render-project", ".", "--out", &out.to_string_lossy(), "--views", "iso,front,top"];
+    let rendered = models::Reference::start(root)
+        .map(|reference| reference.command(&args).status().is_ok_and(|s| s.success()));
+    match rendered {
+        Ok(true) => {}
+        Ok(false) => return false,
+        Err(e) => {
+            eprintln!("screenshot: {e}");
             return false;
         }
     }
@@ -268,7 +254,7 @@ fn screenshot(root: &Path, dir: Option<PathBuf>) -> bool {
     true
 }
 
-/// Builds the binary, then checks every reference model through it.
+/// Builds the binary, then checks the reference project through it.
 fn models_step(root: &Path) -> bool {
     run(root, "cargo", &["build", "--quiet", "--package", "qoob3d-app"])
         && report("models", models::check(root))

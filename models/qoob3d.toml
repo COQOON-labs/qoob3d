@@ -1,0 +1,5 @@
+# Reference project (ADR-0033): `cargo xtask models` builds every part through
+# the real binary, runs the checks and proves that the exports load in a slicer.
+[project]
+name = "reference"
+units = "mm"
