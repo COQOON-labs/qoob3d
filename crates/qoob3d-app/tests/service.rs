@@ -605,6 +605,8 @@ fn assert_built(result: &Value, part: &str, state: &str, volume: f64, bbox: ([f6
     let size = [bbox.1[0] - bbox.0[0], bbox.1[1] - bbox.0[1], bbox.1[2] - bbox.0[2]];
     assert_vec(&p["bbox"]["size"], size, 1e-6, &format!("bbox.size of {part}"));
     assert_eq!(p["valid"], json!(true), "{part}: {p}");
+    // The FDM gate: the cached mesh, which STL and 3MF are exported from, is closed.
+    assert_eq!(p["watertight"], json!(true), "{part}: {p}");
     assert!(p["duration_s"].as_f64().is_some_and(|d| d >= 0.0), "{part}: {p}");
     assert!(p.get("error").is_none_or(Value::is_null), "{part}: {p}");
 }
@@ -1106,6 +1108,7 @@ fn check_cache_files(p: &Project, st: &Value) {
         }
         assert_eq!(j["valid"], json!(true), "{part}: {j}");
         assert_eq!(j["solids"], json!(1), "{part}: one solid: {j}");
+        assert_eq!(j["watertight"], json!(true), "{part}: {j}");
         assert!(j["duration_s"].as_f64().is_some_and(|d| d >= 0.0), "{part}: {j}");
         assert!(j["warnings"].is_array(), "{part}: {j}");
         let reads = j["values_read"].to_string();

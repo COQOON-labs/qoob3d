@@ -61,7 +61,8 @@ layer where OCCT has it.
   value invalidates, changing an unread value does not.
 - Cache entry files: `<key>.brep` (OCCT BREP), `<key>.qmsh` (tessellated, 0.01 mm linear
   deflection, edges included), `<key>.json` with `volume`, `bbox` `{min,max,size}`,
-  `valid`, `solids`, `duration_s`, `values_read`, `warnings`.
+  `valid`, `watertight` (the mesh is closed and manifold, the print check), `solids`,
+  `duration_s`, `values_read`, `warnings`.
 - Worker protocol: the parent starts `qoob3d worker` with stdin/stdout pipes, sends one JSON
   request per line (`{"job": id, "dir": …, "part": …, "deps": {name: brep_path}}`), the
   worker answers one JSON line per job. Workers stay warm between jobs.
@@ -90,7 +91,7 @@ layer where OCCT has it.
   `qoob3d status` waits up to 10 s for it before asking `/status`.
 - `POST /build {"parts": [..]|null, "wait_s": f64}` → if finished within `wait_s`:
   `result` = build result; else `{"job": id, "state": "running"}`. Build result:
-  `{"parts": {name: {state: "built"|"cached"|"failed", volume, bbox, valid, duration_s,
+  `{"parts": {name: {state: "built"|"cached"|"failed", volume, bbox, valid, watertight, duration_s,
   error?: {kind, message, file?, line?, column?}}}, "built": [..], "cached": [..]}`.
 - `GET /job/<id>` → `{id, state: "queued"|"running"|"done"|"failed"|"cancelled",
   progress: {done, total}, result?}`; `POST /job/<id>/cancel`.

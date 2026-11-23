@@ -33,10 +33,16 @@ pub(crate) const ANSWER_MARK: &str = "{\"job\":";
 /// code is meant to be declarations, not computations (AG-HD-02).
 const DECLARE_MAX_OPERATIONS: u64 = 1_000_000;
 
-/// The program part of a cache key: the version and the tessellation settings
-/// (AG-PF-05), so changing either rebuilds.
+/// Version of what a cache entry holds; 2: the `.json` has `watertight`.
+const ENTRY_VERSION: u32 = 2;
+
+/// The program part of a cache key: the program and entry versions and the
+/// tessellation settings (AG-PF-05), so changing any of them rebuilds.
 pub(crate) fn key_version(mesh: &Mesh) -> String {
-    format!("{PROGRAM_VERSION} mesh {} {}", mesh.deflection_mm, mesh.angle_deg)
+    format!(
+        "{PROGRAM_VERSION} entry {ENTRY_VERSION} mesh {} {}",
+        mesh.deflection_mm, mesh.angle_deg
+    )
 }
 
 /// One job: build `part`, with `step` write the shapes of `deps` as STEP, or
@@ -324,15 +330,24 @@ fn build(request: &Request, name: &str) -> Result<(String, Value), PartError> {
         .map_err(|e| io_error(&base, e))?;
     let qmsh = base.with_extension("qmsh");
     std::fs::write(&qmsh, qmesh::write(&mesh)).map_err(|e| io_error(&qmsh, e))?;
+    // The FDM gate (ADR-0002): STL and 3MF are written from this mesh, and a
+    // slicer needs it closed.
+    let watertight = mesh.faces.analyze().is_watertight();
     drop(mesh);
 
     let valid = shape.is_valid();
-    let warnings: Vec<String> =
-        if valid { Vec::new() } else { vec!["the shape is not valid (BRepCheck)".to_owned()] };
+    let mut warnings = Vec::new();
+    if !valid {
+        warnings.push("the shape is not valid (BRepCheck)");
+    }
+    if !watertight {
+        warnings.push("the mesh is not watertight, a slicer may reject it");
+    }
     let meta = json!({
         "volume": shape.volume(),
         "bbox": probe::bbox(shape),
         "valid": valid,
+        "watertight": watertight,
         "solids": shape.solid_count(),
         "duration_s": start.elapsed().as_secs_f64(),
         "values_read": output.values_read,
