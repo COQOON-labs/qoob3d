@@ -61,4 +61,9 @@ Accepted ADRs are not rewritten but superseded by a new ADR.
 | [ADR-0049](0049-guard-checks-shell-commands-textually.md) | The guard checks shell commands as text at three anchors; heredoc bodies are data only in exact message forms | accepted | 2026-10-14 | xtask |
 | [ADR-0050](0050-ci-caches-the-occt-install-by-version.md) | CI caches the OCCT install by OCCT version; the opencascade-sys fork skips the OCCT build when the pinned install exists | accepted | 2026-10-15 | qoob3d-kernel |
 | [ADR-0051](0051-hooks-strip-the-macos-quarantine-from-xtask.md) | The git hooks run an un-quarantined xtask directly, pre-push stops under a quarantining client | accepted | 2026-10-15 | – |
+| [ADR-0052](0052-qoob3d-becomes-the-app-of-werft-models-are-code.md) | QOOB3D becomes the app of Werft – models are build123d code, agents come first | superseded | 2026-11-22 | qoob3d-app, qoob3d-core |
+| [ADR-0053](0053-agent-first-all-rust-models-are-rhai-scripts.md) | Agent first, all Rust – models are Rhai scripts on our OCCT kernel, heavy work in worker processes | accepted | 2026-11-22 | qoob3d-core, qoob3d-kernel, qoob3d-app |
+| [ADR-0054](0054-the-project-is-the-shared-workspace-tasks-checks-mcp.md) | The project folder is the shared workspace of human and agent – task inbox, checks as a gate, MCP as the main interface | accepted | 2026-11-22 | qoob3d-core, qoob3d-kernel, qoob3d-app |
+| [ADR-0055](0055-project-service-internals.md) | Project service internals – single instance by file lock, framed worker protocol, declarations without the CAD API, token on localhost | accepted | 2026-11-22 | qoob3d-core, qoob3d-kernel, qoob3d-app |
+| [ADR-0056](0056-declaration-discovery-runs-in-a-worker.md) | Declaration discovery runs in a worker – the service never evaluates user scripts | accepted | 2026-11-22 | qoob3d-kernel, qoob3d-app |
 <!-- adr-index:end -->

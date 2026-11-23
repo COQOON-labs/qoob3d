@@ -84,16 +84,18 @@ pub struct ExportBody {
 pub(crate) struct Shape(UniquePtr<ffi::TopoDS_Shape>);
 
 impl Shape {
-    fn get(&self) -> &ffi::TopoDS_Shape {
+    pub(crate) fn get(&self) -> &ffi::TopoDS_Shape {
         self.0.as_ref().expect("shapes are never null")
     }
 }
 
-fn occ<T>(r: Result<T, cxx::Exception>) -> Result<T, KernelError> {
+pub(crate) fn occ<T>(r: Result<T, cxx::Exception>) -> Result<T, KernelError> {
     r.map_err(|e| KernelError::Occt(e.what().to_string()))
 }
 
-fn shape(r: Result<UniquePtr<ffi::TopoDS_Shape>, cxx::Exception>) -> Result<Shape, KernelError> {
+pub(crate) fn shape(
+    r: Result<UniquePtr<ffi::TopoDS_Shape>, cxx::Exception>,
+) -> Result<Shape, KernelError> {
     let s = occ(r)?;
     if s.is_null() {
         return Err(KernelError::Occt("no shape".into()));
@@ -444,7 +446,7 @@ fn solids(s: &Shape) -> Result<Vec<Shape>, KernelError> {
 }
 
 fn touches(a: &Shape, b: &Shape) -> Result<bool, KernelError> {
-    Ok(occ(ffi::qoob3d_distance(a.get(), b.get()))? <= TOUCH_MM)
+    Ok(occ(ffi::qoob3d_distance(a.get(), b.get(), TOUCH_MM))? <= TOUCH_MM)
 }
 
 fn combine(

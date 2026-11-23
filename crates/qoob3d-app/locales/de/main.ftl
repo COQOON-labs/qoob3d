@@ -33,6 +33,13 @@ origin-z = Z-Achse
 browser-bodies = 📁 Körper
 browser-sketches = 📁 Skizzen
 browser-none = keine
+browser-parts = 📁 Teile
+part-state-current = aktuell
+part-state-outdated = veraltet
+part-state-failed = Fehler
+part-state-never-built = nie gebaut
+live-unreachable = ⚠ Dienst nicht erreichbar
+live-unreachable-tip = Der Projektdienst antwortet nicht; die letzten Netze bleiben sichtbar.
 body-demo = Demo-Teil
 body-demo-tip = Platzhalter-Geometrie bis zum Dokumentmodell (M3)
 

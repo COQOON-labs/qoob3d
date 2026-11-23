@@ -18,6 +18,8 @@ thiserror.workspace = true
 serde = "1"
 serde_json = "1"
 tracing.workspace = true
+# Script engine of the CAD API (ADR-0053): pure Rust, sandboxed, operation limits.
+rhai = "1.27"
 
 [build-dependencies]
 cxx-build = "1"

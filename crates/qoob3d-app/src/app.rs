@@ -16,6 +16,7 @@ use crate::commands::{self, Command, CommandKind, CommandOutcome};
 use crate::panels::ExportFormat;
 
 use crate::i18n::{self, decimal, tr, tr_args};
+use crate::live::{Live, Poller, ProjectDir};
 use crate::panels::{self, PanelState, UiAction};
 use crate::project::Project;
 use crate::settings::Settings;
@@ -33,6 +34,8 @@ pub struct StartOptions {
     pub smoke: Option<SmokeTest>,
     /// Open this `.qbd` file at start.
     pub open: Option<PathBuf>,
+    /// Show the script project in this folder live (W1, ADR-0053).
+    pub project_dir: Option<PathBuf>,
 }
 
 /// The kernel request for the demo body (shared with `--render`).
@@ -73,6 +76,9 @@ pub struct QoobApp {
     /// All bodies merged, as uploaded to the renderer.
     scene: Option<ShapeMesh>,
     scene_version: u64,
+    /// Open script project: what is shown, the poller feeding it and the
+    /// [`Live::version`] last uploaded to the renderer.
+    live: Option<(Live, Poller, u64)>,
     /// Running export: request and target file.
     export: Option<(RequestId, PathBuf)>,
     /// Short message in the status line (text, until time).
@@ -119,6 +125,18 @@ impl QoobApp {
             }),
             None => Project::default(),
         };
+        let live = options.project_dir.as_deref().and_then(|dir| match ProjectDir::open(dir) {
+            Ok(dir) => {
+                let ctx = cc.egui_ctx.clone();
+                let cmd = crate::live::service_command_from_env();
+                let poller = Poller::open(dir, cmd, move || ctx.request_repaint());
+                Some((Live::default(), poller, 0))
+            }
+            Err(err) => {
+                dialog = Some(Dialog::Error(err.to_string()));
+                None
+            }
+        });
 
         Ok(Self {
             render_state,
@@ -130,6 +148,7 @@ impl QoobApp {
             demo_pending,
             scene: None,
             scene_version: 0,
+            live,
             export: None,
             notice: None,
             needs_fit: options.open.is_some(),
@@ -232,6 +251,31 @@ impl QoobApp {
                     ],
                 )));
             }
+        }
+    }
+
+    /// The open script project, if any.
+    pub fn live(&self) -> Option<&Live> {
+        self.live.as_ref().map(|(live, _, _)| live)
+    }
+
+    /// Takes the poller's updates and uploads changed geometry; the first
+    /// meshes fit the camera (WA-LV-02, WA-LV-06).
+    fn poll_live(&mut self) {
+        let Some((live, poller, shown)) = &mut self.live else { return };
+        let had_meshes = live.has_meshes();
+        while let Ok(update) = poller.updates().try_recv() {
+            live.apply(update);
+        }
+        if live.version() == *shown {
+            return;
+        }
+        *shown = live.version();
+        let scene = live.scene();
+        self.viewport.set_scene(&self.render_state.device, &scene);
+        self.scene = (!scene.faces.is_empty()).then_some(scene);
+        if !had_meshes && live.has_meshes() {
+            self.needs_fit = true;
         }
     }
 
@@ -542,6 +586,14 @@ impl QoobApp {
                     self.export_to(path);
                 }
             }
+            UiAction::TogglePart(index) => {
+                if let Some((live, _, _)) = &mut self.live
+                    && let Some(part) = live.parts().get(index)
+                {
+                    let (name, visible) = (part.name.clone(), part.visible);
+                    live.set_visible(&name, !visible);
+                }
+            }
             UiAction::ToggleVisible(id) => {
                 self.project.edit("history-visibility", |d| {
                     if let Some(s) = d.sketch_mut(id) {
@@ -822,7 +874,8 @@ impl eframe::App for QoobApp {
         let now = ui.input(|i| i.time);
         self.poll_kernel(now);
         self.project.sync(&mut self.kernel);
-        if self.project.bodies_version() != self.scene_version {
+        self.poll_live();
+        if self.live.is_none() && self.project.bodies_version() != self.scene_version {
             self.scene_version = self.project.bodies_version();
             let bodies = self.project.bodies();
             self.scene = (!bodies.is_empty())
@@ -871,6 +924,7 @@ impl eframe::App for QoobApp {
             bodies: self.project.bodies(),
             command: self.command().map(|c| (c.kind, c.editing)),
             feature_error: &errors,
+            live: self.live.as_ref().map(|(live, _, _)| live),
         };
         let title = self.project.file_name().unwrap_or_else(|| tr("untitled"));
 

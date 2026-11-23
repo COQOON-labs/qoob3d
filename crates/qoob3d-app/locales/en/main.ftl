@@ -34,6 +34,13 @@ origin-z = Z Axis
 browser-bodies = 📁 Bodies
 browser-sketches = 📁 Sketches
 browser-none = none
+browser-parts = 📁 Parts
+part-state-current = up to date
+part-state-outdated = outdated
+part-state-failed = error
+part-state-never-built = never built
+live-unreachable = ⚠ service not reachable
+live-unreachable-tip = The project service does not answer; the last meshes stay visible.
 body-demo = Demo part
 body-demo-tip = Placeholder geometry until the document model exists (M3)
 

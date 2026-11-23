@@ -22,7 +22,17 @@ pub(crate) fn tessellate_raw(
     shape: &ffi::TopoDS_Shape,
     linear_deflection_mm: f64,
 ) -> Result<ShapeMesh, KernelError> {
-    let raw = ffi::qoob3d_tessellate(shape, linear_deflection_mm, ANGULAR_DEFLECTION)
+    tessellate_angle(shape, linear_deflection_mm, ANGULAR_DEFLECTION)
+}
+
+/// As [`tessellate_raw`] with the angular deflection (radians) chosen by the
+/// caller (AG-PF-05).
+pub(crate) fn tessellate_angle(
+    shape: &ffi::TopoDS_Shape,
+    linear_deflection_mm: f64,
+    angular_deflection: f64,
+) -> Result<ShapeMesh, KernelError> {
+    let raw = ffi::qoob3d_tessellate(shape, linear_deflection_mm, angular_deflection)
         .map_err(|e| KernelError::Occt(e.what().to_string()))?;
 
     let triples = |v: &[f32]| v.as_chunks::<3>().0.to_vec();

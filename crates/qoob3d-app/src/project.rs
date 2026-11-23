@@ -224,9 +224,7 @@ impl Project {
 
     /// Writes atomically (temp file + rename) and marks the state as saved.
     pub fn save_to(&mut self, path: &Path) -> Result<(), FileError> {
-        let tmp = path.with_extension("qbd.tmp");
-        std::fs::write(&tmp, self.doc.to_json())?;
-        std::fs::rename(&tmp, path)?;
+        qoob3d_core::fs::write_atomic(path, self.doc.to_json().as_bytes())?;
         self.path = Some(path.to_path_buf());
         self.saved = self.doc.clone();
         Ok(())

@@ -36,6 +36,22 @@ Document model and shared pure data types. Used by all other crates.
   (`cargo xtask models --write`) and `all_kinds()` (source of the v2 fixture, ADR-0033).
 - `src/generate.rs`: involute spur gear (contour from pieces), coil path, path length (ADR-0032).
 - `src/export.rs`: STL, 3MF, ZIP writer/reader with CRC-32 (ADR-0034).
+- `src/qmesh.rs`: indexed mesh transfer format service → app (WA-QM-*, ADR-0053); the reader
+  checks sizes against the input before allocating.
+- `src/stl.rs`: binary STL import (WA-LV-03): exact welding, normals from the winding
+  (triangles around a corner grouped once by the feature angle), feature edges > 30° plus
+  open edges.
+- `src/fs.rs`: `write_atomic` (temp file + rename), the one copy for tasks, the service and
+  `.qbd` saving.
+- `src/project/`: script project folder (AG-PJ-01..04, ADR-0053): `qoob3d.toml` (limits, workers
+  with `recycle_mb`, `[cache] keep`, `[mesh]`; AG-PF-03..05; limits are finite and bounded,
+  AG-HD-01), `values/*.toml` with mandatory source/status and optional `unit`, imports (never outside the project), build graph, cache key.
+- `src/tasks/`: task inbox (AG-TK-01..07, ADR-0054): `tasks/NNNN-slug.md` with TOML header, body
+  and `## Log`; `create` (holds an OS lock on `tasks/` while it picks the number), `update`,
+  `bind` and `apply` (`Change`: lists, state and note in one byte-preserving, atomic write;
+  binding comes first, so the gate sees the new lists), role transitions, review gate
+  (`gate_problems`: a task or requirement needs a part and a check bound, an idea a note).
+  Log texts are fixed in the module comment. `text.rs` holds the file layout.
 - `tests/fixtures/`: `format_v1.qbd`, `format_v2.qbd` (all feature and curve kinds).
 - `src/printer/mod.rs`: `PrinterProfile`, `BedGeometry` (ADR-0021).
 - `src/printer/data.rs`: **generated** by `cargo xtask printers` from OrcaSlicer profiles –

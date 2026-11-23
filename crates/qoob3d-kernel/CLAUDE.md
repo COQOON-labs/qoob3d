@@ -30,6 +30,25 @@ OpenCascade connection. Runs entirely in its own worker thread.
 - `src/profiles.rs`: `sketch_profiles` → regions via General Fuse (`qoob3d_sketch_regions`
   in C++, ADR-0028). Construction and degenerate curves do not count.
 - `src/tessellate.rs`: call of the C++ mesher → `ShapeMesh`, structure check, demo part.
+- `src/script.rs` + `src/script/`: script kernel (ADR-0053): `run`, `ScriptError`, `Shape`,
+  sandboxed imports, STL/3MF/STEP export (STL/3MF at 0.01 mm chordal tolerance, ADR-0034);
+  `api.rs` solids (named kinds `BOX`…`TORUS`), booleans (batched, plausibility AG-SC-12),
+  transforms, measures, `countersink`/`counterbore`, `mass`, `overhangs`/`bed_area`;
+  `profile.rs` profiles, profile algebra (AG-PF-02), `rounded_rect`, `rotate`, `offset`,
+  `area`, `section`, extrude/revolve/loft, pipe; `select.rs` edge/face selectors incl.
+  `in_box`/`near`/`length`/`area`, fillet, chamfer, shell; `project.rs` `part()`/`value()` with
+  `PartMode` (all, declare without the CAD API, one part from dependency BREPs); `check.rs`
+  `check()`/`expect…` (incl. `expect_eq`) and `part(name)`; `limits.rs` the size limits of
+  declaration discovery (AG-HD-02: runs in doubling stages that measure the variables, then a search for
+  the statement that crossed a limit) (AG-CK-01/02, `RunOptions::check`, results in
+  `RunOutput::checks`; closures run only in `PartMode::All`); `measure.rs` area, center,
+  distance, common volume for callers in Rust; BREP
+  read/write and `Shape::mesh` for the cache. Runs on the calling thread, not
+  the worker. Every API change updates `docs/script-api.md` (its examples run in
+  `tests/script.rs` and `tests/script_r5.rs` with the project folder `docs/script-api`; the
+  imported example assets live in `docs/script-api/lib/examples/`, and `qoob3d init` copies
+  them). The reference is served to agents over MCP: no repository paths, requirement IDs,
+  ADR numbers or Rust notes in it – those belong here.
 - `src/occt.rs` + `cpp/`: own cxx bridge. `build.rs` compiles it against the OCCT headers
   from `DEP_OCCT_INCLUDE` (set by the `opencascade-sys` fork in `third_party/opencascade-sys`
   via `links = "occt"`, ADR-0047).
@@ -50,6 +69,40 @@ OpenCascade connection. Runs entirely in its own worker thread.
 - Revolved bodies have degenerate edges at the poles; the mesher discards triangles with
   coincident corners, otherwise they do not count as watertight.
 - The rotation for placing into a plane: `gp_Trsf::SetDisplacement(gp_Ax3(), target)`.
+- `qoob3d_boolean` flattens compounds into argument lists: a compound of overlapping solids
+  must never be one BOP argument (self-interference).
+- `qoob3d_boolean` runs the BOP in parallel mode (AG-PF-01, `OSD_ThreadPool`, no TBB). On
+  four cores the 1000-hole solid cut gained only ~10 %; most of a big BOP is serial.
+- Profile algebra (`qoob3d_profile_boolean`): a cut whose tools are hole-free faces strictly
+  inside one base face, clear of its holes and of each other, adds them as inner wires
+  (`punch`) instead of running a BOP; everything else is a planar BOP. `punch` stores the
+  2D curves of the edges, otherwise `BRepCheck_Analyzer` projects every edge again.
+- `qoob3d_outline_face` trusts its input (closed, not self-intersecting, counter-clockwise):
+  only for `rect`/`circle`/`slot`. `polygon` goes through the region search, which finds
+  self-intersections.
+- `BRepCheck_Analyzer` and `BRepGProp::SurfaceProperties` are slow on faces with very many
+  wires (plate with 1000 holes: validity seconds, area ~0.1 s), whichever way it was built.
+- `BRepOffsetAPI_MakeOffset` **segfaults** (no exception, `guarded` does not help) on a face
+  with concentric circular wires and on a single circle of radius ≤ 1 mm.
+  `qoob3d_profile_offset` therefore offsets every wire on its own, handles full circles itself
+  and combines the regions with `punch` or a planar BOP. Only worker isolation protects
+  against untried outlines.
+- Rhai's own size limits miss `a += a` on arrays and assignment into containers (`m[k] = v`).
+  Declare mode therefore turns fast operators off and measures the variables after stages
+  that double (4096, 8192, … operations, each run from the start because Rhai cannot resume):
+  the total cost stays below twice the last stage (ADR-0056). Memory grown between two
+  measurements is not seen there; discovery runs in a worker whose memory limit stops it.
+  `Engine::on_var` would avoid the reruns but is `#[deprecated]` in Rhai and would exceed the
+  lint-suppression cap (`harness/ratchet.txt`).
+- The `import` literal check is textual (Rhai's AST needs the `internals` feature): only
+  double-quoted literals without escapes pass. `RunOutput::modules_read` lists the modules
+  the resolver actually loaded; they feed the cache key.
+- `Shape::bbox()` is quantised to 1e-9 mm (−0 → 0) so that the same part reports the same
+  box before and after a BREP round trip (AG-HD-11); derive `size` from the quantised values.
+- `qoob3d_overhang_area` meshes a copy of the curved faces (angle 0.1 rad; 0.025 rad took 5 s
+  for a sphere, 118 s for a torus), so export and display meshes stay untouched.
+- STEP read/write share static OCCT settings; the wrappers serialise them with a mutex.
+  OCCT's STEP translator prints progress to stdout.
 - OCCT normals follow the surface, not the face orientation → for `TopAbs_REVERSED`
   flip winding and normal (done by `qoob3d_tessellate`).
 

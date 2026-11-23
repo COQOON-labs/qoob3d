@@ -3,6 +3,8 @@
 Parametric 3D CAD in the style of Fusion 360, native desktop app for macOS and Linux.
 **Main purpose: designing models for FDM printers (e.g. Bambu Lab)** (ADR-0002).
 When in doubt, choose what improves the path "design → slicer → print".
+**Agent first** (ADR-0053, ADR-0054): a model is a project folder in Git whose parts are Rhai
+scripts; an AI agent works on it over MCP, the human gives tasks and accepts results.
 
 ## Orientation – read first
 
@@ -13,13 +15,16 @@ When in doubt, choose what improves the path "design → slicer → print".
 | **Requirements** per area (IDs `SK-…` etc., phases, open decisions) | `docs/requirements/` (e.g. `sketches.md`) |
 | Theme, colors, layout | `docs/design/theme.md` |
 | Mouse, trackpad and key bindings | `docs/design/controls.md` |
+| **Agent workflow**: script API, project folder, service, tasks, checks, MCP (IDs `AG-…`) | `docs/requirements/agent.md`, `docs/script-api.md` |
+| Live project view in the app (IDs `WA-…`) | `docs/requirements/project-app.md` |
+| Background: original concept and M0 measurements | `docs/concept/` |
 | Rules of a crate | `crates/<crate>/CLAUDE.md` (loaded automatically) |
 | **Quality harness for AI agents**: layers, roles, rule → check | `docs/harness.md`, `harness/rules.md` |
 | Style register (binding taste decisions) | `docs/design/code-style.md` |
 
 Stack: Rust 1.99 (Edition 2024, `rust-toolchain.toml`) · OpenCascade 7.8.1 via
 forks of `opencascade-sys` 0.3.0 (ADR-0047) and `opencascade` in `third_party/` + own cxx wrappers (ADR-0014) ·
-eframe/egui 0.36.2 · wgpu 30 (only via `qoob3d_render::wgpu`) · glam 0.34 · egui_kittest (tests).
+Rhai 1.27 (script language, ADR-0053) · eframe/egui 0.36.2 · wgpu 30 (only via `qoob3d_render::wgpu`) · glam 0.34 · egui_kittest (tests).
 
 ## Commands
 
@@ -42,6 +47,16 @@ cargo run -- --render /tmp/x.png --view iso # headless scene render (+ --ortho -
 cargo xtask screenshot                      # whole UI (egui_kittest) + scenes → target/screenshots/*.png
 cargo run -- --smoke-test                   # real app with synthetic input, exit code 0/1
 RUST_LOG=debug cargo run                    # with logging
+# Script projects (ADR-0053/0054); the service starts on demand, answers are JSON envelopes
+cargo run -- init <DIR>                     # new project: qoob3d.toml, parts/ lib/ values/ checks/ tasks/
+cargo run -- build [PARTS..]                # in the project folder; also: status, check [NAMES..], values
+cargo run -- task list                      # also: show ID, new TITLE [--body T], set ID STATE [--note T] (as the human)
+cargo run -- export PARTS.. --format 3mf    # stl | 3mf | step, into out/
+cargo run -- render-project <DIR> --out x.png --view iso   # headless picture of the built parts
+cargo run -- bench <DIR>                    # build seconds, peak worker memory, triangles per part
+cargo run -- mcp [DIR]                      # MCP server over stdio for AI agents
+cargo run -- --project <DIR>                # app with the live view of a project
+cargo run -- serve <DIR>                    # the project service itself (its workers: `qoob3d worker`)
 ```
 
 In tool shells, run `export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"` first if
@@ -154,12 +169,26 @@ Crate-specific pitfalls are in the respective `crates/<crate>/CLAUDE.md`.
 | M3a | Document model + `.qbd` (validation, migrations, fixture), sketches on XY/XZ/YZ, line/polyline, rectangle (2 points, center), circle, point, construction, value HUD with expressions, snapping, select/drag/delete, profiles via General Fuse, undo/redo, browser/timeline. Order ADR-0025, status per requirement: `docs/requirements/sketches.md` §18 | ✅ done |
 | H1 | AI harness: guard, roles (test-author/implementer/critic/verifier), Git hooks, CI, commit policy, rule and style register, strict lints, sabotage self-test. ADR-0037…0042, `docs/harness.md` | ✅ done (GitHub settings open) |
 | M4 | Body features: extrude, revolve, loft (also to a tip), offset plane, spur gear, coil/spring; new body/join/cut; dialogs with live preview; arcs in sketches; rebuild cache (hash chain); export STL/3MF; CLI `--report/--export`; reference model gate. ADR-0031…0036, status: `docs/requirements/bodies.md` | ✅ done |
+| R1 | Script kernel: sandboxed Rhai with a CAD API on OCCT (primitives, batched booleans with plausibility rule, profiles, pipes, fillet/chamfer, shell, measures, STEP). ADR-0053, `docs/script-api.md` | ✅ done |
+| R2/R3 | Project folder, values with sources, build graph, cache; worker processes with time and memory limits; service (HTTP) and CLI | ✅ done |
+| W1 | App shows a script project live (`--project`), indexed mesh format | ✅ done |
+| R4 | Task inbox with roles and review gate, checks, MCP server with confined file tools and render, `init`, `save`. ADR-0054 | ✅ done |
+| P1 | Performance and memory: parallel booleans, profile algebra, worker recycling, cache eviction, tessellation settings, `bench` | ✅ done |
+| R5 | Findings of the first agent run and of the critic: task binding, guide, API helpers, service hardening | open |
 | M3b | Solver (spike E-01 first), constraints, dimensions, parameters, arc, slot, polygon, trim, fillet, offset, mirror | open |
 | M3c | Construction planes (also inclined), sketches on faces, project, slice | open |
 | M5 | Editable timeline (parameters, recompute from a feature, suppress, rollback, error states) | open |
 | M6 | STEP export, menu, recently opened files, body selection, chamfers/fillets | open |
 
 ## Open items
+
+- **Licence exception for `smartstring` (MPL-2.0)**, a fixed dependency of Rhai, is missing in
+  the cargo-deny configuration (human only, ADR-0037). Until then the full check is red at
+  `deny` and the pre-push hook blocks.
+- **Own crate for service and MCP:** they live in `qoob3d-app` because the workspace manifest
+  is protected (ADR-0053); move them once it is unlocked.
+- **App side of the agent workflow:** tasks and annotations in the app, mouse tools that write
+  script lines (concept 7a), photo measurement (concept 6a), print analysis.
 
 - **OS sandbox for the harness** (agreed 2026-10-15): the shell guard is a textual speed
   bump (ADR-0049); write-protect `xtask/`, `harness/`, `.claude/`, `.github/`, `.githooks/`

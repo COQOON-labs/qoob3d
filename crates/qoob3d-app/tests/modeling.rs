@@ -214,7 +214,7 @@ fn box_from_rectangle_extrude_and_3mf_export() {
             .output()
             .unwrap();
         let text = String::from_utf8_lossy(&out.stdout).into_owned()
-            + &String::from_utf8_lossy(&out.stderr);
+            + String::from_utf8_lossy(&out.stderr).as_ref();
         assert!(!text.contains("failed"), "Bambu Studio rejects the export:\n{text}");
         assert!(text.contains("number_of_facets = 12"), "{text}");
         assert!(text.contains("volume = 10000.0"), "{text}");

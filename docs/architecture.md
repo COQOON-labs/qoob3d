@@ -46,6 +46,7 @@ flowchart LR
    as polylines) and sketch profiles via General Fuse (ADR-0028). `model.rs` builds the
    features one after another into bodies (booleans against touched bodies, hash chain cache,
    ADR-0031/0012). Rebuilds are coalesced: only the newest waiting request counts.
+   `script` runs model scripts (Rhai) on the same wrappers, on the calling thread (ADR-0053).
 4. **Renderer** (`qoob3d-render`): background, bodies, edges (pixel-wide quads), grid with
    print bed and axes (ADR-0021), in sketch mode in the sketch plane. Offscreen with MSAA, reverse-Z; egui gets a
    Unorm view (ADR-0019).
@@ -55,6 +56,37 @@ flowchart LR
    (ADR-0035). Export STL/3MF (ADR-0034). CLI: `--report`, `--export`, `--render` for
    `.qbd` files (ADR-0033). All texts via Fluent (English base, ADR-0020),
    saved `Settings`.
+   **Script projects** (ADR-0053, `docs/requirements/agent.md`): the same binary is
+   `qoob3d serve <DIR>` (HTTP service on 127.0.0.1: job queue, cache index, part states),
+   `qoob3d worker` (the only process that runs OCCT for project builds; JSON lines on
+   stdin/stdout, killed and replaced on time or memory limit or crash) and the CLI clients
+   `qoob3d build|status|export|values`. Parts are declared without OCCT (`part()` only
+   records), and in a worker too: the service never evaluates a script (ADR-0056); `/status`
+   answers from the last known declarations and lists files that do not load per file;
+   cache entries `.qoob3d/cache/<part>/<key>.{brep,qmsh,json}` are written by the
+   worker; the app (`--project`) only polls `/status` and loads changed meshes.
+   The service is for local tools only (ADR-0055): a random token per start in
+   `.qoob3d/service.json` is required as `X-Qoob3d-Token`, requests with an `Origin` or a
+   foreign `Host` get 403 before routing; clients (`live::Client`: app, CLI, MCP,
+   `render-project`) read port and token from that file, again whenever there is no answer,
+   and percent-encode names in paths. A panic in a job thread fails the job with kind
+   `crash`; the worker it held is replaced.
+   **Tasks, checks, MCP** (ADR-0054, agent.md §4): `tasks/NNNN-slug.md` is the task inbox
+   (`qoob3d-core::tasks`); the service serves it (`/tasks`, `/task/<id>`) and evaluates the
+   review gate from its own part and check states (a task needs a part and a check bound,
+   which the agent binds with `task_update`; load errors are reported as such; task writes
+   are serialised). `checks/*.rhai` declare checks
+   (`check`, `expect…`, kernel `script/check.rs`); `/check` builds stale parts and runs each
+   check as one worker request; a result is stale once a part it read was rebuilt or its file
+   changed. `/run` and `/measure` are worker requests that write nothing; `/save` commits
+   with the `git` executable only when parts and checks are green, only project paths, and
+   only when the project folder is the top level of its repository. `qoob3d mcp [DIR]` is a
+   JSON-RPC 2.0 server on stdio (hand-written, synchronous): its tools forward to the
+   service over HTTP as role `agent`, file tools are confined to the project folders,
+   `render` runs `qoob3d render-project` in a child process and returns the PNG (several
+   views as one labelled contact sheet); the script API reference, guide and examples are
+   embedded in the binary, and `qoob3d init` writes the files the reference examples read
+   to `lib/examples/`.
 6. **Printer database** (`qoob3d-core/src/printer/`): 441 models, generated from
    OrcaSlicer profiles (ADR-0021).
 
@@ -64,6 +96,8 @@ flowchart LR
 | --- | --- | --- |
 | Main/UI (winit, eframe) | egui context, `Viewport` (Camera, Renderer), document | wait for the kernel |
 | `qoob3d-kernel` | all OCCT objects, rebuild cache | touch UI or GPU types |
+| `qoob3d serve`: connection threads, `qoob3d-jobs` runner, one thread per running part | jobs, part records, worker pool | run OCCT, block `/status` behind a build |
+| `qoob3d worker` (process) | the OCCT shapes of one build | outlive its service (exits when stdin closes) |
 
 ## Crate dependencies (enforced by `cargo xtask check`, ADR-0036)
 
@@ -101,12 +135,25 @@ flowchart TD
 | Rebuild of the features, booleans, cache | `crates/qoob3d-kernel/src/model.rs` |
 | Feature dialogs, selection in the viewport | `crates/qoob3d-app/src/commands.rs` |
 | CLI batch (`--report`, `--export`) | `crates/qoob3d-app/src/batch.rs` |
+| Script project shown live (`--project`, service client, poller; W1) | `crates/qoob3d-app/src/live.rs` |
+| Project service, jobs, worker pool and limits, part states (R2/R3) | `crates/qoob3d-app/src/service.rs`, `src/service/` |
+| Worker process (build a part, cache entry, STEP) | `crates/qoob3d-app/src/worker.rs` |
+| CLI clients `build`, `status`, `export`, `values`, `check`, `task` | `crates/qoob3d-app/src/service_cli.rs` |
+| Checks, throwaway scripts, measure, save, task endpoints (R4) | `crates/qoob3d-app/src/service/{checks,probe,save,tasks}.rs`, `src/worker/probe.rs` |
+| MCP server (tools, confined files, render, embedded reference and guide) | `crates/qoob3d-app/src/mcp.rs`, `src/mcp/` |
+| `qoob3d init`, `qoob3d render-project`, contact sheet | `crates/qoob3d-app/src/{init,project_render}.rs`, `src/project_render/sheet.rs` |
+| Task inbox (files, roles, binding, review gate) | `crates/qoob3d-core/src/tasks/` |
+| Atomic file write (temp file + rename) | `crates/qoob3d-core/src/fs.rs` |
+| `check`/`expect…` in scripts, measures of shapes from Rust | `crates/qoob3d-kernel/src/script/{check,measure}.rs` |
+| Project folder, values, build graph, cache key | `crates/qoob3d-core/src/project/` |
+| Mesh transfer format, STL import | `crates/qoob3d-core/src/{qmesh,stl}.rs` |
 | E2E modeling through the UI | `crates/qoob3d-app/tests/modeling.rs` |
 | Reference model gate | `xtask/src/models.rs` |
 | Printer profiles (generated) | `crates/qoob3d-core/src/printer/{mod,data}.rs`, generator `xtask/src/printers.rs` |
 | Translations, settings | `crates/qoob3d-app/locales/*/main.ftl`, `src/{i18n,settings}.rs` |
 | Kernel protocol, worker | `crates/qoob3d-kernel/src/worker.rs` |
 | Own OCCT wrappers (C++) | `crates/qoob3d-kernel/cpp/`, bridge `src/occt.rs` |
+| Script kernel: Rhai CAD API, sandbox, errors, STEP/STL/3MF export (ADR-0053) | `crates/qoob3d-kernel/src/script.rs`, `src/script/`, reference `docs/script-api.md` |
 | Camera math (ortho/persp., ray, animation) | `crates/qoob3d-render/src/camera.rs` |
 | Render pipelines, targets, color space | `crates/qoob3d-render/src/renderer.rs` |
 | Shaders (bodies, lines, grid) | `crates/qoob3d-render/src/shaders/scene.wgsl` |
