@@ -7,38 +7,22 @@ Check the current look: `cargo xtask screenshot` → `target/screenshots/ui.png`
 ## Character
 
 Dark, calm, low contrast in the chrome. The attention belongs to the model.
-**One** accent color (mint) for selection, active tools, sketch elements and focus.
+**One** accent color (mint) for selection, hover, the primary button and focus.
 No second accent. Errors are red, warnings amber, both used sparingly.
 
 ## Colors – UI (sRGB, `crates/qoob3d-app/src/theme.rs`)
 
 | Token | Value | Usage |
 | --- | --- | --- |
-| `ACCENT` | `#3DE0B0` | Selection, active tool, hover on the ViewCube, orbit pivot, brand |
+| `ACCENT` | `#3DE0B0` | Hover on the ViewCube, orbit pivot, primary button, brand |
 | `PANEL_BG` | `#1D1F23` | Toolbar, browser |
-| `PANEL_BG_DARK` | `#17191C` | Timeline, input fields |
+| `PANEL_BG_DARK` | `#17191C` | Input fields, text on the primary button |
 | `STROKE` | `#2C3036` | Separators, frames |
 | `TEXT` | `#D4D7DC` | Text |
 | `TEXT_MUTED` | `#8A9099` | Captions, status line, hints |
-| `OVERLAY_BG` | `#1D1F23` at 90 % opacity | Navigation bar in the viewport |
+| `OVERLAY_BG` | `#1D1F23` at 90 % opacity | Navigation bar and empty state in the viewport |
 | Warning (amber) | `#F5A623` | Exclusion zones (hatched), single-nozzle zones (tinted) |
-| `CONSTRUCTION` | `#C08A3A` | Construction geometry (dashed), also in the preview |
-| `ERROR` | `#E5534B` | Open curve ends, invalid HUD input, kernel errors |
-
-## Sketches (`crates/qoob3d-app/src/sketch_ui.rs`, SK-VS-*)
-
-| Element | Appearance |
-| --- | --- |
-| Curves of the active sketch | `ACCENT`, 1.6 pt; selection/hover brighter and wider |
-| Construction | `CONSTRUCTION`, dashed |
-| Profiles | `ACCENT` at ~12 % opacity, hover ~25 % |
-| Open ends | `ERROR` dot |
-| Preview while drawing | dashed, `ACCENT` (in construction mode `CONSTRUCTION`) |
-| Snapping | Symbol at the cursor, alignment lines dashed |
-| Value HUD | opaque `PANEL_BG`, monospace, active field `ACCENT`, error `ERROR` |
-| Inactive sketches | thin, gray, without profiles |
-
-Check the appearance: `cargo xtask screenshot` → `sketch-plane-pick.png`, `sketch.png`.
+| `ERROR` | `#E5534B` | Failed parts, service not reachable |
 
 ## Colors – viewport (linear, `crates/qoob3d-render/src/renderer.rs::palette`)
 
@@ -59,21 +43,16 @@ view.
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
-│ QOOB3D DESIGN │ FILE │ SKETCH │ CREATE │ EXPORT (Ribbon)   ⚙ Settings │
-├────────────┬─────────────────────────────────────────────┬───────────┤
-│ BROWSER    │ Status (triangles · edges · watertight · cm³)  🏠 ViewCube │
-│ ▾ Untitled │                3D-Viewport                               │
-│   ▸ Origin │                                                          │
-│   ▾ Bodies │                                                          │
-│   ▾ Sketches                                                         │
+│ QOOB3D DESIGN │ 📂 Open (PROJECT)                         ⚙ Settings │
+├────────────┬─────────────────────────────────────────────────────────┤
+│ BROWSER    │ Status (parts · up to date · errors)         🏠 ViewCube │
+│ ▾ Parts    │                3D-Viewport                               │
+│   👁 ◼ A · up to date   (empty state without a project:             │
+│   👁 ◼ B · error         "No project open" + "Open project folder…") │
 │            │ [⛶ Fit | Perspective Orthographic | Grid Build volume | Printer ▾] │
-├────────────┴─────────────────────────────────────────────────────────┤
-│ ⏮ ⏴ ⏵ ⏭ │ Timeline                                                  │
-└──────────────────────────────────────────────────────────────────────┘
+└────────────┴─────────────────────────────────────────────────────────┘
 ```
 
-- Functions of later milestones are visible but disabled, with the hint
-  "Coming in Mx".
 - ViewCube: 118 pt, top right. The labels FRONT/BACK/… (or VORNE/HINTEN/… in German) lie
   sheared in the cube face. Edges and corners are each **one** selection across all
   involved faces and light up mint together on hover.
@@ -82,5 +61,5 @@ view.
 
 The base language is **English**, German is a language pack, selectable under ⚙ Settings
 (ADR-0020). Texts are short and without exclamation marks, workspace captions in capitals
-(DESIGN, SKETCH …). Units are always shown (`20 mm`). The decimal separator follows
+(DESIGN, PROJECT …). Units are always shown (`20 mm`). The decimal separator follows
 the language (`15.70` / `15,70 cm³`).

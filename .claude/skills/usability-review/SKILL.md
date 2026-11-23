@@ -9,8 +9,8 @@ The goal is the shortest, error-free path "design → slicer → print" (ADR-000
 a maker with an FDM printer who roughly knows Fusion 360.
 
 1. **Look:** run `cargo xtask screenshot` and look at all PNGs in `target/screenshots/`. For
-   the concrete workflow, use the screenshot steps of the E2E tests in
-   `crates/qoob3d-app/tests/modeling.rs` and `tests/ui.rs`.
+   the concrete workflow, use the screenshot steps of the UI tests in
+   `crates/qoob3d-app/tests/ui.rs` and `tests/project.rs`.
 2. **Cognitive walkthrough** for the task of the workflow, step by step:
    Does the user know what to do now? Do they see the control? Do they connect it with
    their goal? Do they notice that it worked? Every "no" is a finding.
@@ -19,7 +19,7 @@ a maker with an FDM printer who roughly knows Fusion 360.
    recognition rather than recall, efficiency (shortcuts), minimalist design, understandable
    error messages, help.
 4. **Count interactions:** clicks, keys and dialog switches for the workflow (readable from the
-   E2E test). If the number rises compared to before, that is a finding, unless there is
+   UI test). If the number rises compared to before, that is a finding, unless there is
    a reason.
 5. **Accessibility:**
    - Every interactive element has an accessible name. `egui_kittest` finds widgets

@@ -3,8 +3,8 @@
 //! requirement ID. All tests run against the fake `qoob3d serve` in `common/`.
 //!
 //! Sections: project and service start (WA-OP-*), client protocol (WA-PR-*),
-//! polling (WA-LV-01/02/05), the view model `Live`, CLI and headless render
-//! (WA-OP-01, WA-HL-01), UI with egui_kittest (WA-LV-04/05/06, WA-OP-03).
+//! polling (WA-LV-01/02/05), the view model `Live`, CLI (WA-OP-01), UI with
+//! egui_kittest (WA-LV-04/05/06, WA-OP-03).
 //!
 //! R5 hardening of the client (docs/requirements/agent.md §6.1): the token
 //! of `service.json` on every request (AG-HD-03), percent-encoded part names

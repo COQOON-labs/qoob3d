@@ -27,11 +27,6 @@ struct Globals {
     axis_x: vec4<f32>,
     axis_y: vec4<f32>,
     restricted: vec4<f32>,
-    // Plane of the grid (world XY or the active sketch plane): origin, u, v, n.
-    grid_origin: vec4<f32>,
-    grid_u: vec4<f32>,
-    grid_v: vec4<f32>,
-    grid_n: vec4<f32>,
 };
 
 // Bed polygons back to back: printable area, exclude zone, nozzle 1, nozzle 2
@@ -266,17 +261,12 @@ fn fs_grid(in: GridOut) -> GridFrag {
     let p0 = unproject(in.ndc, 1.0);
     let p1 = unproject(in.ndc, 0.5);
     let dir = p1 - p0;
-    let plane_o = g.grid_origin.xyz;
-    let plane_n = g.grid_n.xyz;
-    let denom = dot(dir, plane_n);
-    if (abs(denom) < 1e-12) { discard; }
-    let t = dot(plane_o - p0, plane_n) / denom;
+    if (abs(dir.z) < 1e-12) { discard; }
+    let t = -p0.z / dir.z;
     if (t < 0.0) { discard; }
     let p = p0 + dir * t;
-    // Local plane coordinates; equal to world XY for the default plane.
-    let q = vec2<f32>(dot(p - plane_o, g.grid_u.xyz), dot(p - plane_o, g.grid_v.xyz));
-    let target_rel = g.orbit_target.xyz - plane_o;
-    let target_q = vec2<f32>(dot(target_rel, g.grid_u.xyz), dot(target_rel, g.grid_v.xyz));
+    let q = p.xy;
+    let target_q = g.orbit_target.xy;
 
     var out: GridFrag;
     let clip = g.view_proj * vec4<f32>(p, 1.0);
@@ -287,7 +277,7 @@ fn fs_grid(in: GridOut) -> GridFrag {
     let dist = g.orbit_target.w;
     let from_target = length(q - target_q);
     let fade = (1.0 - smoothstep(3.0 * dist, 8.0 * dist, from_target))
-        * smoothstep(0.02, 0.2, abs(dot(normalize(dir), plane_n)));
+        * smoothstep(0.02, 0.2, abs(normalize(dir).z));
 
     var c = vec4<f32>(0.0);
     // World units per pixel, for pixel-wide outlines and anti-aliasing.

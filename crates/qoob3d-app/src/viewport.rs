@@ -192,7 +192,6 @@ impl Viewport {
             bed: Some(&bed),
             show_build_volume: settings.show_build_volume,
             pixels_per_point: ppp,
-            grid_plane: None,
         };
         let (view, recreated) =
             self.renderer.render(&rs.device, &rs.queue, size_px, &camera, &options);

@@ -6,9 +6,9 @@ message: docs: tweak theme notes\n\nCo-Authored-By: Claude <noreply@anthropic.co
 diff --git a/docs/design/theme.md b/docs/design/theme.md
 --- a/docs/design/theme.md
 +++ b/docs/design/theme.md
-@@ -84,3 +84,5 @@
+@@ -63,3 +63,5 @@
  (ADR-0020). Texts are short and without exclamation marks, workspace captions in capitals
- (DESIGN, SKETCH …). Units are always shown (`20 mm`). The decimal separator follows
+ (DESIGN, PROJECT …). Units are always shown (`20 mm`). The decimal separator follows
  the language (`15.70` / `15,70 cm³`).
 +
 +Sabotage.
