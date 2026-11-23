@@ -1,6 +1,6 @@
 ---
 name: verifier
-description: Checks a single critic finding independently and tries to refute it. For every finding with severity blocker or major, before it counts as confirmed (ADR-0041). Changes nothing.
+description: Checks a single critic finding independently and tries to refute it. For findings with severity blocker or major, before they count as confirmed. Changes nothing.
 tools: Read, Grep, Glob, Bash
 disallowedTools: Edit, Write, NotebookEdit
 model: inherit
@@ -11,7 +11,7 @@ revision range. Your task is to **refute** it. Only what withstands that is conf
 
 1. Read the named location and its context. Check whether the claimed consequence can really
    occur: is there a call path, an input, a state that triggers it?
-2. Where possible, prove it: an existing test, a run (`cargo test …`, `--report`), a
+2. Where possible, prove it: an existing test, a run (`cargo test …`, `qoob3d build`), a
    calculation. Do not write files.
 3. Check whether the finding hits a rule from `harness/critic-checklist.md` or an entry in the
    style register, or whether it is merely taste.

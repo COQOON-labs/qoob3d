@@ -1,5 +1,5 @@
 # One more lint in an existing multi-lint #![expect(…)] adds a suppression
-# without adding an attribute line; the ratchet counts lints (ADR-0040)
+# without adding an attribute line; the ratchet counts lints (ADR-0037)
 command: cargo xtask hygiene
 expect: lint suppressions (#[expect]),
 --- patch
@@ -7,7 +7,7 @@ diff --git a/crates/qoob3d-kernel/src/occt.rs b/crates/qoob3d-kernel/src/occt.rs
 --- a/crates/qoob3d-kernel/src/occt.rs
 +++ b/crates/qoob3d-kernel/src/occt.rs
 @@ -1,5 +1,6 @@
- //! cxx bridge to QOOB3D's own OCCT wrappers in `cpp/` (ADR-0014).
+ //! cxx bridge to QOOB3D's own OCCT wrappers in `cpp/` (ADR-0004).
  #![expect(
      unsafe_code,
      unreachable_pub,

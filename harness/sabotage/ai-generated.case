@@ -1,4 +1,4 @@
-# Commit message contains a "Generated with" note (ADR-0038)
+# Commit message contains a "Generated with" note (ADR-0037)
 command: cargo xtask commits HEAD^..HEAD
 expect: AI attribution in the commit message: `🤖 Generated with Claude Code`
 message: docs: tweak theme notes\n\n🤖 Generated with Claude Code
@@ -6,9 +6,9 @@ message: docs: tweak theme notes\n\n🤖 Generated with Claude Code
 diff --git a/docs/design/theme.md b/docs/design/theme.md
 --- a/docs/design/theme.md
 +++ b/docs/design/theme.md
-@@ -84,3 +84,5 @@
+@@ -63,3 +63,5 @@
  (ADR-0020). Texts are short and without exclamation marks, workspace captions in capitals
- (DESIGN, SKETCH …). Units are always shown (`20 mm`). The decimal separator follows
+ (DESIGN, PROJECT …). Units are always shown (`20 mm`). The decimal separator follows
  the language (`15.70` / `15,70 cm³`).
 +
 +Sabotage.

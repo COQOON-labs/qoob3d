@@ -10,9 +10,8 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::{Value, json};
 
 use qoob3d_core::fs::write_atomic;
+use qoob3d_core::project::layout;
 
-const FOLDERS: [&str; 5] = ["parts", "lib", "values", "checks", "tasks"];
-const CONFIG: &str = "qoob3d.toml";
 const EXTENSIONS: [&str; 3] = ["rhai", "toml", "md"];
 const MAX_BYTES: u64 = 1 << 20;
 
@@ -22,7 +21,7 @@ fn components(relative: &str) -> Result<Vec<&str>, String> {
     let parts: Option<Vec<&str>> = path
         .components()
         .map(|c| match c {
-            Component::Normal(name) => name.to_str().filter(|n| *n != ".qoob3d"),
+            Component::Normal(name) => name.to_str().filter(|n| *n != layout::DATA_DIR),
             _ => None,
         })
         .collect();
@@ -51,13 +50,14 @@ fn allowed_extension(name: &str) -> bool {
 fn file(root: &Path, relative: &str) -> Result<PathBuf, String> {
     let parts = components(relative)?;
     let placed = match parts.as_slice() {
-        [name] => *name == CONFIG,
-        [folder, ..] => FOLDERS.contains(folder),
+        [name] => *name == layout::CONFIG_FILE,
+        [folder, ..] => layout::FOLDERS.contains(folder),
         [] => false,
     };
     if !placed {
         return Err(format!(
-            "{relative:?}: only {CONFIG} and files under parts/, lib/, values/, checks/ and tasks/"
+            "{relative:?}: only {} and files under parts/, lib/, values/, checks/ and tasks/",
+            layout::CONFIG_FILE
         ));
     }
     if !parts.last().is_some_and(|name| allowed_extension(name)) {
@@ -125,15 +125,15 @@ pub(super) fn list(root: &Path, dir: Option<&str>) -> Result<Value, String> {
     let mut files = Vec::new();
     if let Some(dir) = dir {
         let parts = components(dir)?;
-        if !parts.first().is_some_and(|folder| FOLDERS.contains(folder)) {
+        if !parts.first().is_some_and(|folder| layout::FOLDERS.contains(folder)) {
             return Err(format!("{dir:?}: only parts/, lib/, values/, checks/ and tasks/"));
         }
         walk(&without_links(root, &parts)?, &parts.join("/"), &mut files);
     } else {
-        if std::fs::symlink_metadata(root.join(CONFIG)).is_ok_and(|m| m.is_file()) {
-            files.push(CONFIG.to_owned());
+        if std::fs::symlink_metadata(root.join(layout::CONFIG_FILE)).is_ok_and(|m| m.is_file()) {
+            files.push(layout::CONFIG_FILE.to_owned());
         }
-        for folder in FOLDERS {
+        for folder in layout::FOLDERS {
             if let Ok(path) = without_links(root, &[folder]) {
                 walk(&path, folder, &mut files);
             }

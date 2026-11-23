@@ -1,97 +1,99 @@
 # Quality harness for AI agents
 
-How QOOB3D makes sure AI agents can write a lot of code without the quality dropping.
-Decisions: ADR-0037 … ADR-0045. Which rule is checked how: `harness/rules.md`.
+How QOOB3D keeps the quality up while AI agents write most of the code, without slowing the
+work down. Decision: ADR-0037.
 
 ## Principles
 
 1. **Deterministic wherever possible.** A tool checks, not the agent's diligence.
-2. **Brake locally, block in CI.** Locally an agent has the human's permissions. The actual
-   wall is CI and the GitHub rules (ADR-0037).
-3. **The harness belongs to the human.** Agents cannot change it, only propose changes.
-   Unlock: start Claude Code with `QOOB3D_HARNESS_UNLOCK=1`. The unlock lifts only the
-   harness-file protection; fixture, role and bypass rules stay active, and no agent may edit
-   settings, shell startup files or `launchctl` state that could set the variable (ADR-0043).
-4. **Independent oracles.** Tests are written in a different context than the code (ADR-0039),
-   the critic judges with a fresh context, a verifier tries to refute it (ADR-0041).
-5. **The harness checks itself** (ADR-0042).
+2. **Brake locally, block in CI.** Locally an agent has the human's permissions; local hooks
+   only save a round trip. The wall is CI and the GitHub rules.
+3. **Sufficiently safe, not over-regulated.** A check exists because something actually went
+   wrong or because it is cheap. A merely conceivable bypass of a local brake is no reason for
+   a new gate.
+4. **The harness belongs to the human.** Agents propose changes to it; the edit tools refuse
+   harness files unless Claude Code was started with `QOOB3D_HARNESS_UNLOCK=1`.
+5. **Independent opinions are tools, not gates.** Separate roles for tests and code, the critic
+   and the verifier are skills to use when they pay off.
 
 ## Layers
 
 ```mermaid
 flowchart LR
-    A[Agent wants to change a file] --> G{Guard<br/>PreToolUse}
-    G -- harness / fixture /<br/>role switch / --no-verify /<br/>self-unlock --> X[blocked]
-    G --> E[Edit]
-    E --> S{Stop hook<br/>check --fast}
+    A[Agent edits a file] --> G{Guard<br/>harness files<br/>read-only}
+    G --> S{Stop hook<br/>check --fast}
     S --> C[commit-msg<br/>identity · AI attribution]
-    C --> P{pre-push<br/>policy · gitleaks ·<br/>critic record ·<br/>check of each pushed tip}
-    P --> CI{CI<br/>policy · selftest ·<br/>check macOS · mutants}
-    CI --> M[(main<br/>branch protection)]
+    C --> P{pre-push<br/>commit policy · gitleaks}
+    P --> CI{CI<br/>policy · check macOS}
+    CI --> M[(main<br/>ruleset · merge queue)]
 ```
 
-| Check | Local brake | Wall in CI |
+## Rules and their checks
+
+| Rule | Local | CI |
 | --- | --- | --- |
-| fmt, clippy (strict lints), tests, reference models | stop hook, pre-push | `check (macOS)` |
-| Smoke test, supply chain (cargo-deny) | pre-push (`check-rev`: full `check` of the tip of each pushed ref in a temporary worktree, ADR-0048) | `check (macOS)`, `policy` |
-| Hygiene (tests in their own files, lint suppressions capped, English only, CODEOWNERS covers the harness) | stop hook, pre-push | `policy`, `check` |
-| Rule register complete | stop hook, pre-push | `check` |
-| Commit policy (identity, no AI attribution, tests/code separate, fixtures) | commit-msg, pre-push | `policy` |
-| Secrets (gitleaks), supply chain (cargo-deny), unused dependencies | pre-push (gitleaks, deny) | `policy` |
-| Test quality (mutation tests) | – | `mutants` |
-| Harness works (sabotage corpus) | `cargo xtask selftest` | `selftest`, Mondays |
-| Harness files, roles, bypasses, self-unlock | guard | CODEOWNERS review |
-| Critic review | pre-push (`xtask review`) | – (record stays local) |
+| Done means `cargo xtask check` is green: fmt, clippy with the strict workspace lints, tests, reference models, smoke test | Stop hook (`check --fast`) | `check (macOS)` |
+| No `unsafe`, no `unwrap` in production code, no `dbg!`/`todo!`, no `#[allow]`; `#[expect]` and `#[ignore]` only with a reason | clippy (lints in `Cargo.toml`) | `check (macOS)` |
+| The number of lint suppressions never grows (`harness/ratchet.txt`) | `xtask hygiene` | `policy`, `check (macOS)` |
+| Unit tests live in `<module>/tests.rs`, never inline | `xtask hygiene` | `policy`, `check (macOS)` |
+| Every crate inherits the workspace lints | `xtask hygiene` | `policy`, `check (macOS)` |
+| Crate boundaries (ADR-0036) | `xtask arch` | `policy`, `check (macOS)` |
+| ADRs are well-formed, the index is current, nothing refers to an unknown or superseded ADR | `xtask docs` | `policy`, `check (macOS)` |
+| The repository is English (ADR-0001) | `xtask hygiene` | `policy`, `check (macOS)` |
+| No hard-coded UI texts, translations complete (ADR-0020) | `xtask i18n` | `policy`, `check (macOS)` |
+| Author and committer are the identity in `harness/identity.txt`; no commit names an AI as author, co-author or generator | commit-msg, pre-push (`xtask commits`) | `policy` |
+| No secrets in the history | pre-push (gitleaks) | `policy` |
+| Vetted supply chain and licences, no unused dependencies | `xtask check` (cargo-deny) | `policy` (cargo-deny, cargo-machete) |
+| The harness changes only with the human's approval | guard (edit tools), `xtask hygiene` (CODEOWNERS covers every harness path) | CODEOWNERS review, `policy` flags harness changes |
+| The harness still rejects what it should (`harness/sabotage/`) | `cargo xtask selftest` | `selftest`: weekly and on pull requests that change the harness |
+| Tests really check something | – | `mutants`: weekly report, never a gate |
+
+Everything that needs judgment (design, duplication, abstraction, error handling,
+accessibility, usability) is a matter for the review of the pull request. The checklist in
+`harness/critic-checklist.md` and the style register `docs/design/code-style.md` say what to
+look for.
 
 The git hooks share their setup in `.githooks/lib.sh`: they build xtask, on macOS remove the
-quarantine attribute that GUI clients such as Sourcetree set, so Gatekeeper starts it, and run
-the binary directly (`cargo xtask` would re-link and re-quarantine it). Commits and merges
-therefore work from Sourcetree. `pre-push` first checks with a probe file whether the client
-quarantines new files and then stops before building anything: the full check builds and runs
-fresh binaries that cannot be cleared in time, so pushes go from a terminal (ADR-0051).
+quarantine attribute that GUI clients such as Sourcetree set, so that Gatekeeper starts it, and
+run the binary directly (`cargo xtask` would re-link and re-quarantine it). Commits and pushes
+therefore work from Sourcetree.
 
-## Roles (Claude Code subagents)
+## Voluntary tools (Claude Code subagents and skills)
 
-| Agent | May | Purpose |
-| --- | --- | --- |
-| `test-author` | write tests only | tests from the specification, before the implementation |
-| `implementer` | write production code only | make tests green, with as little code as possible |
-| `critic` | read only | diff against `harness/critic-checklist.md` |
-| `verifier` | read only | refute or confirm a single finding |
-| `harness-auditor` | read only | check the harness for fitness for purpose |
+| Tool | Purpose |
+| --- | --- |
+| `/deliver` with `test-author` and `implementer` | tests from the specification in a different context than the code: an independent oracle for geometry, file formats and bugfixes |
+| `/critic-review` with `critic` and `verifier` | a second opinion on a diff with a fresh context; severe findings are verified before they are reported |
+| `/usability-review` | walkthrough of a UI workflow |
+| `/harness-audit` with `harness-auditor` | is the harness still fit for purpose? |
 
-Workflows as skills: `/deliver` (feature or bugfix), `/critic-review`,
-`/usability-review`, `/harness-audit`.
+None of them is enforced. The result of a critic review belongs in the pull request
+description.
 
 ## For humans
 
 ```sh
 cargo xtask setup                 # once: activate Git hooks
 QOOB3D_HARNESS_UNLOCK=1 claude    # session in which agents may change the harness
-QOOB3D_SKIP_REVIEW=1 git push     # your own push without a critic record
 cargo xtask selftest              # check the harness against all sabotage cases
 ```
 
-**Once on GitHub** (ADR-0037):
+**Once on GitHub:**
 
-1. Ruleset for `main`: pull request required, required checks `policy`,
-   `selftest (harness vs. sabotage)`, `check (macOS)`, `mutants (changed code)`, no
-   force push, no deletion, **no bypass list**. Allow only merge commits: squash and rebase
-   merges on GitHub get the committer `GitHub` and fail the identity rule (ADR-0044).
+1. Ruleset for `main`: pull request required, required checks `policy` and `check (macOS)`,
+   no force push, no deletion. The merge queue runs the same checks (`merge_group` trigger).
+   Allow only merge commits: squash and rebase merges on GitHub get the committer `GitHub` and
+   fail the identity rule.
 2. "Require review from Code Owners" (`.github/CODEOWNERS` names the owner of every harness
    path; `cargo xtask hygiene` keeps it complete).
 3. Recommended: a separate GitHub identity for the agent (bot account or app) with
-   write access to branches, without merge and admin rights. Only then is the wall
-   complete.
+   write access to branches, without merge and admin rights.
 
-## Limits (honestly)
+## Limits
 
-- A determined agent can get around local brakes: the guard reads shell commands as text
-  (a harness path needs a pure read, an allowlist, and so do test, code and fixture paths
-  outside the agent's role, ADR-0049), the role ledger and the critic record live in directories
-  the agent can reach. CI catches this as long as the agent cannot merge with admin rights.
-- The critic is not deterministic. It only blocks through verified findings.
-- Usability and accessibility are so far checked by the critic (`/usability-review`). Still
-  missing as deterministic checks: AccessKit names of all controls, contrast of the theme
-  colors, target sizes, interaction budgets for core workflows.
-- Fuzzing of the file formats (`.qbd`) is still missing.
+- The guard is a write protection for the edit tools, not a sandbox: a shell command can
+  still change a harness file. Such a change shows up in the diff, CI flags it and the code
+  owner has to approve it.
+- Local hooks can be skipped (`--no-verify`). CI runs the same checks again.
+- Usability and accessibility are checked by review only. Deterministic checks (AccessKit
+  names of all controls, contrast of the theme colors, target sizes) are still missing.

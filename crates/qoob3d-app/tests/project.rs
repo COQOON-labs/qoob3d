@@ -1,10 +1,10 @@
-//! Milestone W1: QOOB3D opens a script project folder and shows its parts
+//! QOOB3D opens a script project folder and shows its parts
 //! live (docs/requirements/project-app.md, ADR-0053). Every test names its
 //! requirement ID. All tests run against the fake `qoob3d serve` in `common/`.
 //!
 //! Sections: project and service start (WA-OP-*), client protocol (WA-PR-*),
-//! polling (WA-LV-01/02/05), the view model `Live`, CLI and headless render
-//! (WA-OP-01, WA-HL-01), UI with egui_kittest (WA-LV-04/05/06, WA-OP-03).
+//! polling (WA-LV-01/02/05), the view model `Live`, CLI (WA-OP-01), UI with
+//! egui_kittest (WA-LV-04/05/06, WA-OP-03).
 //!
 //! R5 hardening of the client (docs/requirements/agent.md §6.1): the token
 //! of `service.json` on every request (AG-HD-03), percent-encoded part names
@@ -20,7 +20,8 @@ use common::{FakePart, FakeService, Mode, TempProject, cube_qmesh, same_dir, tok
 use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable as _;
-use qoob3d_app::live::{self, Client, Live, Part, PartState, Poller, ProjectDir, Update};
+use qoob3d_app::client::{self, Client, Part, PartState, ProjectDir};
+use qoob3d_app::live::{self, Live, Poller, Update};
 use qoob3d_app::{QoobApp, StartOptions};
 
 /// Generous upper bound for waiting on background work; the tests normally
@@ -88,23 +89,23 @@ fn project_in_missing_folder_is_an_error() {
 #[test]
 fn service_command_comes_from_the_environment_value() {
     let own = std::env::current_exe().expect("current exe").display().to_string();
-    assert_eq!(live::service_command(None), std::slice::from_ref(&own));
+    assert_eq!(client::service_command(None), std::slice::from_ref(&own));
     assert_eq!(
-        live::service_command(Some("/opt/q/qoob3d --log debug")),
+        client::service_command(Some("/opt/q/qoob3d --log debug")),
         ["/opt/q/qoob3d", "--log", "debug"]
     );
     // Repeated and surrounding spaces do not produce empty arguments.
-    assert_eq!(live::service_command(Some("  sh  /x/start.sh ")), ["sh", "/x/start.sh"]);
+    assert_eq!(client::service_command(Some("  sh  /x/start.sh ")), ["sh", "/x/start.sh"]);
     // An empty value is treated like an unset one.
-    assert_eq!(live::service_command(Some("")), std::slice::from_ref(&own));
-    assert_eq!(live::service_command(Some("   ")), [own]);
+    assert_eq!(client::service_command(Some("")), std::slice::from_ref(&own));
+    assert_eq!(client::service_command(Some("   ")), [own]);
 }
 
 /// WA-OP-02 / WA-LV-01: the timing constants of the specification.
 #[test]
 fn timing_constants_match_the_specification() {
-    assert_eq!(live::STATUS_TIMEOUT, Duration::from_secs(1));
-    assert_eq!(live::START_TIMEOUT, Duration::from_secs(20));
+    assert_eq!(client::STATUS_TIMEOUT, Duration::from_secs(1));
+    assert_eq!(client::START_TIMEOUT, Duration::from_secs(20));
 }
 
 /// WA-LV-01: polling every 0.5 s.
@@ -770,20 +771,6 @@ fn cli_without_qoob3d_toml_exits_with_code_2() {
     assert!(stderr.contains(&dir.display().to_string()), "folder not named: {stderr}");
 }
 
-/// WA-OP-01 + WA-HL-01: same for the headless render; no PNG is written.
-#[test]
-fn cli_render_without_qoob3d_toml_exits_with_code_2() {
-    let project = TempProject::new("cli-no-toml-render");
-    let dir = project.not_a_project();
-    let png = project.root.join("out.png");
-    let args = [os("--project"), dir.as_os_str(), os("--render"), png.as_os_str()];
-    let out = run_qoob3d(&args, None, Duration::from_secs(30));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
-    assert!(stderr.contains(&dir.display().to_string()), "folder not named: {stderr}");
-    assert!(!png.exists());
-}
-
 /// WA-OP-01: a folder that does not exist → exit 2, folder named.
 #[test]
 fn cli_with_a_missing_folder_exits_with_code_2() {
@@ -793,95 +780,6 @@ fn cli_with_a_missing_folder_exits_with_code_2() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
     assert!(stderr.contains(&dir.display().to_string()), "folder not named: {stderr}");
-}
-
-/// Width and height of a valid PNG.
-fn png_size(path: &Path) -> (u32, u32) {
-    let bytes = std::fs::read(path).expect("PNG written");
-    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    let reader = decoder.read_info().expect("valid PNG");
-    (reader.info().width, reader.info().height)
-}
-
-/// WA-HL-01 + WA-OP-02 end to end: no `service.json`, the service is started
-/// via `QOOB3D_SERVICE_CMD` (with an argument: `sh <script>`), a build of all
-/// parts is requested, the app waits until nothing is `outdated` /
-/// `never_built` (the fake switches 3 status polls after `POST /build`),
-/// loads the meshes, renders and exits 0. The image differs from the demo
-/// render, so the project parts – not the demo body – were drawn.
-#[test]
-fn headless_render_builds_waits_and_writes_png() {
-    let project = TempProject::new("hl-ok");
-    let fake = FakeService::start(vec![
-        FakePart::unbuilt("shaft", "never_built"),
-        FakePart::built("lid", "outdated", "k-lid-0", cube_qmesh([0.0; 3], 5.0)),
-    ]);
-    fake.on_build(
-        3,
-        vec![
-            FakePart::built("shaft", "current", "k-shaft-1", cube_qmesh([0.0; 3], 40.0)),
-            FakePart::built("lid", "current", "k-lid-1", cube_qmesh([50.0, 0.0, 0.0], 20.0)),
-        ],
-    );
-    let env_cmd = project.start_script(fake.port).join(" ");
-    let png = project.root.join("project.png");
-    let args = [
-        os("--project"),
-        project.dir.as_os_str(),
-        os("--render"),
-        png.as_os_str(),
-        os("--size"),
-        os("320x240"),
-    ];
-    let out = run_qoob3d(&args, Some(&env_cmd), Duration::from_secs(120));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
-    assert_started(&project);
-    assert_eq!(fake.builds().len(), 1, "one build of all parts: {:?}", fake.log());
-    assert!(fake.count("GET /status") >= 4, "did not wait for the build: {:?}", fake.log());
-    assert!(fake.count("GET /mesh/shaft") >= 1, "shaft not loaded: {:?}", fake.log());
-    assert!(fake.count("GET /mesh/lid") >= 1, "lid not loaded: {:?}", fake.log());
-    assert_eq!(png_size(&png), (320, 240));
-
-    let demo = project.root.join("demo.png");
-    let args = [os("--render"), demo.as_os_str(), os("--size"), os("320x240")];
-    let out = run_qoob3d(&args, None, Duration::from_secs(120));
-    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
-    assert_ne!(
-        std::fs::read(&png).expect("project png"),
-        std::fs::read(&demo).expect("demo png"),
-        "the project render shows the demo body"
-    );
-}
-
-/// WA-HL-01: a part in state `failed` → named on stderr, PNG still
-/// written, exit 1. The service runs already (`service.json`), so the start
-/// command (a dud) must not be needed.
-#[test]
-fn headless_render_with_a_failed_part_exits_1_after_rendering() {
-    let project = TempProject::new("hl-fail");
-    let fake = FakeService::start(vec![
-        FakePart::built("shaft", "current", "k-shaft-1", cube_qmesh([0.0; 3], 10.0)),
-        FakePart::unbuilt("bracket", "failed"),
-    ]);
-    project.write_service_json(fake.port);
-    let env_cmd = project.dud_script().join(" ");
-    let png = project.root.join("failed.png");
-    let args = [
-        os("--project"),
-        project.dir.as_os_str(),
-        os("--render"),
-        png.as_os_str(),
-        os("--size"),
-        os("320x240"),
-    ];
-    let out = run_qoob3d(&args, Some(&env_cmd), Duration::from_secs(120));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
-    assert!(stderr.contains("bracket"), "failed part not reported: {stderr}");
-    assert_eq!(png_size(&png), (320, 240));
-    assert_eq!(project.script_call(), None, "service started although it was running");
-    assert_eq!(fake.builds().len(), 1, "one build of all parts: {:?}", fake.log());
 }
 
 // ================================================================== UI (egui_kittest)
@@ -1147,4 +1045,50 @@ fn ui_first_meshes_fit_the_camera_later_updates_do_not() {
     steps_for(&mut h, Duration::from_millis(300));
     wait_until(&mut h, "camera settled", |a| !a.viewport().is_animating());
     assert_eq!(h.state().viewport().camera, fitted, "a later update moved the camera");
+}
+
+/// WA-OP-04: from the empty state, `open_project` (what the folder dialog,
+/// the toolbar button and Cmd/Ctrl+O call) shows the project live.
+#[test]
+fn ui_opens_a_project_from_the_empty_state() {
+    let project = TempProject::new("ui-open");
+    let fake = FakeService::start(ui_parts());
+    project.write_service_json(fake.port);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1440.0, 860.0))
+        .wgpu()
+        .build_eframe(|cc| QoobApp::new(cc, StartOptions::default()).expect("app starts"));
+    h.run_steps(3);
+    assert!(h.state().live().is_none());
+    assert!(has_text(&h, "Open project folder"), "no empty state");
+
+    let ctx = h.ctx.clone();
+    h.state_mut().open_project(&project.dir, &ctx);
+    wait_until(&mut h, "parts listed and meshes loaded", |a| {
+        a.live().is_some_and(|l| l.parts().len() == 4) && meshes_loaded(a, 2)
+    });
+    h.run_steps(2);
+    assert!(row(&h, "shaft", "up to date").is_some(), "parts not listed");
+    assert!(!has_text(&h, "Open project folder"), "the empty state is still shown");
+    assert!(fake.count("GET /status") >= 1, "the service was not asked");
+}
+
+/// WA-OP-04: a folder without `qoob3d.toml` gives the error dialog naming the
+/// folder, the project that was open stays; Escape closes the dialog.
+#[test]
+fn ui_opening_a_folder_that_is_no_project_keeps_the_open_one() {
+    let (project, _fake, mut h) = opened("ui-open-bad");
+    let bad = project.not_a_project();
+    let ctx = h.ctx.clone();
+    h.state_mut().open_project(&bad, &ctx);
+    h.run_steps(3);
+    assert!(has_text(&h, "Could not open"), "no error dialog");
+    assert!(has_text(&h, &bad.display().to_string()), "the dialog does not name the folder");
+    assert_eq!(h.state().live().map(|l| l.parts().len()), Some(4), "the open project was dropped");
+    assert!(row(&h, "shaft", "up to date").is_some(), "parts of the open project gone");
+
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(!has_text(&h, "Could not open"), "Escape did not close the dialog");
+    assert_eq!(h.state().live().map(|l| l.parts().len()), Some(4));
 }

@@ -4,7 +4,7 @@
 const OCCT_VERSION: (u8, u8) = (7, 8);
 
 /// QOOB3D: OCCT version that the pinned occt-sys (`=7.8.1` in Cargo.toml) builds; keep both
-/// in step (ADR-0050).
+/// in step (ADR-0004).
 #[cfg(feature = "builtin")]
 const BUILTIN_OCCT_VERSION: &str = "7.8.1";
 
@@ -43,7 +43,7 @@ fn main() {
 
     let occt_config = OcctConfig::detect();
 
-    // QOOB3D: export the OCCT include dir to dependents as DEP_OCCT_INCLUDE (ADR-0047).
+    // QOOB3D: export the OCCT include dir to dependents as DEP_OCCT_INCLUDE (ADR-0004).
     println!("cargo:include={}", occt_config.include_dir.display());
 
     println!("cargo:rustc-link-search=native={}", occt_config.library_dir.to_str().unwrap());
@@ -117,7 +117,7 @@ fn main() {
         .cpp(true)
         .flag_if_supported("-std=c++11")
         // QOOB3D: silence the OCCT header deprecation warnings (`sprintf`); Cargo replays
-        // build-script warnings of path dependencies on every build (ADR-0047).
+        // build-script warnings of path dependencies on every build (ADR-0004).
         .flag_if_supported("-Wno-deprecated-declarations")
         .define("_USE_MATH_DEFINES", "TRUE")
         .include(occt_config.include_dir)
@@ -146,7 +146,7 @@ impl OcctConfig {
         #[cfg(feature = "builtin")]
         {
             // QOOB3D: occt-sys reruns the whole cmake build every time; skip it when the
-            // pinned OCCT is already installed, e.g. restored from the CI cache (ADR-0050).
+            // pinned OCCT is already installed, e.g. restored from the CI cache (ADR-0004).
             if !builtin_occt_installed(&occt_sys::occt_path()) {
                 occt_sys::build_occt();
             }
@@ -206,7 +206,7 @@ impl OcctConfig {
 
 /// QOOB3D: whether `prefix` holds a complete install of `BUILTIN_OCCT_VERSION`: the version
 /// header names it and every linked library exists (cmake installs the libraries last).
-/// See ADR-0050.
+/// See ADR-0004.
 #[cfg(feature = "builtin")]
 fn builtin_occt_installed(prefix: &std::path::Path) -> bool {
     let header = std::fs::read_to_string(prefix.join("include").join("Standard_Version.hxx"))

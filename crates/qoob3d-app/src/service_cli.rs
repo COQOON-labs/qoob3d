@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::cli::{ProjectCommand as Command, TaskCommand};
-use crate::live::{Client, ProjectDir, START_TIMEOUT, segment, service_command_from_env};
+use crate::client::{Client, ProjectDir, START_TIMEOUT, segment, service_command_from_env};
 
 /// Requests that do not wait for builds.
 const QUICK: Duration = Duration::from_secs(30);
@@ -64,7 +64,7 @@ fn request(command: &Command) -> anyhow::Result<Value> {
     match command {
         Command::Status => {
             // A settled state for humans: at most `SETTLE_S` for discovery
-            // (ADR-0056), then `/status` whatever it knows.
+            // (ADR-0055), then `/status` whatever it knows.
             let body = json!({"files": null, "wait_s": SETTLE_S});
             client.call("POST", "/discover", Some(&body), QUICK)?;
             client.call("GET", "/status", None, QUICK)

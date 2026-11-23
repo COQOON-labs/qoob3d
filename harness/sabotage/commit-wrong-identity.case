@@ -1,13 +1,13 @@
-# A commit is made with another identity than harness/identity.txt (ADR-0044)
+# A commit is made with another identity than harness/identity.txt (ADR-0037)
 command: cargo xtask commits HEAD^..HEAD
 expect: is not the project identity
 identity: Someone Else <someone@example.com>
-message: core: note on profiles
+message: core: note on meshes
 --- patch
-diff --git a/crates/qoob3d-core/src/profile.rs b/crates/qoob3d-core/src/profile.rs
---- a/crates/qoob3d-core/src/profile.rs
-+++ b/crates/qoob3d-core/src/profile.rs
-@@ -33,3 +33,5 @@
+diff --git a/crates/qoob3d-core/src/mesh.rs b/crates/qoob3d-core/src/mesh.rs
+--- a/crates/qoob3d-core/src/mesh.rs
++++ b/crates/qoob3d-core/src/mesh.rs
+@@ -295,3 +295,5 @@
  
  #[cfg(test)]
  mod tests;

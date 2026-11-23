@@ -1,14 +1,13 @@
 //! The 3D viewport widget: offscreen scene (ADR-0019) plus egui overlays –
-//! ViewCube, navigation bar, orbit pivot marker, status line (ADR-0015).
+//! ViewCube, navigation bar, orbit pivot marker, status line (ADR-0019).
 
 use eframe::egui::{
     self, Align2, Color32, FontId, Id, Pos2, Rect, RichText, Sense, Stroke, TextureId, pos2, vec2,
 };
 use eframe::egui_wgpu::{self, wgpu};
 use glam::Vec3;
-use qoob3d_core::document::PlaneFrame;
 use qoob3d_core::{Aabb, BedGeometry, PRINTERS, PrinterProfile, ShapeMesh};
-use qoob3d_render::{Camera, GridPlane, Projection, SceneOptions, ViewPreset, ViewportRenderer};
+use qoob3d_render::{Camera, Projection, SceneOptions, ViewPreset, ViewportRenderer};
 
 use crate::i18n::{decimal, tr, tr_args};
 use crate::navigation::{self, NavState};
@@ -26,20 +25,8 @@ struct CameraAnim {
     start: f64,
 }
 
-/// How the scene is shown this frame.
-#[derive(Debug, Clone, Copy)]
-pub struct SceneMode {
-    /// Left drag may orbit (off in sketch mode, ADR-0027).
-    pub left_drag_orbit: bool,
-    /// Grid in this plane (active sketch), `None` = world XY with the plate.
-    pub grid_plane: Option<PlaneFrame>,
-    /// What "Fit" frames (bodies and sketches).
-    pub fit_bounds: Option<Aabb>,
-}
-
 /// Result of [`Viewport::show_scene`].
 pub struct SceneFrame {
-    pub response: egui::Response,
     pub rect: Rect,
     pub now: f64,
     pub fit_bounds: Option<Aabb>,
@@ -135,27 +122,17 @@ impl Viewport {
         &self.bed.as_ref().expect("set above").1
     }
 
-    /// Animates the camera to look straight at a sketch plane (SK-LC-03):
-    /// the target moves onto the plane, the eye onto its normal side.
-    pub fn look_at(&mut self, plane: &PlaneFrame, now: f64) {
-        let n = Vec3::from(plane.n.map(|c| c as f32));
-        let o = Vec3::from(plane.origin.map(|c| c as f32));
-        let mut to = self.camera;
-        to.target -= n * (to.target - o).dot(n);
-        to.look_from(n);
-        self.animate_to(to, now);
-    }
-
-    /// Navigation, camera animation and the 3D scene; returns what sketch
-    /// interaction and overlays need. Call [`Viewport::show_overlays`] after
-    /// drawing anything that belongs between scene and overlays.
+    /// Navigation, camera animation and the 3D scene; returns what the
+    /// overlays need. `fit_bounds` is what "Fit" frames. Call
+    /// [`Viewport::show_overlays`] after drawing anything that belongs between
+    /// scene and overlays.
     pub fn show_scene(
         &mut self,
         ui: &mut egui::Ui,
         rs: &egui_wgpu::RenderState,
         scene: Option<&ShapeMesh>,
         settings: &Settings,
-        mode: SceneMode,
+        fit_bounds: Option<Aabb>,
     ) -> SceneFrame {
         let rect = ui.available_rect_before_wrap();
         let response = ui.interact(rect, Id::new("qoob3d-viewport"), Sense::click_and_drag());
@@ -166,7 +143,7 @@ impl Viewport {
         self.layout = Some(ViewportLayout { rect, viewcube: viewcube_rect });
         let now = ui.input(|i| i.time);
 
-        // --- navigation (ADR-0008, ADR-0022, ADR-0027) -------------------------
+        // --- navigation (ADR-0008) ------------------------------------
         let pick = |ray: qoob3d_render::Ray| {
             scene
                 .and_then(|s| s.faces.raycast(ray.origin.to_array(), ray.dir.to_array()))
@@ -179,7 +156,7 @@ impl Viewport {
             &mut self.camera,
             &mut self.nav,
             &pick,
-            settings.left_drag_orbit && mode.left_drag_orbit,
+            settings.left_drag_orbit,
         );
         if nav.interacted {
             self.anim = None;
@@ -188,7 +165,7 @@ impl Viewport {
             self.last_orbit_pivot = Some(pivot);
         }
         if nav.fit_requested {
-            self.animate_to(self.fitted(mode.fit_bounds), now);
+            self.animate_to(self.fitted(fit_bounds), now);
         }
 
         // --- camera animation -------------------------------------------------
@@ -210,18 +187,11 @@ impl Viewport {
         let profile = printer(settings);
         let camera = self.camera;
         let bed = self.bed_for(profile).clone();
-        let f = |a: [f64; 3]| Vec3::from(a.map(|c| c as f32));
         let options = SceneOptions {
             show_grid: settings.show_grid,
             bed: Some(&bed),
             show_build_volume: settings.show_build_volume,
             pixels_per_point: ppp,
-            grid_plane: mode.grid_plane.map(|p| GridPlane {
-                origin: f(p.origin),
-                u: f(p.u),
-                v: f(p.v),
-                n: f(p.n),
-            }),
         };
         let (view, recreated) =
             self.renderer.render(&rs.device, &rs.queue, size_px, &camera, &options);
@@ -247,10 +217,10 @@ impl Viewport {
             let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
             ui.painter().image(id, rect, uv, Color32::WHITE);
         }
-        SceneFrame { response, rect, now, fit_bounds: mode.fit_bounds }
+        SceneFrame { rect, now, fit_bounds }
     }
 
-    /// Orbit pivot, ViewCube, navigation bar and status line (ADR-0015).
+    /// Orbit pivot, ViewCube, navigation bar and status line (ADR-0019).
     pub fn show_overlays(
         &mut self,
         ui: &mut egui::Ui,
@@ -338,7 +308,7 @@ impl Viewport {
         fit
     }
 
-    /// Printer selection (ADR-0021, ADR-0023): search field, "my printers"
+    /// Printer selection (ADR-0021): search field, "my printers"
     /// on top, the rest grouped by vendor (hidden if the user only wants
     /// their own), markers for printers with restricted zones.
     fn printer_picker(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {

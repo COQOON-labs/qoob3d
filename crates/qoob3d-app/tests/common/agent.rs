@@ -1,23 +1,36 @@
-//! Shared helpers of `tests/agent.rs` and `tests/mcp.rs` (R4,
-//! docs/requirements/agent.md §4.2–4.5, ADR-0054): temporary projects, the
-//! real `qoob3d` binary as service and CLI, HTTP, the JSON envelope
-//! (docs/requirements/project-app.md §1), PNG and Git checks.
+//! Shared helpers of the tests that run the real `qoob3d` binary as service
+//! and CLI: `tests/agent.rs`, `tests/mcp.rs`, `tests/mcp_guide.rs`,
+//! `tests/service.rs` and `tests/perf.rs` (docs/requirements/agent.md §2–5,
+//! ADR-0053, ADR-0054): temporary projects, processes, HTTP with the service
+//! token, the JSON envelope (docs/requirements/project-app.md §1), the
+//! service and the CLI.
 //!
 //! Included with `#[path = "common/agent.rs"] mod support;` so that
 //! `tests/project.rs` (which uses `common/mod.rs`) is not affected. Every
-//! item here is used by both test files; helpers only one of them needs live
-//! in that file.
+//! item here is used by each of those test files, directly or through
+//! another item here, so no test binary sees dead code. Helpers that only
+//! some of them need live in the other files of `common/`, each included by
+//! exactly the files that use all of it (and found as `crate::support`):
+//!
+//! - `common/inspect.rs` (`mod inspect`): attach to a service, wait for
+//!   discovery, read files, compare coordinates. agent, mcp, mcp_guide, service.
+//! - `common/artifacts.rs` (`mod artifacts`): PNG and Git checks. agent, mcp, mcp_guide.
+//! - `common/builds.rs` (`mod builds`): `/status` and `/build`. service, perf.
+//! - `common/mcp.rs` (`mod mcp_client`): the MCP stdio client. mcp, mcp_guide.
 //!
 //! Processes: [`Project`] stops the service of its folder on drop (also one
 //! that the CLI or the MCP server started on demand), kills what lingers and
-//! removes the folder, so no test leaves processes or temp dirs behind.
+//! removes the folder; a [`Service`] that a test spawned shuts down on drop
+//! and kills its workers, so no test leaves processes or temp dirs behind.
 
+use std::collections::BTreeSet;
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -27,17 +40,18 @@ pub(crate) const BIN: &str = env!("CARGO_BIN_EXE_qoob3d");
 /// in OCCT up to rounding, the same margin as the R1 kernel tests.
 pub(crate) const VOL: f64 = 1e-6;
 /// Upper bound for a service to come up (WA-OP-02 allows 20 s).
-const START: Duration = Duration::from_secs(20);
+pub(crate) const START: Duration = Duration::from_secs(20);
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 // ------------------------------------------------------------------ project
 
 /// A temporary project `<root>/project/` with `qoob3d.toml`. Drop stops its
-/// service and removes `<root>`.
+/// service and removes `<root>`; declare [`Service`] guards after it.
 pub(crate) struct Project {
     pub(crate) root: PathBuf,
     pub(crate) dir: PathBuf,
+    name: String,
 }
 
 impl Project {
@@ -49,9 +63,15 @@ impl Project {
         std::fs::remove_dir_all(&root).ok();
         let dir = root.join("project");
         std::fs::create_dir_all(dir.join("parts")).expect("create project");
-        let p = Self { root, dir };
-        p.write("qoob3d.toml", &format!("[project]\nname = \"{name}\"\nunits = \"mm\"\n{extra}"));
+        let p = Self { root, dir, name: name.to_owned() };
+        p.config(extra);
         p
+    }
+
+    /// Rewrites `qoob3d.toml` with `extra` after the `[project]` table.
+    pub(crate) fn config(&self, extra: &str) -> &Self {
+        let name = &self.name;
+        self.write("qoob3d.toml", &format!("[project]\nname = \"{name}\"\nunits = \"mm\"\n{extra}"))
     }
 
     pub(crate) fn write(&self, rel: &str, text: &str) -> &Self {
@@ -63,11 +83,6 @@ impl Project {
 
     pub(crate) fn path(&self, rel: &str) -> PathBuf {
         self.dir.join(rel)
-    }
-
-    pub(crate) fn read(&self, rel: &str) -> String {
-        let path = self.path(rel);
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
     }
 }
 
@@ -81,7 +96,7 @@ impl Drop for Project {
 // ------------------------------------------------------------------ processes
 
 /// `(pid, ppid, args)` of all processes (POSIX `ps`, Linux and macOS).
-fn processes() -> Vec<(u32, u32, String)> {
+pub(crate) fn processes() -> Vec<(u32, u32, String)> {
     let out = Command::new("ps").args(["-A", "-o", "pid=,ppid=,args="]).output().expect("run ps");
     String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -95,7 +110,7 @@ fn processes() -> Vec<(u32, u32, String)> {
 }
 
 /// Alive and not a zombie.
-fn alive(pid: u32) -> bool {
+pub(crate) fn alive(pid: u32) -> bool {
     let out = Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output();
     out.is_ok_and(|o| {
         let stat = String::from_utf8_lossy(&o.stdout).trim().to_owned();
@@ -103,8 +118,18 @@ fn alive(pid: u32) -> bool {
     })
 }
 
-fn kill(pid: u32) {
-    Command::new("kill").args(["-KILL".to_owned(), pid.to_string()]).output().ok();
+/// Sends `-<signal>` (`KILL`, `SEGV`, …) to `pid`.
+pub(crate) fn kill(pid: u32, signal: &str) {
+    Command::new("kill").args([format!("-{signal}"), pid.to_string()]).output().ok();
+}
+
+/// Live `qoob3d worker` children of process `parent`.
+pub(crate) fn workers_of(parent: u32) -> Vec<u32> {
+    processes()
+        .into_iter()
+        .filter(|(pid, ppid, args)| *ppid == parent && args.contains("worker") && alive(*pid))
+        .map(|(pid, ..)| pid)
+        .collect()
 }
 
 /// Waits until `cond` holds, polling every 20 ms; false on timeout.
@@ -138,7 +163,7 @@ pub(crate) fn service_token(dir: &Path) -> Option<String> {
 
 /// Stops whatever serves `dir`: `POST /shutdown`, then SIGKILL for the
 /// service, its workers and any process that still names the folder.
-fn stop_service(dir: &Path) {
+pub(crate) fn stop_service(dir: &Path) {
     let all = processes();
     let needle = dir.display().to_string();
     let mut victims: Vec<u32> = Vec::new();
@@ -159,7 +184,7 @@ fn stop_service(dir: &Path) {
     }
     for pid in victims {
         if alive(pid) {
-            kill(pid);
+            kill(pid, "KILL");
         }
     }
 }
@@ -174,8 +199,8 @@ pub(crate) fn check_envelope(v: &Value) -> bool {
     let d = v["duration_s"].as_f64().unwrap_or_else(|| panic!("envelope without duration_s: {v}"));
     assert!(d >= 0.0 && d.is_finite(), "duration_s {d}");
     assert!(v["warnings"].is_array(), "envelope without warnings array: {v}");
+    assert!(v.get("result").is_some(), "envelope without result: {v}");
     if ok {
-        assert!(v.get("result").is_some(), "ok envelope without result: {v}");
         assert!(v.get("error").is_none_or(Value::is_null), "ok envelope with an error: {v}");
     } else {
         assert!(v["error"]["kind"].is_string(), "error without kind: {v}");
@@ -186,16 +211,29 @@ pub(crate) fn check_envelope(v: &Value) -> bool {
 }
 
 pub(crate) struct Reply {
-    code: u16,
-    body: Vec<u8>,
+    pub(crate) code: u16,
+    head: String,
+    pub(crate) body: Vec<u8>,
 }
 
 impl Reply {
+    /// The value of header `name` (case-insensitive).
+    pub(crate) fn header(&self, name: &str) -> Option<String> {
+        self.head.lines().skip(1).find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_owned())
+        })
+    }
+
+    pub(crate) fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+
     /// The checked JSON envelope of the answer.
     pub(crate) fn envelope(&self) -> Value {
-        let text = String::from_utf8_lossy(&self.body);
-        let v: Value = serde_json::from_slice(&self.body)
-            .unwrap_or_else(|e| panic!("no JSON envelope ({e}), HTTP {}: {text}", self.code));
+        let v: Value = serde_json::from_slice(&self.body).unwrap_or_else(|e| {
+            panic!("no JSON envelope ({e}), HTTP {}: {}", self.code, self.text())
+        });
         check_envelope(&v);
         v
     }
@@ -218,10 +256,6 @@ fn http(
     body: Option<&Value>,
     timeout: Duration,
 ) -> Result<Reply, String> {
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let mut s = TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect: {e}"))?;
-    s.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
-    s.set_write_timeout(Some(timeout)).map_err(|e| e.to_string())?;
     let body = body.map(Value::to_string).unwrap_or_default();
     let token = token.map(|t| format!("X-Qoob3d-Token: {t}\r\n")).unwrap_or_default();
     let req = format!(
@@ -229,14 +263,48 @@ fn http(
          Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
-    s.write_all(req.as_bytes()).map_err(|e| format!("write: {e}"))?;
-    // `Connection: close`: the answer ends when the service closes.
+    exchange(port, &req, timeout)
+}
+
+/// Sends `request` (a complete HTTP/1.1 request, written by the caller) to
+/// 127.0.0.1:`port` and reads the answer: the body up to `Content-Length`,
+/// or up to the end of the connection without one.
+pub(crate) fn exchange(port: u16, request: &str, timeout: Duration) -> Result<Reply, String> {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut s = TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect: {e}"))?;
+    s.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+    s.set_write_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+    s.write_all(request.as_bytes()).map_err(|e| format!("write: {e}"))?;
     let mut buf = Vec::new();
-    s.read_to_end(&mut buf).map_err(|e| format!("read: {e}"))?;
-    let end = buf.windows(4).position(|w| w == b"\r\n\r\n").ok_or("no header end")? + 4;
+    let mut chunk = [0u8; 65536];
+    let end = loop {
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i + 4;
+        }
+        let n = s.read(&mut chunk).map_err(|e| format!("read head: {e}"))?;
+        if n == 0 {
+            return Err("closed before the header ended".into());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    };
     let head = String::from_utf8_lossy(&buf[..end]).into_owned();
     let code = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or("status line")?;
-    Ok(Reply { code, body: buf[end..].to_vec() })
+    let mut reply = Reply { code, head, body: buf[end..].to_vec() };
+    match reply.header("content-length").and_then(|l| l.parse::<usize>().ok()) {
+        Some(len) => {
+            while reply.body.len() < len {
+                let n = s.read(&mut chunk).map_err(|e| format!("read body: {e}"))?;
+                if n == 0 {
+                    return Err(format!("body truncated at {} of {len}", reply.body.len()));
+                }
+                reply.body.extend_from_slice(&chunk[..n]);
+            }
+        }
+        None => {
+            s.read_to_end(&mut reply.body).map_err(|e| format!("read body: {e}"))?;
+        }
+    }
+    Ok(reply)
 }
 
 // ------------------------------------------------------------------ service
@@ -244,45 +312,58 @@ fn http(
 /// A running `qoob3d serve` of a project. Declare it after its [`Project`]:
 /// drop stops the service before the folder goes away.
 pub(crate) struct Service {
-    port: u16,
+    pub(crate) port: u16,
+    pub(crate) pid: u32,
     /// From `service.json`, sent with every request (AG-HD-03).
     token: Option<String>,
     dir: PathBuf,
-    child: Option<Child>,
+    /// Set when this handle spawned `serve` itself (stopped and reaped on drop).
+    pub(crate) child: Option<Child>,
     log: PathBuf,
+    /// Every worker pid ever seen, killed on drop if still alive.
+    seen_workers: Mutex<BTreeSet<u32>>,
 }
 
 impl Service {
     /// Spawns `qoob3d serve <DIR>` and waits until it answers `/status`.
     pub(crate) fn start(p: &Project) -> Self {
+        let mut command = Command::new(BIN);
+        command.arg("serve").arg(&p.dir);
+        Self::start_with(p, &mut command)
+    }
+
+    /// Spawns `command` (which must end up as `qoob3d serve <DIR>` under the
+    /// spawned pid) and waits until it answers `/status`.
+    pub(crate) fn start_with(p: &Project, command: &mut Command) -> Self {
         let log = p.root.join("serve.log");
         let err = std::fs::File::create(&log).expect("create serve.log");
-        let child = Command::new(BIN)
-            .arg("serve")
-            .arg(&p.dir)
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(err)
             .spawn()
             .expect("spawn qoob3d serve");
-        Self::wait_ready(p, Some(child), log)
+        let s = Self::wait_ready(p, Some(child), log);
+        let pid = s.child.as_ref().map(Child::id);
+        assert_eq!(Some(s.pid), pid, "service.json names the serve process");
+        s
     }
 
-    /// Handle for a service started by someone else (CLI or MCP, on demand);
-    /// dropping it leaves that service running.
-    pub(crate) fn attach(p: &Project) -> Self {
-        Self::wait_ready(p, None, p.root.join("serve.log"))
-    }
-
-    fn wait_ready(p: &Project, mut child: Option<Child>, log: PathBuf) -> Self {
+    /// Waits until `service.json` names a service that answers `/status`
+    /// (with `child`: that child, not a stale or foreign entry).
+    pub(crate) fn wait_ready(p: &Project, mut child: Option<Child>, log: PathBuf) -> Self {
         let deadline = Instant::now() + START;
         loop {
-            if let Some((port, _)) = service_json(&p.dir) {
+            if let Some((port, pid)) = service_json(&p.dir) {
                 let token = service_token(&p.dir);
                 let wait = Duration::from_secs(1);
-                let probe = http(port, token.as_deref(), "GET", "/status", None, wait);
-                if probe.is_ok_and(|r| r.code == 200) {
-                    return Self { port, token, dir: p.dir.clone(), child, log };
+                let ours = child.as_ref().is_none_or(|c| c.id() == pid);
+                if ours
+                    && http(port, token.as_deref(), "GET", "/status", None, wait)
+                        .is_ok_and(|r| r.code == 200)
+                {
+                    let (dir, seen_workers) = (p.dir.clone(), Mutex::new(BTreeSet::new()));
+                    return Self { port, pid, token, dir, child, log, seen_workers };
                 }
             }
             if let Some(Ok(Some(status))) = child.as_mut().map(Child::try_wait) {
@@ -300,41 +381,75 @@ impl Service {
         }
     }
 
-    /// `POST /discover {"files": null, "wait_s": 20}` (ADR-0056, §3.1):
-    /// waits until every part and check file is discovered and asserts that
-    /// nothing is left in `discovering`. Discovery runs in a worker, so the
-    /// first `/status` after a start or a file write may not list the
-    /// declarations yet; call this before reading parts, checks or
-    /// `load_errors` from `/status`. 20 s: the start-up budget (WA-OP-02),
-    /// far above one worker round trip per file. Returns the result.
-    pub(crate) fn wait_discovery(&self) -> Value {
-        let r = self.request("POST", "/discover", Some(&json!({"files": null, "wait_s": 20})));
-        let result = r.ok();
-        assert_eq!(result["discovering"], json!([]), "discovery did not finish: {result}");
-        result
+    /// The last 3000 bytes of the service log.
+    pub(crate) fn log(&self) -> String {
+        let text = std::fs::read_to_string(&self.log).unwrap_or_default();
+        let start = text.len().saturating_sub(3000);
+        text.get(start..).unwrap_or_default().to_owned()
     }
 
     /// One request; panics with the tail of the service log if it gets no answer.
     pub(crate) fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Reply {
-        let (token, wait) = (self.token.as_deref(), Duration::from_secs(90));
-        http(self.port, token, method, path, body, wait).unwrap_or_else(|e| {
-            let text = std::fs::read_to_string(&self.log).unwrap_or_default();
-            let start = text.len().saturating_sub(3000);
-            let tail = text.get(start..).unwrap_or_default();
-            panic!("{method} {path}: {e}\nservice log:\n{tail}")
-        })
+        self.try_request(method, path, body, Duration::from_secs(90))
+            .unwrap_or_else(|e| panic!("{method} {path}: {e}\nservice log:\n{}", self.log()))
+    }
+
+    /// One request with the service token; `Err` if there is no answer in `timeout`.
+    pub(crate) fn try_request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        timeout: Duration,
+    ) -> Result<Reply, String> {
+        http(self.port, self.token.as_deref(), method, path, body, timeout)
+    }
+
+    /// Live `qoob3d worker` children of the service.
+    pub(crate) fn workers(&self) -> Vec<u32> {
+        let w = workers_of(self.pid);
+        self.seen_workers.lock().unwrap_or_else(PoisonError::into_inner).extend(&w);
+        w
+    }
+
+    /// `POST /shutdown`; waits for the service to exit (AG-SV-01).
+    pub(crate) fn shutdown(&mut self) -> bool {
+        self.workers();
+        let sent = self.try_request("POST", "/shutdown", Some(&json!({})), Duration::from_secs(2));
+        let pid = self.pid;
+        let gone = match self.child.as_mut() {
+            Some(c) => {
+                wait_until(Duration::from_secs(10), || c.try_wait().is_ok_and(|s| s.is_some()))
+            }
+            None => wait_until(Duration::from_secs(10), || !alive(pid)),
+        };
+        sent.is_ok() && gone
     }
 }
 
 impl Drop for Service {
-    /// Stops only a service this handle spawned. An attached handle is a
-    /// view: its service (and an MCP server that names the folder) must
-    /// outlive it and is stopped by [`Project`]'s drop.
+    /// Stops only a service this handle spawned: shutdown, then SIGKILL for
+    /// the service, its workers (also those seen earlier) and whatever names
+    /// the folder. An attached handle is a view: its service (and an MCP
+    /// server that names the folder) must outlive it and is stopped by
+    /// [`Project`]'s drop.
     fn drop(&mut self) {
+        if self.child.is_none() {
+            return;
+        }
+        if !self.shutdown() {
+            kill(self.pid, "KILL");
+        }
+        stop_service(&self.dir);
         if let Some(c) = self.child.as_mut() {
-            stop_service(&self.dir);
             c.kill().ok();
             c.wait().ok();
+        }
+        let seen = self.seen_workers.get_mut().unwrap_or_else(PoisonError::into_inner);
+        for pid in seen.iter() {
+            if alive(*pid) {
+                kill(*pid, "KILL");
+            }
         }
     }
 }
@@ -387,96 +502,24 @@ pub(crate) fn cli(dir: &Path, args: &[&str], timeout: Duration) -> CliOut {
         panic!("qoob3d {args:?} did not finish within {timeout:?}");
     }
     let code = child.wait().expect("wait CLI").code();
-    // A service started on demand must not hold the CLI's pipes open.
+    // Whatever the CLI starts (a service on demand, bench workers) must not
+    // hold its pipes open.
     let pipe = Duration::from_secs(3);
-    let stdout = out.recv_timeout(pipe).expect("stdout closed: the service must not inherit it");
-    let stderr = err.recv_timeout(pipe).expect("stderr closed: the service must not inherit it");
+    let stdout = out.recv_timeout(pipe).expect("stdout closed: nothing may inherit it");
+    let stderr = err.recv_timeout(pipe).expect("stderr closed: nothing may inherit it");
     CliOut { code, stdout, stderr }
 }
 
 // ------------------------------------------------------------------ numbers
 
+/// A JSON number against `expected`, relative tolerance `tol`.
 pub(crate) fn assert_rel(actual: &Value, expected: f64, tol: f64, what: &str) {
     let a = actual.as_f64().unwrap_or_else(|| panic!("{what}: no number: {actual}"));
-    let rel = (a - expected).abs() / expected.abs();
-    assert!(rel < tol, "{what}: got {a}, expected {expected} (rel {rel:e})");
+    assert_rel_f64(a, expected, tol, what);
 }
 
-/// A JSON array `[x, y, z]` against `expected`, absolute tolerance `tol` (mm).
-pub(crate) fn assert_vec(v: &Value, expected: [f64; 3], tol: f64, what: &str) {
-    for (i, e) in expected.iter().enumerate() {
-        let a = v[i].as_f64().unwrap_or_else(|| panic!("{what}[{i}] missing: {v}"));
-        assert!((a - e).abs() < tol, "{what}: got {v}, expected {expected:?}");
-    }
-}
-
-// ------------------------------------------------------------------ PNG
-
-/// Width and height from the PNG header, read by hand (independent of the
-/// writer): 8 signature bytes `89 50 4E 47 0D 0A 1A 0A`, then the first
-/// chunk, which must be `IHDR` with length 13: u32 BE width at byte 16,
-/// u32 BE height at byte 20 (PNG specification §5.2, §11.2.2).
-pub(crate) fn png_size(bytes: &[u8]) -> (u32, u32) {
-    assert!(bytes.len() > 33, "PNG shorter than signature + IHDR: {} bytes", bytes.len());
-    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "PNG signature");
-    assert_eq!(&bytes[8..12], &[0, 0, 0, 13], "IHDR length");
-    assert_eq!(&bytes[12..16], b"IHDR", "first chunk is IHDR");
-    let be = |o: usize| u32::from_be_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
-    (be(16), be(20))
-}
-
-/// Number of distinct pixel values (capped at 64) of a PNG, decoded with
-/// the `png` crate: a render that shows a shaded part on a background has
-/// more than a handful, an empty or failed render has one.
-pub(crate) fn png_colors(bytes: &[u8]) -> usize {
-    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    let mut reader = decoder.read_info().expect("valid PNG");
-    let size = reader.output_buffer_size().expect("PNG size fits");
-    let mut buf = vec![0; size];
-    let info = reader.next_frame(&mut buf).expect("PNG pixels decode");
-    let px = (info.line_size / info.width as usize).max(1);
-    let mut seen = std::collections::BTreeSet::new();
-    for pixel in buf[..info.buffer_size()].chunks_exact(px) {
-        seen.insert(pixel.to_vec());
-        if seen.len() >= 64 {
-            break;
-        }
-    }
-    seen.len()
-}
-
-// ------------------------------------------------------------------ Git
-
-/// `git <args>` in `dir`; trimmed stdout, or `Err` with stderr.
-pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("git not runnable: {e}"))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
-    }
-}
-
-/// A fresh repository in `dir` with a local identity (no global config
-/// needed, nothing outside the temp project is touched) and no signing.
-pub(crate) fn git_init(dir: &Path) {
-    for args in [
-        &["init", "--quiet"][..],
-        &["config", "user.name", "QOOB3D Test"][..],
-        &["config", "user.email", "test@qoob3d.invalid"][..],
-        &["config", "commit.gpgsign", "false"][..],
-    ] {
-        git(dir, args).unwrap_or_else(|e| panic!("git {args:?}: {e}"));
-    }
-}
-
-/// Files tracked at `HEAD` (`git ls-tree`), relative to the repository.
-pub(crate) fn git_tracked(dir: &Path) -> Vec<String> {
-    let out = git(dir, &["ls-tree", "-r", "--name-only", "HEAD"]).expect("git ls-tree HEAD");
-    out.lines().map(str::to_owned).collect()
+/// `actual` against `expected`, relative tolerance `tol`.
+pub(crate) fn assert_rel_f64(actual: f64, expected: f64, tol: f64, what: &str) {
+    let rel = (actual - expected).abs() / expected.abs();
+    assert!(rel < tol, "{what}: got {actual}, expected {expected} (rel {rel:e})");
 }

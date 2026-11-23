@@ -8,15 +8,15 @@ use super::{INVALID_PARAMS, RpcError};
 
 pub(super) const GUIDE: &str = include_str!("guide.md");
 const SCRIPT_API: &str = include_str!("../../../../docs/script-api.md");
-/// `(name, script)` of the examples: the M0 probe parts of the kernel tests.
+/// `(name, script)` of the examples, run by `qoob3d-kernel/tests/script_examples.rs`.
 const EXAMPLES: [(&str, &str); 4] = [
-    ("crane_column.rhai", include_str!("../../../qoob3d-kernel/tests/scripts/crane_column.rhai")),
+    ("crane_column.rhai", include_str!("../../../../docs/script-api/examples/crane_column.rhai")),
     (
         "crane_column_revolve.rhai",
-        include_str!("../../../qoob3d-kernel/tests/scripts/crane_column_revolve.rhai"),
+        include_str!("../../../../docs/script-api/examples/crane_column_revolve.rhai"),
     ),
-    ("railing.rhai", include_str!("../../../qoob3d-kernel/tests/scripts/railing.rhai")),
-    ("stair.rhai", include_str!("../../../qoob3d-kernel/tests/scripts/stair.rhai")),
+    ("railing.rhai", include_str!("../../../../docs/script-api/examples/railing.rhai")),
+    ("stair.rhai", include_str!("../../../../docs/script-api/examples/stair.rhai")),
 ];
 const REFERENCE_URI: &str = "qoob3d://script-api";
 const GUIDE_URI: &str = "qoob3d://guide";

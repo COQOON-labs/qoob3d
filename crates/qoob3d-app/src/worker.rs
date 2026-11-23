@@ -3,7 +3,7 @@
 //! line from stdin and answers one JSON line per job on stdout, staying warm
 //! between jobs. The service owns limits and replaces a worker that crashes
 //! or is killed. Declaration discovery of part and check files runs here as
-//! well (`Probe::Declare`, ADR-0056): the service never evaluates scripts.
+//! well (`Probe::Declare`, ADR-0055): the service never evaluates scripts.
 //!
 //! OCCT's STEP translator prints to stdout too, so answers are framed: every
 //! answer line contains `{"job":` and the service ignores everything before
@@ -14,6 +14,7 @@ use std::io::{BufRead as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use qoob3d_core::project::layout;
 use qoob3d_core::project::{self, KeyInputs, Mesh, Values};
 use qoob3d_core::qmesh;
 use qoob3d_kernel::script::{self, PartMode, RunOptions, ScriptError};
@@ -23,7 +24,6 @@ use serde_json::{Value, json};
 mod probe;
 
 pub(crate) use self::probe::Probe;
-use crate::service::snapshot::cache_dir;
 
 /// Enters every cache key (§2.1): another program version rebuilds.
 const PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -33,10 +33,16 @@ pub(crate) const ANSWER_MARK: &str = "{\"job\":";
 /// code is meant to be declarations, not computations (AG-HD-02).
 const DECLARE_MAX_OPERATIONS: u64 = 1_000_000;
 
-/// The program part of a cache key: the version and the tessellation settings
-/// (AG-PF-05), so changing either rebuilds.
+/// Version of what a cache entry holds; 2: the `.json` has `watertight`.
+const ENTRY_VERSION: u32 = 2;
+
+/// The program part of a cache key: the program and entry versions and the
+/// tessellation settings (AG-PF-05), so changing any of them rebuilds.
 pub(crate) fn key_version(mesh: &Mesh) -> String {
-    format!("{PROGRAM_VERSION} mesh {} {}", mesh.deflection_mm, mesh.angle_deg)
+    format!(
+        "{PROGRAM_VERSION} entry {ENTRY_VERSION} mesh {} {}",
+        mesh.deflection_mm, mesh.angle_deg
+    )
 }
 
 /// One job: build `part`, with `step` write the shapes of `deps` as STEP, or
@@ -146,7 +152,7 @@ impl PartError {
 }
 
 /// What a part or check file declares, without running any closure: the
-/// answer to `Probe::Declare` (ADR-0056).
+/// answer to `Probe::Declare` (ADR-0055).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct Declaration {
     pub(crate) parts: Vec<PartDeclaration>,
@@ -314,7 +320,8 @@ fn build(request: &Request, name: &str) -> Result<(String, Value), PartError> {
         dependency_keys,
     });
 
-    let folder = request.cache.as_ref().map_or_else(|| cache_dir(dir, name), |c| c.join(name));
+    let folder =
+        request.cache.as_ref().map_or_else(|| layout::cache_dir(dir, name), |c| c.join(name));
     std::fs::create_dir_all(&folder).map_err(|e| io_error(&folder, e))?;
     let base = folder.join(&key);
     let brep = base.with_extension("brep");
@@ -324,15 +331,24 @@ fn build(request: &Request, name: &str) -> Result<(String, Value), PartError> {
         .map_err(|e| io_error(&base, e))?;
     let qmsh = base.with_extension("qmsh");
     std::fs::write(&qmsh, qmesh::write(&mesh)).map_err(|e| io_error(&qmsh, e))?;
+    // The FDM gate (ADR-0002): STL and 3MF are written from this mesh, and a
+    // slicer needs it closed.
+    let watertight = mesh.faces.analyze().is_watertight();
     drop(mesh);
 
     let valid = shape.is_valid();
-    let warnings: Vec<String> =
-        if valid { Vec::new() } else { vec!["the shape is not valid (BRepCheck)".to_owned()] };
+    let mut warnings = Vec::new();
+    if !valid {
+        warnings.push("the shape is not valid (BRepCheck)");
+    }
+    if !watertight {
+        warnings.push("the mesh is not watertight, a slicer may reject it");
+    }
     let meta = json!({
         "volume": shape.volume(),
         "bbox": probe::bbox(shape),
         "valid": valid,
+        "watertight": watertight,
         "solids": shape.solid_count(),
         "duration_s": start.elapsed().as_secs_f64(),
         "values_read": output.values_read,

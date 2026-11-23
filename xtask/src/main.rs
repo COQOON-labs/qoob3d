@@ -2,37 +2,29 @@
 //!
 //! ```text
 //! cargo xtask check [--fast]   definition of done
-//! cargo xtask check-rev <rev>  the full check of a commit in a temporary worktree (ADR-0048)
 //! cargo xtask arch             crate dependency rules (ADR-0036)
 //! cargo xtask docs [--fix]     documentation lint, regenerates the ADR index (ADR-0001)
-//! cargo xtask screenshot [dir] UI screenshot + scene renders for visual review (ADR-0018)
+//! cargo xtask screenshot [dir] UI screenshot + scene renders for visual review (ADR-0013)
 //! cargo xtask i18n             translation keys complete and used keys defined (ADR-0020)
 //! cargo xtask printers <dir>   regenerate the printer database from OrcaSlicer (ADR-0021)
-//! cargo xtask models [--write] reference models: build, measure, export (ADR-0033)
-//! cargo xtask hygiene          source rules beyond clippy (ADR-0039, ADR-0040, ADR-0044, ADR-0045)
-//! cargo xtask commits <revs>   commit policy for a revision range (ADR-0038, ADR-0039, ADR-0044)
+//! cargo xtask models           reference project: build, check, export (ADR-0013)
+//! cargo xtask hygiene          source rules beyond clippy (ADR-0037)
+//! cargo xtask commits <revs>   commit policy for a revision range (ADR-0037)
 //! cargo xtask commits --message <file>  same for one message (commit-msg hook)
 //! cargo xtask setup            install the git hooks (ADR-0037)
-//! cargo xtask review <tip> <revs>  critic record for pushed code (ADR-0041)
-//! cargo xtask rules            every rule in harness/rules.md has existing checks (ADR-0040)
-//! cargo xtask selftest         the harness rejects every sabotage in harness/sabotage/ (ADR-0042)
-//! cargo xtask guard            Claude Code PreToolUse hook: JSON on stdin, exit 2 = deny (ADR-0043)
+//! cargo xtask selftest         the harness rejects every sabotage in harness/sabotage/ (ADR-0037)
 //! cargo xtask harness-changes <base> <head>  harness files changed in between, for CI (ADR-0037)
 //! ```
 
 mod arch;
 mod commits;
 mod docs;
-mod guard;
 mod hygiene;
 mod i18n;
 mod models;
 mod paths;
 mod printers;
-mod review;
-mod rules;
 mod selftest;
-mod worktree;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -45,14 +37,6 @@ fn main() -> ExitCode {
 
     let result = match args.first().map(String::as_str) {
         Some("check") => check(&root, flag("--fast")),
-        Some("check-rev") => {
-            if let Some(rev) = args.get(1) {
-                check_rev(&root, rev)
-            } else {
-                eprintln!("usage: cargo xtask check-rev <rev>");
-                false
-            }
-        }
         Some("arch") => report("arch", arch::check(&root)),
         Some("docs") => report("docs", docs::check(&root, flag("--fix"))),
         Some("screenshot") => screenshot(&root, args.get(1).map(PathBuf::from)),
@@ -60,7 +44,6 @@ fn main() -> ExitCode {
         Some("hygiene") => report("hygiene", hygiene::check(&root)),
         Some("commits") => commits_step(&root, &args[1..]),
         Some("setup") => setup(&root),
-        Some("guard") => return guard_hook(&root),
         Some("harness-changes") => {
             if let [base, head] = &args[1..] {
                 harness_changes(&root, base, head)
@@ -69,18 +52,7 @@ fn main() -> ExitCode {
                 false
             }
         }
-        Some("rules") => report("rules", rules::check(&root)),
         Some("selftest") => report("selftest", selftest::run(&root)),
-        Some("review") => match &args[1..] {
-            [tip, revs @ ..] if !revs.is_empty() => {
-                report("review", review::check(&root, tip, revs))
-            }
-            _ => {
-                eprintln!("usage: cargo xtask review <tip> <rev-list args>");
-                false
-            }
-        },
-        Some("models") if flag("--write") => report("models", models::write(&root)),
         Some("models") => models_step(&root),
         Some("printers") => {
             if let Some(dir) = args.get(1) {
@@ -92,7 +64,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask <check [--fast] | check-rev <rev> | arch | docs [--fix] | i18n | hygiene | rules | selftest | commits <revs> | review <tip> <revs> | guard | harness-changes <base> <head> | setup | models [--write] | screenshot [dir]>"
+                "usage: cargo xtask <check [--fast] | arch | docs [--fix] | i18n | hygiene | selftest | commits <revs> | harness-changes <base> <head> | setup | models | printers <dir> | screenshot [dir]>"
             );
             return ExitCode::from(2);
         }
@@ -104,11 +76,12 @@ fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask lives in the workspace").into()
 }
 
-/// The cargo target directory the binaries are built into, from
-/// `CARGO_TARGET_DIR`; in a `check-rev` worktree that is the check-rev
-/// directory (ADR-0048).
+/// The cargo target directory the binaries are built into: `CARGO_TARGET_DIR`
+/// (relative to `root`) or `root/target`.
 pub(crate) fn cargo_target(root: &Path) -> PathBuf {
-    worktree::target_dir(root, std::env::var("CARGO_TARGET_DIR").ok().as_deref())
+    let dir = std::env::var("CARGO_TARGET_DIR").ok().filter(|dir| !dir.is_empty());
+    // `join` keeps an absolute path as it is.
+    root.join(dir.as_deref().unwrap_or("target"))
 }
 
 /// Prints a list of rule violations; returns true if there were none.
@@ -143,7 +116,6 @@ fn check(root: &Path, fast: bool) -> bool {
         ("test", Step::Cargo(&["test", "--workspace", "--quiet"])),
         ("hooks", Step::Internal(hooks_installed)),
         ("hygiene", Step::Internal(|root| report("hygiene", hygiene::check(root)))),
-        ("rules", Step::Internal(|root| report("rules", rules::check(root)))),
         ("arch", Step::Internal(|root| report("arch", arch::check(root)))),
         ("docs", Step::Internal(|root| report("docs", docs::check(root, false)))),
         ("i18n", Step::Internal(|root| report("i18n", i18n::check(root)))),
@@ -180,31 +152,6 @@ fn check(root: &Path, fast: bool) -> bool {
     all_ok
 }
 
-/// The full check of the committed state of `rev` in a temporary worktree,
-/// independent of the working tree (ADR-0048).
-fn check_rev(root: &Path, rev: &str) -> bool {
-    let cargo_target_dir = std::env::var("CARGO_TARGET_DIR").ok();
-    let target = worktree::check_rev_target_dir(root, cargo_target_dir.as_deref());
-    let result = worktree::with_worktree(root, rev, |dir| {
-        println!("check-rev: checking {rev} in {}", dir.display());
-        match worktree::check_command(dir, &target).status() {
-            Ok(status) if status.success() => Ok(()),
-            Ok(status) => Err(format!("check of {rev} in {} failed ({status})", dir.display())),
-            Err(e) => Err(format!("could not start cargo in {}: {e}", dir.display())),
-        }
-    });
-    match result.flatten() {
-        Ok(()) => {
-            println!("check-rev: {rev} green");
-            true
-        }
-        Err(e) => {
-            eprintln!("check-rev: {e}");
-            false
-        }
-    }
-}
-
 /// `commits --message <file>` checks one message, anything else is a rev range.
 fn commits_step(root: &Path, args: &[String]) -> bool {
     match args {
@@ -221,28 +168,6 @@ fn commits_step(root: &Path, args: &[String]) -> bool {
             false
         }
         revs => report("commits", commits::check_range(root, revs)),
-    }
-}
-
-/// Exit code 2 tells Claude Code to block the tool call and show stderr.
-fn guard_hook(root: &Path) -> ExitCode {
-    let env = |key: &str| std::env::var(key).ok();
-    let session = guard::Session::from_env_values(
-        env("QOOB3D_HARNESS_UNLOCK").as_deref(),
-        env("HOME").as_deref(),
-    );
-    let input = std::io::read_to_string(std::io::stdin())
-        .map_err(|e| e.to_string())
-        .and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string()));
-    match input
-        .map_err(|e| format!("guard: unreadable hook input: {e}"))
-        .and_then(|v| guard::pre_tool_use(root, &session, &v))
-    {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(reason) => {
-            eprintln!("{reason}");
-            ExitCode::from(2)
-        }
     }
 }
 
@@ -289,8 +214,8 @@ fn hooks_installed(root: &Path) -> bool {
     configured
 }
 
-/// Writes `ui.png` (whole app via egui_kittest) and scene renders of the
-/// standard views into `dir` (default `target/screenshots`).
+/// Writes `ui.png` (whole app via egui_kittest) and a contact sheet of the
+/// reference project into `dir` (default `target/screenshots`).
 fn screenshot(root: &Path, dir: Option<PathBuf>) -> bool {
     let dir = dir.unwrap_or_else(|| root.join("target/screenshots"));
     if let Err(err) = std::fs::create_dir_all(&dir) {
@@ -306,35 +231,20 @@ fn screenshot(root: &Path, dir: Option<PathBuf>) -> bool {
             .status()
             .is_ok_and(|s| s.success())
     };
-    let ok = shoot("ui")
-        && shoot("modeling")
-        && run(root, "cargo", &["build", "--quiet", "--package", "qoob3d-app"]);
+    let ok = shoot("ui") && run(root, "cargo", &["build", "--quiet", "--package", "qoob3d-app"]);
     if !ok {
         return false;
     }
-    let binary = cargo_target(root).join("debug/qoob3d");
-    for view in ["iso", "front", "top"] {
-        let out = dir.join(format!("scene-{view}.png"));
-        let args = ["--render", &out.to_string_lossy(), "--view", view, "--size", "1200x800"];
-        if !run(root, &binary.to_string_lossy(), &args) {
-            return false;
-        }
-    }
-    // Every reference model (ADR-0033).
-    let models = root.join("models");
-    let mut names: Vec<String> = std::fs::read_dir(&models)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| e.file_name().to_str()?.strip_suffix(".qbd").map(str::to_string))
-        .collect();
-    names.sort();
-    for name in names {
-        let file = models.join(format!("{name}.qbd"));
-        let out = dir.join(format!("model-{name}.png"));
-        let args =
-            [&*file.to_string_lossy(), "--render", &out.to_string_lossy(), "--size", "900x600"];
-        if !run(root, &binary.to_string_lossy(), &args) {
+    // The reference project (ADR-0013) from three sides.
+    let out = dir.join("reference.png");
+    let args = ["render-project", ".", "--out", &out.to_string_lossy(), "--views", "iso,front,top"];
+    let rendered = models::Reference::start(root)
+        .map(|reference| reference.command(&args).status().is_ok_and(|s| s.success()));
+    match rendered {
+        Ok(true) => {}
+        Ok(false) => return false,
+        Err(e) => {
+            eprintln!("screenshot: {e}");
             return false;
         }
     }
@@ -342,7 +252,7 @@ fn screenshot(root: &Path, dir: Option<PathBuf>) -> bool {
     true
 }
 
-/// Builds the binary, then checks every reference model through it.
+/// Builds the binary, then checks the reference project through it.
 fn models_step(root: &Path) -> bool {
     run(root, "cargo", &["build", "--quiet", "--package", "qoob3d-app"])
         && report("models", models::check(root))
@@ -383,7 +293,7 @@ pub(crate) fn git(root: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// Variables a git hook exports; they would point git at another repository,
-/// work tree or index than the one the command runs in (ADR-0048).
+/// work tree or index than the one the command runs in.
 pub(crate) const GIT_ENV: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
 
 /// `git` with `args` in `root`, without the hook's [`GIT_ENV`]: xtask always

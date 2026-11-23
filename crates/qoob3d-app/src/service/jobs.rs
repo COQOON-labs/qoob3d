@@ -10,10 +10,11 @@ use std::sync::mpsc;
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
+use qoob3d_core::project::layout;
 use serde_json::{Value, json};
 
 use super::Service;
-use super::snapshot::{Discovered, PartSource, Snapshot, cache_dir, cached, evict, record};
+use super::snapshot::{Discovered, PartSource, Snapshot, cached, evict, record};
 use crate::worker::{Answer, ErrorKind, PartError, Request};
 
 /// Finished jobs kept for `/job/<id>`.
@@ -293,7 +294,7 @@ impl Service {
 
     /// Loads the project and builds `requested` (`None` = all) with their
     /// dependencies; the snapshot that was built. Waits for the discovery of
-    /// every part file (ADR-0056). A build of all parts builds what loads and
+    /// every part file (ADR-0055). A build of all parts builds what loads and
     /// then fails with the load errors of the files that do not.
     fn build_job(
         &self,
@@ -358,7 +359,8 @@ impl Service {
                             .depends
                             .iter()
                             .map(|d| {
-                                let brep = cache_dir(&self.dir, d).join(&done[d.as_str()].0);
+                                let brep =
+                                    layout::cache_dir(&self.dir, d).join(&done[d.as_str()].0);
                                 (d.clone(), brep.with_extension("brep"))
                             })
                             .collect();

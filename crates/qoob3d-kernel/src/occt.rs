@@ -1,10 +1,14 @@
-//! cxx bridge to QOOB3D's own OCCT wrappers in `cpp/` (ADR-0014).
+//! cxx bridge to QOOB3D's own OCCT wrappers in `cpp/` (ADR-0004).
 #![expect(
     unsafe_code,
     unreachable_pub,
     reason = "cxx generates the unsafe FFI glue and its pub items; the C++ side converts \
               every OCCT exception into an `Err` (ADR-0004), so calls are safe from Rust"
 )]
+
+use cxx::UniquePtr;
+
+use crate::KernelError;
 
 #[cxx::bridge]
 pub(crate) mod ffi {
@@ -20,21 +24,7 @@ pub(crate) mod ffi {
         edge_starts: Vec<u32>,
     }
 
-    /// Profiles of a sketch (ADR-0028). Region `r` has vertices
-    /// `vertex_starts[r]..vertex_starts[r + 1]` (x, y pairs in `positions`),
-    /// triangle indices `index_starts[r]..` (relative to its first vertex),
-    /// key curve ids `key_starts[r]..` and area `areas[r]` (mm²).
-    struct Qoob3dRegions {
-        positions: Vec<f64>,
-        indices: Vec<u32>,
-        vertex_starts: Vec<u32>,
-        index_starts: Vec<u32>,
-        key_ids: Vec<u32>,
-        key_starts: Vec<u32>,
-        areas: Vec<f64>,
-    }
-
-    /// Sketch curves in the local plane (ADR-0028): lines `x0 y0 x1 y1`,
+    /// Sketch curves in the local plane (ADR-0004): lines `x0 y0 x1 y1`,
     /// circles `cx cy r`, arcs `cx cy r a0 a1` (CCW, radians).
     struct Qoob3dCurves {
         lines: Vec<f64>,
@@ -66,8 +56,6 @@ pub(crate) mod ffi {
             linear_deflection: f64,
             angular_deflection: f64,
         ) -> Result<Qoob3dMesh>;
-
-        fn qoob3d_sketch_regions(curves: &Qoob3dCurves, deflection: f64) -> Result<Qoob3dRegions>;
 
         fn qoob3d_profile_faces(
             curves: &Qoob3dCurves,
@@ -105,21 +93,6 @@ pub(crate) mod ffi {
         fn qoob3d_volume(shape: &TopoDS_Shape) -> Result<f64>;
         fn qoob3d_is_valid(shape: &TopoDS_Shape) -> Result<bool>;
         fn qoob3d_solid_count(shape: &TopoDS_Shape) -> Result<u32>;
-        fn qoob3d_solid(shape: &TopoDS_Shape, index: u32) -> Result<UniquePtr<TopoDS_Shape>>;
-        fn qoob3d_append(a: &TopoDS_Shape, b: &TopoDS_Shape) -> Result<UniquePtr<TopoDS_Shape>>;
-        fn qoob3d_outline_prism(
-            points: &[f64],
-            starts: &[u32],
-            kinds: &[u32],
-            holes: &[f64],
-            normal: &[f64],
-            vector: &[f64],
-        ) -> Result<UniquePtr<TopoDS_Shape>>;
-        fn qoob3d_sweep_circle(
-            path: &[f64],
-            radius: f64,
-            binormal: &[f64],
-        ) -> Result<UniquePtr<TopoDS_Shape>>;
 
         fn qoob3d_primitive(kind: u32, dims: &[f64]) -> Result<UniquePtr<TopoDS_Shape>>;
         fn qoob3d_transform(
@@ -174,4 +147,29 @@ pub(crate) mod ffi {
         fn qoob3d_write_brep(shape: &TopoDS_Shape, path: &str) -> Result<()>;
         fn qoob3d_read_brep(path: &str) -> Result<UniquePtr<TopoDS_Shape>>;
     }
+}
+
+/// An OCCT shape that is never null.
+pub(crate) struct Shape(UniquePtr<ffi::TopoDS_Shape>);
+
+impl Shape {
+    pub(crate) fn get(&self) -> &ffi::TopoDS_Shape {
+        self.0.as_ref().expect("shapes are never null")
+    }
+}
+
+/// An OCCT exception, caught in our C++ wrappers, as a [`KernelError`].
+pub(crate) fn occ<T>(r: Result<T, cxx::Exception>) -> Result<T, KernelError> {
+    r.map_err(|e| KernelError::Occt(e.what().to_string()))
+}
+
+/// The shape a wrapper returned; a null shape is an error.
+pub(crate) fn shape(
+    r: Result<UniquePtr<ffi::TopoDS_Shape>, cxx::Exception>,
+) -> Result<Shape, KernelError> {
+    let s = occ(r)?;
+    if s.is_null() {
+        return Err(KernelError::Occt("no shape".into()));
+    }
+    Ok(Shape(s))
 }

@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, bail};
 use qoob3d_core::export::{self, ExportObject};
 use qoob3d_core::fs::write_atomic;
+use qoob3d_core::project::layout;
 use qoob3d_core::project::{Config, Limits, Mesh, ValueStatus, Values, Workers};
 use qoob3d_core::qmesh;
 use serde::Deserialize;
@@ -40,8 +41,8 @@ use self::discovery::{Discovery, discovering};
 use self::http::Reply;
 use self::jobs::Job;
 use self::pool::Pool;
-use self::snapshot::{Record, Snapshot, cache_dir, views};
-use crate::live::ProjectDir;
+use self::snapshot::{Record, Snapshot, views};
+use crate::client::ProjectDir;
 use crate::worker::{ErrorKind, PartError, Request};
 
 /// How long shutdown waits for busy workers to be killed.
@@ -57,7 +58,7 @@ pub(crate) struct Service {
     /// Random per start; required in `X-Qoob3d-Token` (AG-HD-03).
     token: String,
     pool: Arc<Pool>,
-    /// Declarations of the part and check files (ADR-0056).
+    /// Declarations of the part and check files (ADR-0055).
     discovery: Arc<Discovery>,
     state: Mutex<State>,
     /// Held while a task file is created or changed, so two requests never
@@ -101,13 +102,13 @@ fn random_token() -> String {
 pub fn serve(dir: &Path) -> anyhow::Result<()> {
     let project = ProjectDir::open(dir)?;
     let dir = project.dir().to_path_buf();
-    let data = dir.join(".qoob3d");
+    let data = layout::data_dir(&dir);
     std::fs::create_dir_all(&data).with_context(|| format!("creating {}", data.display()))?;
     let lock = std::fs::File::options()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(data.join("service.lock"))
+        .open(data.join(layout::SERVICE_LOCK))
         .context("opening service.lock")?;
     match lock.try_lock() {
         Ok(()) => {}
@@ -133,7 +134,7 @@ pub fn serve(dir: &Path) -> anyhow::Result<()> {
         stopping: AtomicBool::new(false),
         requests: AtomicU64::new(0),
     });
-    let service_json = data.join("service.json");
+    let service_json = data.join(layout::SERVICE_JSON);
     let info = json!({"port": port, "pid": std::process::id(), "token": service.token}).to_string();
     write_atomic(&service_json, info.as_bytes()).context("writing service.json")?;
     tracing::info!(port, dir = %service.dir.display(), "project service listening");
@@ -293,7 +294,7 @@ impl Service {
     }
 
     /// `GET /status` (WA-PR-01, §3.1). It never waits for discovery
-    /// (ADR-0056) and answers from the last known declarations: parts of a
+    /// (ADR-0055) and answers from the last known declarations: parts of a
     /// file under rediscovery are `outdated`, those of a file that no longer
     /// loads `failed`; `discovering` lists the files not known yet. Every
     /// file that does not load is in `load_errors`, the first one also in
@@ -396,7 +397,7 @@ impl Service {
                 .ok_or_else(|| Failure::not_found(format!("unknown part {part:?}")))?;
             view.key.ok_or_else(|| Failure::not_found(format!("part {part:?} was never built")))?
         };
-        let path = cache_dir(&self.dir, part).join(&key).with_extension("qmsh");
+        let path = layout::cache_dir(&self.dir, part).join(&key).with_extension("qmsh");
         let file = std::fs::File::open(&path)
             .map_err(|e| Failure::not_found(format!("{}: {e}", path.display())))?;
         Ok(Reply::Mesh { key, file })
@@ -433,13 +434,13 @@ impl Service {
             }
             request.parts.iter().map(|p| job.key(p).unwrap_or_default()).collect::<Vec<_>>()
         };
-        let out = self.dir.join("out");
+        let out = self.dir.join(layout::OUT_DIR);
         std::fs::create_dir_all(&out)
             .map_err(|e| Failure::new(500, ErrorKind::Io, format!("{}: {e}", out.display())))?;
         let mut files = Vec::new();
         for (part, key) in request.parts.iter().zip(keys) {
             let file = format!("out/{part}.{format}");
-            let base = cache_dir(&self.dir, part).join(key);
+            let base = layout::cache_dir(&self.dir, part).join(key);
             if format == "step" {
                 self.export_step(part, &base.with_extension("brep"), &file)?;
             } else {

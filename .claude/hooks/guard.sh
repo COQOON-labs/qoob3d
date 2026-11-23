@@ -1,36 +1,45 @@
 #!/usr/bin/env bash
-# Claude Code PreToolUse guard (ADR-0037, ADR-0039, ADR-0043): the rules live in
-# `cargo xtask guard` (xtask/src/guard.rs). Exit 2 blocks the tool call.
+# Claude Code PreToolUse guard (ADR-0037): the edit tools must not change
+# harness files unless the human started Claude Code with
+# QOOB3D_HARNESS_UNLOCK=1. Everything else passes. Exit 2 blocks the tool call
+# and shows stderr to the agent.
 #
-# The guard always runs. It reads QOOB3D_HARNESS_UNLOCK itself: the unlock that
-# the human sets when starting Claude Code lifts only the harness-file
-# protection; fixtures, role separation and bypass detection stay active.
+# This is a write protection against accidental edits, not a sandbox: shell
+# commands are not inspected. The list mirrors HARNESS in xtask/src/paths.rs.
 set -uo pipefail
-cd "${CLAUDE_PROJECT_DIR:-$(dirname "$0")/../..}" || exit 2
-export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-input=$(cat)
-# Call the binary directly (cargo adds ~1 s per tool call); rebuild when stale.
-# It lives under `.git/`, which agents never write (ADR-0043); an inherited
-# CARGO_TARGET_DIR is ignored so that nothing can point the guard elsewhere.
-target=".git/qoob3d/guard-target"
-bin="$target/debug/xtask"
-if [ ! -x "$bin" ] || [ -n "$(find xtask Cargo.lock -newer "$bin" -print -quit)" ]; then
-  if ! CARGO_TARGET_DIR="$target" cargo build --quiet --package xtask; then
-    if [ ! -x "$bin" ]; then
-      echo "guard: xtask does not build and no guard binary exists – call blocked." >&2
-      exit 2
-    fi
-    # A broken xtask build during harness work must not block every tool call,
-    # including the edit that fixes it.
-    echo "guard: xtask does not build – using the previously built guard binary." >&2
-  fi
-fi
-"$bin" guard <<<"$input"
-status=$?
-# Fail closed: if the guard cannot run, block.
-if [ "$status" -ne 0 ] && [ "$status" -ne 2 ]; then
-  echo "guard: cargo xtask guard failed (exit $status) – call blocked." >&2
+[ "${QOOB3D_HARNESS_UNLOCK:-}" = "1" ] && exit 0
+
+root=$(cd "${CLAUDE_PROJECT_DIR:-$(dirname "$0")/../..}" && pwd) || exit 2
+
+# Prints the repository-relative path if the call edits a harness file. Paths
+# are collapsed (`.`, `..`) and compared ignoring case, as macOS file systems do.
+if ! hit=$(jq -r --arg root "$root" '
+  def collapse:
+    split("/")
+    | reduce .[] as $c ([];
+        if $c == "" or $c == "." then . elif $c == ".." then .[:-1] else . + [$c] end)
+    | join("/");
+  [".claude/", ".githooks/", ".github/", ".cargo/", "xtask/", "harness/",
+   "cargo.toml", "clippy.toml", "deny.toml", "rustfmt.toml", "rust-toolchain.toml"] as $harness
+  | ($root | collapse | ascii_downcase) as $root
+  | (.tool_input.file_path // .tool_input.notebook_path // "") as $file
+  | (if ($file | startswith("/")) then $file else $root + "/" + $file end
+     | collapse | ascii_downcase) as $path
+  | select($file != "" and ($path | startswith($root + "/")))
+  | $path[($root | length) + 1:]
+  | select(. as $rel
+      | any($harness[]; . as $h
+          | if ($h | endswith("/")) then ($rel | startswith($h)) else $rel == $h end))
+'); then
+  echo "guard: cannot read the hook input (is jq installed?) – call blocked." >&2
   exit 2
 fi
-exit "$status"
+
+if [ -n "$hit" ]; then
+  echo "guard: $hit is a harness file (ADR-0037). Propose the change; the human" >&2
+  echo "unlocks harness edits by starting Claude Code with QOOB3D_HARNESS_UNLOCK=1." >&2
+  exit 2
+fi
+exit 0

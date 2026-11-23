@@ -1,18 +1,18 @@
-//! Source rules that neither rustc nor clippy can express:
+//! Source rules that neither rustc nor clippy can express (ADR-0037):
 //! - unit tests live in their own `tests.rs` file, so that test code and
-//!   production code are separate files (ADR-0039),
-//! - every crate inherits the workspace lints (ADR-0040),
+//!   production code are separate files,
+//! - every crate inherits the workspace lints,
 //! - the number of suppressed lints (each lint in an `#[expect(…)]`, also
-//!   inside `cfg_attr`) never grows beyond `harness/ratchet.txt` (ADR-0040),
+//!   inside `cfg_attr`) never grows beyond `harness/ratchet.txt`,
 //! - the repository is English: no German umlauts or sharp s outside
-//!   `harness/language-allowlist.txt` (ADR-0045),
-//! - `.github/CODEOWNERS` names an owner for every harness path (ADR-0044).
+//!   `harness/language-allowlist.txt` (ADR-0001),
+//! - `.github/CODEOWNERS` names an owner for every harness path.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::git;
-use crate::paths::{self, Kind};
+use crate::paths;
 
 pub(crate) const LANGUAGE_ALLOWLIST: &str = "harness/language-allowlist.txt";
 const CODEOWNERS: &str = ".github/CODEOWNERS";
@@ -45,7 +45,7 @@ pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
             problems.extend(check_manifest(&rel, &text));
         } else if rel.ends_with(".rs") {
             suppressions += count_suppressions(&text);
-            if paths::kind(&rel) == Kind::Code {
+            if !paths::is_test(&rel) {
                 problems.extend(check_source(&rel, &text));
             }
         }
@@ -54,13 +54,13 @@ pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
     problems.extend(check_versioned_files(root));
     match fs::read_to_string(root.join(CODEOWNERS)) {
         Ok(text) => problems.extend(check_codeowners(&text)),
-        Err(_) => problems.push(format!("{CODEOWNERS} is missing (ADR-0044)")),
+        Err(_) => problems.push(format!("{CODEOWNERS} is missing")),
     }
     if problems.is_empty() { Ok(()) } else { Err(problems) }
 }
 
 /// `#[cfg(test)]` may only declare the out-of-line `mod tests;`, on the same
-/// line or the next non-empty one; test attributes never appear (ADR-0039).
+/// line or the next non-empty one; test attributes never appear.
 pub(crate) fn check_source(rel: &str, text: &str) -> Vec<String> {
     let lines: Vec<&str> = text.lines().collect();
     let mut problems = Vec::new();
@@ -79,7 +79,7 @@ pub(crate) fn check_source(rel: &str, text: &str) -> Vec<String> {
         if misplaced {
             problems.push(format!(
                 "{rel}:{}: test code belongs in its own file: `#[cfg(test)] mod tests;` \
-                 + tests.rs (ADR-0039)",
+                 + tests.rs",
                 no + 1
             ));
         }
@@ -89,7 +89,7 @@ pub(crate) fn check_source(rel: &str, text: &str) -> Vec<String> {
 
 /// Suppressed lints: every lint of an `expect` attribute, also inside
 /// (nested) `cfg_attr`, wherever the attribute stands and however it is
-/// spread over lines; plain `allow` is already rejected by clippy (ADR-0040).
+/// spread over lines; plain `allow` is already rejected by clippy.
 pub(crate) fn count_suppressions(text: &str) -> usize {
     let tokens = tokens(text);
     let attribute = |i: usize| {
@@ -272,7 +272,7 @@ fn check_ratchet(root: &Path, suppressions: usize) -> Option<String> {
     match limit {
         Some(Ok(limit)) if suppressions > limit => Some(format!(
             "{suppressions} lint suppressions (#[expect]), {limit} allowed ({RATCHET}). \
-             Fix the cause instead of suppressing it (ADR-0040)."
+             Fix the cause instead of suppressing it."
         )),
         Some(Ok(limit)) => {
             if suppressions < limit {
@@ -293,7 +293,7 @@ pub(crate) fn check_manifest(rel: &str, text: &str) -> Vec<String> {
     if inherits {
         Vec::new()
     } else {
-        vec![format!("{rel}: `[lints] workspace = true` is missing (ADR-0040)")]
+        vec![format!("{rel}: `[lints] workspace = true` is missing")]
     }
 }
 
@@ -340,7 +340,7 @@ pub(crate) fn check_language(rel: &str, text: &str, allow: &Allowlist) -> Vec<St
         if let Some(c) = line.chars().find(|c| GERMAN_CHARS.contains(c)) {
             problems.push(format!(
                 "{rel}:{}: `{c}` is not English – the repository is English, German only in \
-                 locales/de/ (ADR-0045, {LANGUAGE_ALLOWLIST})",
+                 locales/de/ (ADR-0001, {LANGUAGE_ALLOWLIST})",
                 no + 1
             ));
         }
@@ -348,7 +348,7 @@ pub(crate) fn check_language(rel: &str, text: &str, allow: &Allowlist) -> Vec<St
     problems
 }
 
-/// Every harness path outside `target/` needs an owner line `/<path> @owner`.
+/// Every harness path needs an owner line `/<path> @owner`.
 pub(crate) fn check_codeowners(text: &str) -> Vec<String> {
     let owned: Vec<&str> = text
         .lines()
@@ -361,11 +361,8 @@ pub(crate) fn check_codeowners(text: &str) -> Vec<String> {
         .collect();
     paths::HARNESS
         .iter()
-        .filter(|entry| !entry.starts_with("target/"))
         .filter(|entry| !owned.iter().any(|o| o.strip_prefix('/') == Some(**entry)))
-        .map(|entry| {
-            format!("{CODEOWNERS} has no owner line for harness path `{entry}` (ADR-0044)")
-        })
+        .map(|entry| format!("{CODEOWNERS} has no owner line for harness path `{entry}`"))
         .collect()
 }
 

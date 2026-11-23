@@ -1,4 +1,4 @@
-# Code owners (ADR-0037, ADR-0044). With "Require review from Code Owners" in the
+# Code owners (ADR-0037). With "Require review from Code Owners" in the
 # ruleset for `main`, every change needs the owner's review. The harness paths are
 # listed explicitly; `cargo xtask hygiene` checks that each one has an owner line.
 * @Ben-Gee

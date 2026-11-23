@@ -1,24 +1,10 @@
 #!/usr/bin/env bash
 # Local brake before anything leaves the machine (ADR-0037). CI runs the same
 # checks again; this hook only saves a round trip. Installed by `cargo xtask setup`.
-#   1. commit policy for every pushed commit: no AI attribution (ADR-0038),
-#      tests and code in separate commits (ADR-0039), fixtures untouched
+#   1. commit policy for every pushed commit: project identity, no AI attribution
 #   2. secret scan of the pushed commits (gitleaks)
-#   3. a critic review of the pushed state, if it changes production code
-#      (ADR-0041); a human skips it with QOOB3D_SKIP_REVIEW=1
-#   4. the full definition of done for the tip of each pushed ref, in a
-#      temporary worktree of exactly that commit: `xtask check-rev` (ADR-0048)
-# A client that quarantines new files (Sourcetree) cannot run the check: cargo
-# re-links xtask, and the check builds and runs test binaries and build scripts
-# that Gatekeeper refuses. The hook stops before building anything (ADR-0051).
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
-
-if quarantining_client; then
-  echo "pre-push: this git client quarantines newly built programs (com.apple.quarantine)," >&2
-  echo "pre-push: so Gatekeeper would block the full check; push from a terminal (ADR-0051)" >&2
-  exit 1
-fi
 build_xtask
 
 remote="$1"
@@ -39,10 +25,4 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   else
     echo "pre-push: gitleaks missing (brew install gitleaks) – secret scan runs only in CI" >&2
   fi
-  if [ "${QOOB3D_SKIP_REVIEW:-}" = 1 ]; then
-    echo "pre-push: critic review skipped (QOOB3D_SKIP_REVIEW=1)" >&2
-  else
-    "$xtask_binary" review "$local_sha" "${range[@]}"
-  fi
-  "$xtask_binary" check-rev "$local_sha"
 done

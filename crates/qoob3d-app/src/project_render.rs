@@ -14,8 +14,8 @@ use qoob3d_core::ShapeMesh;
 use qoob3d_render::ViewPreset;
 use serde_json::{Value, json};
 
-use crate::headless_render::{self, RenderView};
-use crate::live::{BUILD_TIMEOUT, Client, ProjectDir, START_TIMEOUT, service_command_from_env};
+use crate::client::{BUILD_TIMEOUT, Client, ProjectDir, START_TIMEOUT, service_command_from_env};
+use crate::headless_render;
 
 /// Margin over the build wait for the answer of the build request.
 const ANSWER_MARGIN: Duration = Duration::from_secs(30);
@@ -58,19 +58,11 @@ pub fn run(
     if meshes.is_empty() {
         bail!("no part of {} to render", project.dir().display());
     }
-    let view = |preset: &ViewPreset| RenderView {
-        preset: *preset,
-        orthographic: true,
-        zoom: 1.0,
-        printer: None,
-        build_volume: false,
-    };
     let scene = ShapeMesh::merge(&meshes);
     if let [single] = views {
-        return headless_render::run(out, view(single), size, Some(scene));
+        return headless_render::run(out, *single, size, &scene);
     }
-    let render_views: Vec<RenderView> = views.iter().map(view).collect();
-    let images = headless_render::render_views(&scene, &render_views, size)?;
+    let images = headless_render::render_views(&scene, views, size)?;
     let labels: Vec<&str> = views.iter().map(|v| v.name()).collect();
     let (sheet_size, sheet) = sheet::compose(&images, &labels, size);
     headless_render::write_png(out, sheet_size, &sheet)

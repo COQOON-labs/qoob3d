@@ -1704,15 +1704,6 @@ dependencies = [
 
 [[package]]
 name = "glam"
-version = "0.24.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5418c17512bdf42730f9032c74e1ae39afc408745ebb2acf72fbc4691c17945"
-dependencies = [
- "bytemuck",
-]
-
-[[package]]
-name = "glam"
 version = "0.34.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc148d4ddd3930c52f9e5ae79b89805c6f07e9ff417e7b083e0348cea60a5aba"
@@ -2822,16 +2813,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencascade"
-version = "0.3.0"
-dependencies = [
- "cxx",
- "glam 0.24.2",
- "opencascade-sys",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "opencascade-sys"
 version = "0.3.0"
 dependencies = [
@@ -3156,16 +3137,14 @@ dependencies = [
  "eframe",
  "egui_kittest",
  "fluent-bundle",
- "glam 0.34.1",
+ "glam",
  "png",
  "qoob3d-core",
  "qoob3d-kernel",
  "qoob3d-render",
- "qoob3d-sketch",
  "rfd",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
  "unic-langid",
@@ -3189,12 +3168,9 @@ version = "0.1.0"
 dependencies = [
  "cxx",
  "cxx-build",
- "glam 0.24.2",
- "opencascade",
  "opencascade-sys",
  "qoob3d-core",
  "rhai",
- "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tracing",
@@ -3206,20 +3182,11 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "eframe",
- "glam 0.34.1",
+ "glam",
  "png",
  "pollster 0.4.0",
  "qoob3d-core",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "qoob3d-sketch"
-version = "0.1.0"
-dependencies = [
- "glam 0.34.1",
- "proptest",
- "qoob3d-core",
 ]
 
 [[package]]

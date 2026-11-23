@@ -20,7 +20,7 @@ use qoob3d_render::{Camera, ViewPreset};
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
 /// Abort if the whole test takes longer than this.
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
-/// Give up waiting for the first kernel result after this many frames.
+/// Give up waiting for the demo body after this many frames.
 const MAX_WAIT_FRAMES: u64 = 3000;
 /// Extra frames a step may wait for a camera animation to finish.
 const MAX_SETTLE_FRAMES: u32 = 600;
@@ -38,19 +38,6 @@ pub struct Observation<'a> {
     pub home_button: Option<Pos2>,
     pub last_orbit_pivot: Option<Vec3>,
     pub animating: bool,
-    /// Screen position of the XY plane square while picking a plane.
-    pub xy_plane: Option<Pos2>,
-    /// Screen positions of sketch points (0,0) and (40,30) in sketch mode.
-    pub sketch_corners: [Option<Pos2>; 2],
-    pub sketching: bool,
-    pub picking_plane: bool,
-    pub sketch_curves: usize,
-    pub sketch_profiles: usize,
-    /// The kernel is still computing (profiles not up to date yet).
-    pub rebuilding: bool,
-    pub features: usize,
-    pub commanding: bool,
-    pub bodies: usize,
 }
 
 /// Screen positions the scripted input aims at (from the previous frame).
@@ -59,8 +46,6 @@ struct Targets {
     center: Pos2,
     viewcube_top: Option<Pos2>,
     home: Option<Pos2>,
-    xy_plane: Option<Pos2>,
-    corners: [Option<Pos2>; 2],
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -99,17 +84,11 @@ impl SmokeTest {
         let result: SmokeResult = Arc::default();
         spawn_watchdog(frames.clone());
         let test = Self {
-            steps: steps().into_iter().chain(sketch_steps()).collect(),
+            steps: steps(),
             current: None,
             frame_in_step: 0,
             before: None,
-            targets: Targets {
-                center: pos2(400.0, 300.0),
-                viewcube_top: None,
-                home: None,
-                xy_plane: None,
-                corners: [None, None],
-            },
+            targets: Targets { center: pos2(400.0, 300.0), viewcube_top: None, home: None },
             finished: false,
             frames,
             result: result.clone(),
@@ -135,8 +114,6 @@ impl SmokeTest {
             center: obs.viewport_center,
             viewcube_top: obs.viewcube_top,
             home: obs.home_button,
-            xy_plane: obs.xy_plane,
-            corners: obs.sketch_corners,
         };
         if self.finished {
             // Waiting for the window to close.
@@ -148,7 +125,7 @@ impl SmokeTest {
                 println!("smoke: model loaded after {frame} frames");
                 self.begin_step(0, obs.camera);
             } else if frame > MAX_WAIT_FRAMES {
-                return self.finish(Err(format!("no kernel result after {frame} frames")));
+                return self.finish(Err(format!("no model after {frame} frames")));
             }
             return Control::Continue;
         };
@@ -160,8 +137,7 @@ impl SmokeTest {
         }
         // Animated steps: wait (bounded) until the camera has settled, so the
         // test does not depend on the display refresh rate.
-        let busy = obs.animating || obs.rebuilding;
-        if busy && self.frame_in_step < step.frames + MAX_SETTLE_FRAMES {
+        if obs.animating && self.frame_in_step < step.frames + MAX_SETTLE_FRAMES {
             return Control::Continue;
         }
 
@@ -225,7 +201,7 @@ fn spawn_watchdog(frames: Arc<AtomicU64>) {
 
 // ----------------------------------------------------------------- script
 
-#[expect(clippy::too_many_lines, reason = "predates ADR-0040; split when next changed")]
+#[expect(clippy::too_many_lines, reason = "predates ADR-0037; split when next changed")]
 fn steps() -> Vec<Step> {
     vec![
         Step {
@@ -373,123 +349,6 @@ fn steps() -> Vec<Step> {
                     Ok(())
                 } else {
                     Err(format!("view from {got} instead of {want}"))
-                }
-            },
-        },
-    ]
-}
-
-/// The sketch workflow on top of the navigation steps (SK-QA-05).
-#[expect(clippy::too_many_lines, reason = "predates ADR-0040; split when next changed")]
-fn sketch_steps() -> Vec<Step> {
-    vec![
-        Step {
-            name: "Create sketch (S, click plane XY)",
-            frames: 8,
-            inject: |f, at, raw| match f {
-                0 => raw.events.push(key(Key::S, true)),
-                1 => raw.events.push(key(Key::S, false)),
-                2..=4 => {
-                    if let Some(p) = at.xy_plane {
-                        left_click(f - 2, p, raw);
-                    }
-                }
-                _ => {}
-            },
-            check: |_, _, obs| {
-                if obs.sketching && obs.features == 1 {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "sketch mode {} (plane picking {}), features {}",
-                        obs.sketching, obs.picking_plane, obs.features
-                    ))
-                }
-            },
-        },
-        Step {
-            name: "Draw rectangle (R, two clicks)",
-            frames: 10,
-            inject: |f, at, raw| match f {
-                0 => raw.events.push(key(Key::R, true)),
-                1 => raw.events.push(key(Key::R, false)),
-                2..=4 => {
-                    if let Some(p) = at.corners[0] {
-                        left_click(f - 2, p, raw);
-                    }
-                }
-                5..=7 => {
-                    if let Some(p) = at.corners[1] {
-                        left_click(f - 5, p, raw);
-                    }
-                }
-                _ => {}
-            },
-            check: |_, _, obs| {
-                if obs.sketch_curves == 4 {
-                    Ok(())
-                } else {
-                    Err(format!("{} curves instead of 4", obs.sketch_curves))
-                }
-            },
-        },
-        Step {
-            name: "Profile found by the kernel",
-            frames: 2,
-            inject: |_, _, _| {},
-            check: |_, _, obs| {
-                if obs.sketch_profiles == 1 {
-                    Ok(())
-                } else {
-                    Err(format!("{} profiles instead of 1", obs.sketch_profiles))
-                }
-            },
-        },
-        Step {
-            name: "Finish sketch (Esc, Enter)",
-            frames: 5,
-            inject: |f, _, raw| match f {
-                0 => raw.events.push(key(Key::Escape, true)),
-                1 => raw.events.push(key(Key::Escape, false)),
-                2 => raw.events.push(key(Key::Enter, true)),
-                3 => raw.events.push(key(Key::Enter, false)),
-                _ => {}
-            },
-            check: |_, _, obs| {
-                if !obs.sketching && obs.features == 1 {
-                    Ok(())
-                } else {
-                    Err(format!("sketch mode {}, features {}", obs.sketching, obs.features))
-                }
-            },
-        },
-        Step {
-            name: "Extrude (E, profile preselected, Enter)",
-            frames: 8,
-            inject: |f, _, raw| match f {
-                0 => raw.events.push(key(Key::E, true)),
-                1 => raw.events.push(key(Key::E, false)),
-                5 => raw.events.push(key(Key::Enter, true)),
-                6 => raw.events.push(key(Key::Enter, false)),
-                _ => {}
-            },
-            check: |_, _, obs| {
-                if !obs.commanding && obs.features == 2 {
-                    Ok(())
-                } else {
-                    Err(format!("dialog open {}, features {}", obs.commanding, obs.features))
-                }
-            },
-        },
-        Step {
-            name: "Body computed by the kernel",
-            frames: 2,
-            inject: |_, _, _| {},
-            check: |_, _, obs| {
-                if obs.bodies == 1 {
-                    Ok(())
-                } else {
-                    Err(format!("{} bodies instead of 1", obs.bodies))
                 }
             },
         },

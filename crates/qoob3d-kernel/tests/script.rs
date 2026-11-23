@@ -1,4 +1,4 @@
-//! Script kernel R1 (docs/requirements/agent.md §1, ADR-0053): the Rhai CAD
+//! Script kernel (docs/requirements/agent.md §1, ADR-0053): the Rhai CAD
 //! API end to end. Every expected value is derived by hand from the
 //! dimensions in the script; the derivation stands next to the assertion.
 //!
@@ -14,91 +14,22 @@
 //! Integer arguments are accepted wherever a number is expected (the task's
 //! own example `box(10, 20, 30)`); several scripts use ints on purpose.
 
+mod common;
+#[path = "common/solid.rs"]
+mod solid;
+
 use std::f64::consts::PI;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use qoob3d_kernel::script::{
-    RunOptions, RunOutput, ScriptError, Shape, export_3mf, export_step, export_stl, run,
-};
-
-const VOL: f64 = 1e-6;
-const POS: f64 = 1e-6;
+use common::{POS, VOL, assert_bbox, assert_rel, printed, run_err, run_ok, shape, src};
+use qoob3d_core::export::{self, ExportObject};
+use qoob3d_kernel::script::{RunOptions, ScriptError, Shape, export_step, run};
+use solid::{assert_size, assert_volume, expect_geometry};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn src(lines: &[&str]) -> String {
-    lines.join("\n")
-}
-
-fn run_ok(source: &str) -> RunOutput {
-    run(source, &RunOptions::default())
-        .unwrap_or_else(|e| panic!("script failed: {e:?}\n--- script ---\n{source}"))
-}
-
-fn run_err(source: &str) -> ScriptError {
-    match run(source, &RunOptions::default()) {
-        Ok(out) => panic!(
-            "script must fail but returned {} shapes, printed {:?}\n{source}",
-            out.shapes.len(),
-            out.printed
-        ),
-        Err(e) => e,
-    }
-}
-
-fn shape<'a>(out: &'a RunOutput, name: &str) -> &'a Shape {
-    &out.shapes
-        .iter()
-        .find(|(n, _)| n == name)
-        .unwrap_or_else(|| {
-            panic!(
-                "no shape {name:?}, have {:?}",
-                out.shapes.iter().map(|s| &s.0).collect::<Vec<_>>()
-            )
-        })
-        .1
-}
-
-fn assert_rel(actual: f64, expected: f64, tol: f64, what: &str) {
-    let rel = (actual - expected).abs() / expected.abs();
-    assert!(rel < tol, "{what}: got {actual}, expected {expected} (rel {rel:e} >= {tol:e})");
-}
-
-fn assert_volume(out: &RunOutput, name: &str, expected: f64) {
-    let s = shape(out, name);
-    assert!(s.is_valid(), "{name} is not a valid solid");
-    assert_rel(s.volume(), expected, VOL, &format!("volume of {name}"));
-}
-
-fn assert_bbox(out: &RunOutput, name: &str, min: [f64; 3], max: [f64; 3]) {
-    let (a, b) = shape(out, name).bbox();
-    for i in 0..3 {
-        assert!(
-            (a[i] - min[i]).abs() < POS && (b[i] - max[i]).abs() < POS,
-            "bbox of {name}: got {a:?}..{b:?}, expected {min:?}..{max:?}"
-        );
-    }
-}
-
-fn assert_size(out: &RunOutput, name: &str, size: [f64; 3]) {
-    let (a, b) = shape(out, name).bbox();
-    for i in 0..3 {
-        assert!(
-            (b[i] - a[i] - size[i]).abs() < POS,
-            "bbox size of {name}: got {a:?}..{b:?}, expected size {size:?}"
-        );
-    }
-}
-
-/// Printed line `i` as a number (Rhai prints floats round-trip exact).
-fn printed(out: &RunOutput, i: usize) -> f64 {
-    let line =
-        out.printed.get(i).unwrap_or_else(|| panic!("no printed line {i}: {:?}", out.printed));
-    line.trim().parse().unwrap_or_else(|e| panic!("printed line {i} {line:?} is no number: {e}"))
-}
 
 fn expect_runtime(e: &ScriptError, want_line: usize) {
     match e {
@@ -107,22 +38,6 @@ fn expect_runtime(e: &ScriptError, want_line: usize) {
             assert!(!message.is_empty(), "{e:?}");
         }
         other => panic!("expected a Runtime error on line {want_line}, got {other:?}"),
-    }
-}
-
-/// `function` is the name of the failing script API function (AG-SC-03),
-/// or for an operator the operator token; both are accepted.
-fn expect_geometry(e: &ScriptError, want_line: usize, functions: &[&str]) {
-    match e {
-        ScriptError::Geometry { line, function, message, .. } => {
-            assert_eq!(*line, want_line, "{e:?}");
-            assert!(
-                functions.contains(&function.as_str()),
-                "function {function:?} not in {functions:?}: {e:?}"
-            );
-            assert!(!message.is_empty(), "{e:?}");
-        }
-        other => panic!("expected a Geometry error on line {want_line}, got {other:?}"),
     }
 }
 
@@ -1000,12 +915,34 @@ fn mesh_volume_and_closed(tris: &[[[f32; 3]; 3]]) -> (f64, bool) {
     (volume, closed)
 }
 
+/// Writes `shapes` like the service's STL/3MF export: meshed with the default
+/// `[mesh]` settings of a project, encoded by `qoob3d_core::export` (ADR-0034).
+fn write_export(
+    shapes: &[(String, Shape)],
+    path: &Path,
+    encode: fn(&[ExportObject<'_>]) -> Vec<u8>,
+) {
+    let settings = qoob3d_core::project::Mesh::default();
+    let meshes: Vec<_> = shapes
+        .iter()
+        .map(|(name, s)| {
+            let mesh = s.mesh_with_angle(settings.deflection_mm, settings.angle_deg);
+            (name.clone(), mesh.expect("mesh"))
+        })
+        .collect();
+    let objects: Vec<ExportObject<'_>> = meshes
+        .iter()
+        .map(|(name, mesh)| ExportObject { name: name.clone(), mesh: &mesh.faces })
+        .collect();
+    std::fs::write(path, encode(&objects)).expect("write export");
+}
+
 #[test]
 fn ag_sc_14_export_stl_is_closed_with_the_exact_box_volume() {
     let dir = scratch("export_stl");
     let out = run_ok("show(box(10, 20, 30) - box(4, 4, 30), \"frame\");");
     let path = dir.join("frame.stl");
-    export_stl(&out.shapes, &path).expect("STL export");
+    write_export(&out.shapes, &path, export::stl);
     let tris = read_stl(&std::fs::read(&path).unwrap());
     let (v, closed) = mesh_volume_and_closed(&tris);
     assert!(closed, "STL must be watertight");
@@ -1063,7 +1000,7 @@ fn ag_sc_14_export_3mf_has_one_closed_object_per_shape() {
     let out =
         run_ok("show(box(10, 20, 30), \"block\");\nshow(sphere(30).move(40, 0, 15), \"ball\");");
     let path = dir.join("parts.3mf");
-    export_3mf(&out.shapes, &path).expect("3MF export");
+    write_export(&out.shapes, &path, export::three_mf);
     let objects = read_3mf(&path);
     let names: Vec<&str> = objects.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, ["block", "ball"]);
@@ -1074,7 +1011,7 @@ fn ag_sc_14_export_3mf_has_one_closed_object_per_shape() {
     let (v, closed) = mesh_volume_and_closed(&objects[1].1);
     assert!(closed);
     // Chordal tolerance 0.01 mm on r = 15: the inscribed mesh loses < 0.2 %
-    // (same bound as features.rs `export_meshes_are_finer_and_watertight`).
+    // (the bound of the export tolerance, ADR-0034).
     let exact = 4.0 / 3.0 * PI * 15f64.powi(3);
     assert!(v < exact && (exact - v) / exact < 2e-3, "3MF sphere {v} vs {exact}");
 }
@@ -1154,7 +1091,8 @@ fn rhai_blocks(markdown: &str) -> Vec<(usize, String)> {
     blocks
 }
 
-/// Script API functions of AG-SC-01…14 that need a doc entry.
+/// Script API functions that need a doc entry and an example (AG-SC-01…14,
+/// AG-SC-17…22).
 const API: &[&str] = &[
     "show",
     "box",
@@ -1202,6 +1140,18 @@ const API: &[&str] = &[
     "pin",
     "hole",
     "import_step",
+    "rounded_rect",
+    "offset",
+    "countersink",
+    "counterbore",
+    "in_box",
+    "near",
+    "length",
+    "expect_eq",
+    "mass",
+    "section",
+    "overhangs",
+    "bed_area",
 ];
 
 #[test]
@@ -1240,4 +1190,7 @@ fn ag_sc_16_every_api_function_is_documented_with_an_example() {
     assert!(undocumented.is_empty(), "no signature in script-api.md for {undocumented:?}");
     let no_example: Vec<&str> = API.iter().copied().filter(|f| !call(&examples, f)).collect();
     assert!(no_example.is_empty(), "no ```rhai example uses {no_example:?}");
+    // `profile.rotate(deg)` shares its name with `s.rotate(axis, deg)`: the
+    // one-argument form needs its own entry.
+    assert!(doc.contains(".rotate(deg)"), "no entry for profile.rotate(deg)");
 }

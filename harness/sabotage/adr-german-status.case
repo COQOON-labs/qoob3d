@@ -1,16 +1,16 @@
-# An ADR uses a German status (ADR-0045: ADR format is English)
+# An ADR uses a German status (ADR-0001: ADR format is English)
 command: cargo xtask docs
 expect: status `akzeptiert` is invalid
 --- patch
-diff --git a/docs/adr/0045-repository-language-english.md b/docs/adr/0045-repository-language-english.md
---- a/docs/adr/0045-repository-language-english.md
-+++ b/docs/adr/0045-repository-language-english.md
+diff --git a/docs/adr/0001-documentation-adrs-and-repository-language.md b/docs/adr/0001-documentation-adrs-and-repository-language.md
+--- a/docs/adr/0001-documentation-adrs-and-repository-language.md
++++ b/docs/adr/0001-documentation-adrs-and-repository-language.md
 @@ -1,7 +1,7 @@
  ---
- id: ADR-0045
- title: The repository is English; German exists only as the UI language pack
+ id: ADR-0001
+ title: Decisions live in about 15 topic ADRs that are updated in place, the repository is English, and xtask checks the documentation
 -status: accepted
 +status: akzeptiert
- date: 2026-10-14
+ date: 2026-11-23
  crates: [xtask, qoob3d-app]
- tags: [documentation, process, i18n]
+ tags: [documentation, process, ai, i18n]

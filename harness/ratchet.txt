@@ -1,4 +1,4 @@
 # Upper bound for suppressed lints in crates/ and xtask/: each lint in an
-# #[expect(…)], also inside cfg_attr, counts once (ADR-0040).
+# #[expect(…)], also inside cfg_attr, counts once (ADR-0037).
 # Only ever lower it. xtask hygiene says when it can go down.
-suppressions = 10
+suppressions = 5

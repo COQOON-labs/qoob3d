@@ -1,163 +1,201 @@
-//! Reference models as a quality gate (ADR-0033).
+//! The reference project as a quality gate (ADR-0013).
 //!
-//! `models/<name>.qbd` are generated from `qoob3d_core::document::examples`
-//! (`--write`). The check proves, headless through the real binary:
-//! - every example is written and up to date, every model has an
-//!   `<name>.expect.json` with analytic truths;
-//! - every feature kind and curve kind is used by at least one model;
-//! - `qoob3d <model> --report` reports no errors, the expected number of
-//!   valid, watertight bodies, the volume and the bounding box;
-//! - `--export` writes a readable 3MF and a non-empty STL.
+//! `models/` is a script project whose checks compare every part with a
+//! formula. The gate proves the path "design → slicer", headless through the
+//! real binary, on a fresh copy with an empty cache:
+//! - every part builds, its shape is valid and its mesh watertight,
+//! - every check of the project passes,
+//! - the 3MF and STL exports are readable, also for Info-ZIP and, if it is
+//!   installed, for Bambu Studio.
 
-use std::collections::BTreeSet;
-use std::path::Path;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
-use qoob3d_core::document::{CurveKind, FeatureKind, examples};
+use qoob3d_core::project::layout;
 use serde_json::Value;
 
-pub(crate) fn write(root: &Path) -> Result<(), Vec<String>> {
-    let dir = root.join("models");
-    std::fs::create_dir_all(&dir).map_err(|e| vec![e.to_string()])?;
-    for (name, doc) in examples::all() {
-        let path = dir.join(format!("{name}.qbd"));
-        std::fs::write(&path, doc.to_json() + "\n").map_err(|e| vec![format!("{name}: {e}")])?;
-        println!("models: wrote {}", path.display());
+/// The reference project, relative to the repository root.
+const PROJECT: &str = "models";
+/// How long the service may take to come up.
+const START_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A copy of the reference project with its own service of the binary under
+/// test. Dropping it stops the service; its workers end with it.
+pub(crate) struct Reference {
+    binary: PathBuf,
+    dir: PathBuf,
+    service: Child,
+}
+
+impl Drop for Reference {
+    fn drop(&mut self) {
+        let _ = self.service.kill();
+        let _ = self.service.wait();
+    }
+}
+
+impl Reference {
+    /// Copies `models/` to `target/models/project` (without cache and
+    /// exports) and starts `qoob3d serve` for the copy.
+    pub(crate) fn start(root: &Path) -> Result<Self, String> {
+        let binary = crate::cargo_target(root).join("debug/qoob3d");
+        let dir = crate::cargo_target(root).join("models/project");
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        copy_project(&root.join(PROJECT), &dir)?;
+        let mut service = Command::new(&binary)
+            .arg("serve")
+            .arg(&dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            // Its stderr stays ours: only what a failing gate needs to show.
+            .env("RUST_LOG", "warn")
+            .spawn()
+            .map_err(|e| format!("cannot run {}: {e}", binary.display()))?;
+        let ready = layout::service_json(&dir);
+        let deadline = Instant::now() + START_TIMEOUT;
+        while !ready.exists() {
+            let exited = service.try_wait().ok().flatten();
+            if exited.is_some() || Instant::now() > deadline {
+                let _ = service.kill();
+                let _ = service.wait();
+                return Err(match exited {
+                    Some(status) => format!("the service ended at once ({status})"),
+                    None => format!("the service did not start within {START_TIMEOUT:?}"),
+                });
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(Self { binary, dir, service })
+    }
+
+    /// `qoob3d <args>` with the project as working directory.
+    pub(crate) fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(&self.binary);
+        command
+            .args(args)
+            .current_dir(&self.dir)
+            .env("QOOB3D_SERVICE_CMD", &self.binary)
+            .env("RUST_LOG", "warn");
+        command
+    }
+
+    /// `qoob3d <args>` in the project: the `result` of its JSON envelope.
+    fn call(&self, args: &[&str]) -> Result<Value, String> {
+        let output = self
+            .command(args)
+            .output()
+            .map_err(|e| format!("cannot run {}: {e}", self.binary.display()))?;
+        let envelope: Value = serde_json::from_slice(&output.stdout).map_err(|e| {
+            format!(
+                "`qoob3d {}` printed no JSON ({e}); stderr: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })?;
+        if envelope["ok"] == Value::Bool(true) {
+            Ok(envelope["result"].clone())
+        } else {
+            Err(format!("`qoob3d {}` failed: {}", args.join(" "), envelope["error"]["message"]))
+        }
+    }
+}
+
+/// Copies the project files; cache and exports of a local run stay behind.
+fn copy_project(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
+    let entries = std::fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))?;
+    for entry in entries.flatten() {
+        let (source, name) = (entry.path(), entry.file_name());
+        if source.is_dir() {
+            if name != layout::DATA_DIR && name != layout::OUT_DIR {
+                copy_project(&source, &to.join(&name))?;
+            }
+        } else {
+            std::fs::copy(&source, to.join(&name))
+                .map_err(|e| format!("{}: {e}", source.display()))?;
+        }
     }
     Ok(())
 }
 
 pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
-    let dir = root.join("models");
+    let reference = Reference::start(root).map_err(|e| vec![e])?;
     let mut problems = Vec::new();
-    let mut kinds = BTreeSet::new();
-    let mut curves = BTreeSet::new();
-    let examples = examples::all();
 
-    // 1. Files in sync with the examples.
-    for (name, doc) in &examples {
-        let path = dir.join(format!("{name}.qbd"));
-        match std::fs::read_to_string(&path) {
-            Ok(text) if text == doc.to_json() + "\n" => {}
-            Ok(_) => problems.push(format!(
-                "{name}.qbd differs from examples::{name} – run `cargo xtask models --write`"
-            )),
-            Err(_) => {
-                problems.push(format!("{name}.qbd is missing – run `cargo xtask models --write`"));
-            }
-        }
-        if !dir.join(format!("{name}.expect.json")).exists() {
-            problems.push(format!("{name}.expect.json is missing (analytic expectations)"));
-        }
-        for f in &doc.features {
-            kinds.insert(f.kind.kind_id());
-            if let FeatureKind::Sketch(s) = &f.kind {
-                for c in &s.curves {
-                    curves.insert(match c.kind {
-                        CurveKind::Line { .. } => "line",
-                        CurveKind::Circle { .. } => "circle",
-                        CurveKind::Arc { .. } => "arc",
-                    });
-                }
-            }
-        }
+    // 1. Every part builds into a valid shape with a closed mesh.
+    let build = reference.call(&["build"]).map_err(|e| vec![e])?;
+    let parts = build["parts"].as_object().cloned().unwrap_or_default();
+    if parts.is_empty() {
+        problems.push(format!("{PROJECT}/ declares no parts"));
     }
-    // 2. Coverage: a new feature or curve kind needs a reference model.
-    for kind in FeatureKind::KIND_IDS {
-        if !kinds.contains(kind) {
-            problems.push(format!("feature kind `{kind}` is used by no model in models/"));
-        }
-    }
-    for curve in ["line", "circle", "arc"] {
-        if !curves.contains(curve) {
-            problems.push(format!("curve kind `{curve}` is used by no model in models/"));
+    for (name, part) in &parts {
+        if part["state"] == "failed" {
+            problems.push(format!("{name}: {}", part["error"]["message"]));
+        } else if part["valid"] != Value::Bool(true) || part["watertight"] != Value::Bool(true) {
+            problems.push(format!(
+                "{name}: not printable (valid {}, watertight {})",
+                part["valid"], part["watertight"]
+            ));
         }
     }
     if !problems.is_empty() {
         return Err(problems);
     }
 
-    // 3. Build every model through the real binary.
-    let binary = crate::cargo_target(root).join("debug/qoob3d");
-    let out_dir = root.join("target/models");
-    if let Err(e) = std::fs::create_dir_all(&out_dir) {
-        return Err(vec![e.to_string()]);
+    // 2. The analytic expectations of the project.
+    let checks = reference.call(&["check"]).map_err(|e| vec![e])?;
+    let checks = checks["checks"].as_array().cloned().unwrap_or_default();
+    if checks.is_empty() {
+        problems.push(format!("{PROJECT}/ declares no checks"));
     }
-    for (name, _) in &examples {
-        if let Err(p) = check_model(&binary, &dir, &out_dir, name) {
-            problems.extend(p.into_iter().map(|m| format!("{name}: {m}")));
-        } else {
-            println!("models: ok    {name}");
+    for check in &checks {
+        if check["state"] == "passed" {
+            continue;
         }
-    }
-    if problems.is_empty() { Ok(()) } else { Err(problems) }
-}
-
-fn check_model(binary: &Path, dir: &Path, out: &Path, name: &str) -> Result<(), Vec<String>> {
-    let model = dir.join(format!("{name}.qbd"));
-    let expect: Value = std::fs::read_to_string(dir.join(format!("{name}.expect.json")))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .ok_or_else(|| vec!["expect.json is not valid JSON".to_string()])?;
-    let three = out.join(format!("{name}.3mf"));
-    let stl = out.join(format!("{name}.stl"));
-    let mut problems = Vec::new();
-
-    let run = |extra: &[&str]| {
-        Command::new(binary)
-            .arg(&model)
-            .args(extra)
-            .output()
-            .map_err(|e| vec![format!("cannot run {}: {e}", binary.display())])
-    };
-    let output = run(&["--report", "--export", &three.to_string_lossy()])?;
-    let report: Value = serde_json::from_slice(&output.stdout).map_err(|e| {
-        vec![format!("no JSON report ({e}); stderr: {}", String::from_utf8_lossy(&output.stderr))]
-    })?;
-    if !output.status.success() || report["ok"] != Value::Bool(true) {
-        problems.push(format!("report not ok: {}", report["errors"]));
-    }
-    let bodies = report["bodies"].as_array().cloned().unwrap_or_default();
-    if let Some(n) = expect["bodies"].as_u64()
-        && bodies.len() as u64 != n
-    {
-        problems.push(format!("{} bodies, expected {n}", bodies.len()));
-    }
-    let volume = report["total_volume_mm3"].as_f64().unwrap_or(f64::NAN);
-    if let (Some(v), Some(tol)) = (expect["volume_mm3"].as_f64(), expect["volume_rel_tol"].as_f64())
-        && ((volume - v).abs() / v > tol || volume.is_nan())
-    {
-        problems.push(format!("volume {volume:.4} mm³, expected {v:.4} (±{tol})"));
-    }
-    if let (Some(lo), Some(hi)) = (expect["volume_min"].as_f64(), expect["volume_max"].as_f64())
-        && !(lo..=hi).contains(&volume)
-    {
-        problems.push(format!("volume {volume:.2} mm³ outside {lo}…{hi}"));
-    }
-    if let Some(tol) = expect["bbox_tol"].as_f64() {
-        let axis = |key: &str, pick: fn(f64, f64) -> f64| -> Vec<f64> {
-            (0..3)
-                .map(|k| {
-                    bodies
-                        .iter()
-                        .filter_map(|b| b[key][k].as_f64())
-                        .reduce(pick)
-                        .unwrap_or(f64::NAN)
-                })
-                .collect()
-        };
-        let (min, max) = (axis("bbox_min", f64::min), axis("bbox_max", f64::max));
-        for (key, got) in [("bbox_min", &min), ("bbox_max", &max)] {
-            let want: Vec<f64> =
-                expect[key].as_array().into_iter().flatten().filter_map(Value::as_f64).collect();
-            let off = |k: usize| (got[k] - want[k]).abs() > tol || got[k].is_nan();
-            if want.len() == 3 && (0..3).any(off) {
-                problems.push(format!("{key} {got:?}, expected {want:?} (±{tol})"));
+        let name = check["name"].as_str().unwrap_or("?");
+        if let Some(message) = check["error"]["message"].as_str() {
+            problems.push(format!("check {name}: {message}"));
+        }
+        for e in check["expectations"].as_array().into_iter().flatten() {
+            if e["passed"] != Value::Bool(true) {
+                problems.push(format!(
+                    "check {name}: {} – actual {}, expected {}",
+                    e["text"].as_str().unwrap_or("?"),
+                    e["actual"],
+                    e["expected"]
+                ));
             }
         }
     }
 
-    // Export: 3MF readable with one object per body, STL non-empty.
+    // 3. The exports a slicer gets.
+    let names: Vec<&str> = parts.keys().map(String::as_str).collect();
+    for format in ["3mf", "stl"] {
+        let mut args = vec!["export"];
+        args.extend(&names);
+        args.extend(["--format", format]);
+        if let Err(e) = reference.call(&args) {
+            problems.push(e);
+        }
+    }
+    for (name, part) in &parts {
+        let volume = part["volume"].as_f64().unwrap_or(f64::NAN);
+        let found = check_exports(&reference.dir.join(layout::OUT_DIR), name, volume);
+        if found.is_empty() {
+            println!("models: ok    {name}");
+        }
+        problems.extend(found.into_iter().map(|p| format!("{name}: {p}")));
+    }
+    if problems.is_empty() { Ok(()) } else { Err(problems) }
+}
+
+/// The 3MF holds one readable object, the binary STL has a plausible size.
+fn check_exports(out: &Path, name: &str, volume: f64) -> Vec<String> {
+    let three = out.join(format!("{name}.3mf"));
+    let mut problems = Vec::new();
     match std::fs::read(&three).map_err(|e| e.to_string()).and_then(|b| {
         qoob3d_core::export::unzip_stored(&b).map_err(|e| format!("3MF unreadable: {e}"))
     }) {
@@ -167,8 +205,8 @@ fn check_model(binary: &Path, dir: &Path, out: &Path, name: &str) -> Result<(), 
                 .find(|(n, _)| n == "3D/3dmodel.model")
                 .map(|(_, d)| String::from_utf8_lossy(d).into_owned())
                 .unwrap_or_default();
-            if model.matches("<object ").count() != bodies.len() {
-                problems.push("3MF object count differs from the body count".into());
+            if model.matches("<object ").count() != 1 {
+                problems.push("the 3MF does not hold exactly one object".into());
             }
         }
         Err(e) => problems.push(e),
@@ -179,36 +217,28 @@ fn check_model(binary: &Path, dir: &Path, out: &Path, name: &str) -> Result<(), 
     {
         problems.push(format!("unzip -t rejects the 3MF: {}", String::from_utf8_lossy(&o.stdout)));
     }
-    // The real consumer: Bambu Studio's own loader, if installed (ADR-0033).
+    // The real consumer: Bambu Studio's own loader, if installed.
     if let Some(slicer) = bambu_studio() {
-        problems.extend(check_in_slicer(&slicer, &three, bodies.len(), volume));
+        problems.extend(check_in_slicer(&slicer, &three, volume));
     }
-    match run(&["--export", &stl.to_string_lossy()]) {
-        Ok(o) if o.status.success() => {
-            let size = std::fs::metadata(&stl).map_or(0, |m| m.len());
-            if size <= 84 || !(size - 84).is_multiple_of(50) {
-                problems.push(format!("STL has an invalid size ({size} bytes)"));
-            }
-        }
-        Ok(o) => {
-            problems.push(format!("STL export failed: {}", String::from_utf8_lossy(&o.stderr)));
-        }
-        Err(e) => problems.extend(e),
+    let size = std::fs::metadata(out.join(format!("{name}.stl"))).map_or(0, |m| m.len());
+    if size <= 84 || !(size - 84).is_multiple_of(50) {
+        problems.push(format!("the STL has an invalid size ({size} bytes)"));
     }
-    if problems.is_empty() { Ok(()) } else { Err(problems) }
+    problems
 }
 
 /// Bambu Studio's CLI (`QOOB3D_BAMBU_STUDIO` or the default macOS location).
-fn bambu_studio() -> Option<std::path::PathBuf> {
+fn bambu_studio() -> Option<PathBuf> {
     let path = std::env::var_os("QOOB3D_BAMBU_STUDIO").map_or_else(
-        || std::path::PathBuf::from("/Applications/BambuStudio.app/Contents/MacOS/BambuStudio"),
+        || PathBuf::from("/Applications/BambuStudio.app/Contents/MacOS/BambuStudio"),
         Into::into,
     );
     path.exists().then_some(path)
 }
 
-/// `BambuStudio --info file.3mf` must load every body, manifold, with our volume.
-fn check_in_slicer(slicer: &Path, file: &Path, bodies: usize, volume: f64) -> Vec<String> {
+/// `BambuStudio --info file.3mf` must load the one object, manifold, with our volume.
+fn check_in_slicer(slicer: &Path, file: &Path, volume: f64) -> Vec<String> {
     // Bambu Studio writes result.json into its working directory.
     let output = match Command::new(slicer)
         .arg("--info")
@@ -233,8 +263,8 @@ fn check_in_slicer(slicer: &Path, file: &Path, bodies: usize, volume: f64) -> Ve
             .collect()
     };
     let objects = values("number_of_facets").len();
-    if objects != bodies {
-        problems.push(format!("Bambu Studio sees {objects} objects, expected {bodies}"));
+    if objects != 1 {
+        problems.push(format!("Bambu Studio sees {objects} objects, expected 1"));
     }
     if values("manifold").iter().any(|m| m != "yes") {
         problems.push("Bambu Studio reports a non-manifold object".into());

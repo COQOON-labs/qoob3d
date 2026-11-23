@@ -18,16 +18,13 @@ wgpu viewport: camera, pipelines, offscreen targets, headless helpers.
   they win the depth test against their face.
 - Grid, print bed (polygon), exclusion zones, single-nozzle zones and X/Y axes are drawn by the
   analytic full-screen shader `fs_grid` (ADR-0021). The polygons are in the uniform `bed`
-  (`MAX_BED_POINTS` = 192, same value in `xtask printers`). The grid lies in an
-  arbitrary plane (`SceneOptions::grid_plane`, `GridPlane`); the print bed appears only in
-  the world XY plane. Sketches use this for their grid.
+  (`MAX_BED_POINTS` = 192, same value in `xtask printers`). The grid is the world XY plane.
 - Check visual changes: `cargo xtask screenshot`, then look at the PNGs.
 
 ## Files
 
 - `src/camera.rs`: `Camera` (orbit/orbit around pivot, pan, zoom to the cursor, fit,
-  perspective/ortho, `ray`, `project`, `interpolate`), `ViewPreset`, `grid_snap_step`
-  (grid spacing for snapping, matching the visible grid). With unit tests.
+  perspective/ortho, `ray`, `project`, `interpolate`), `ViewPreset`. With unit tests.
 - `src/renderer.rs`: `ViewportRenderer` (`set_scene`, `render`), `SceneOptions`, pipelines
   (background, bodies, lines, grid), targets.
 - `src/headless.rs`: headless device and texture readback (tests, CLI).
@@ -46,4 +43,4 @@ wgpu viewport: camera, pipelines, offscreen targets, headless helpers.
 
 ## Relevant ADRs
 
-ADR-0036, ADR-0006, ADR-0008, ADR-0021, ADR-0017, ADR-0019
+ADR-0006, ADR-0008, ADR-0019, ADR-0021, ADR-0036

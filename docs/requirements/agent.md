@@ -13,7 +13,7 @@ Phases: **R1** script kernel · **R2** project, cache, worker processes · **R3*
 ## 1. Script kernel (R1) – `qoob3d-kernel`, module `script`
 
 Rhai engine with our CAD API. Units mm, +Z up (ADR-0006). Every geometric operation calls
-OCCT through exception-safe wrappers (ADR-0004, ADR-0014); no geometry math in the script
+OCCT through exception-safe wrappers (ADR-0004); no geometry math in the script
 layer where OCCT has it.
 
 | ID | Requirement |
@@ -61,7 +61,8 @@ layer where OCCT has it.
   value invalidates, changing an unread value does not.
 - Cache entry files: `<key>.brep` (OCCT BREP), `<key>.qmsh` (tessellated, 0.01 mm linear
   deflection, edges included), `<key>.json` with `volume`, `bbox` `{min,max,size}`,
-  `valid`, `solids`, `duration_s`, `values_read`, `warnings`.
+  `valid`, `watertight` (the mesh is closed and manifold, the print check), `solids`,
+  `duration_s`, `values_read`, `warnings`.
 - Worker protocol: the parent starts `qoob3d worker` with stdin/stdout pipes, sends one JSON
   request per line (`{"job": id, "dir": …, "part": …, "deps": {name: brep_path}}`), the
   worker answers one JSON line per job. Workers stay warm between jobs.
@@ -77,12 +78,12 @@ layer where OCCT has it.
   "jobs": [{id, state}], "workers": {count, busy, recycled},
   "load_errors": [{kind, message, file, line?, column?}], "error"?}` (superset of WA-PR-01;
   `recycled` as AG-PF-03). A part or check file that does not load is one entry of
-  `load_errors` and never hides the parts of other files (ADR-0056); `error` repeats the
+  `load_errors` and never hides the parts of other files (ADR-0055); `error` repeats the
   first one, or is the load error of the whole project (configuration, values, dependency
   graph) with an empty part list. `/status` never waits for discovery: `"discovering":
   [files]` lists the part and check files whose declarations are not known yet (their earlier
   parts are `outdated`, a new file has no parts yet).
-- `POST /discover {"files": [..]|null, "wait_s": f64}` (ADR-0056) waits up to `wait_s` for
+- `POST /discover {"files": [..]|null, "wait_s": f64}` (ADR-0055) waits up to `wait_s` for
   the discovery of those part and check files (`null` = all) → `{"files": [{file, state:
   "declared"|"failed"|"discovering", parts?: [{name, depends}], checks?: [..], error?}],
   "discovering": [..]}`. The MCP `file_write` of a part, check or `lib/` file uses it and
@@ -90,7 +91,7 @@ layer where OCCT has it.
   `qoob3d status` waits up to 10 s for it before asking `/status`.
 - `POST /build {"parts": [..]|null, "wait_s": f64}` → if finished within `wait_s`:
   `result` = build result; else `{"job": id, "state": "running"}`. Build result:
-  `{"parts": {name: {state: "built"|"cached"|"failed", volume, bbox, valid, duration_s,
+  `{"parts": {name: {state: "built"|"cached"|"failed", volume, bbox, valid, watertight, duration_s,
   error?: {kind, message, file?, line?, column?}}}, "built": [..], "cached": [..]}`.
 - `GET /job/<id>` → `{id, state: "queued"|"running"|"done"|"failed"|"cancelled",
   progress: {done, total}, result?}`; `POST /job/<id>/cancel`.
@@ -178,7 +179,7 @@ bind them.
 | ID | Requirement |
 | --- | --- |
 | AG-HD-01 | Config: `[limits] time_s` must be finite and at most 86400; `memory_mb`, `recycle_mb` at most 1048576; violations are config errors naming the field. No config value can panic the service or a job thread; a panic in a job thread fails that job with kind `crash` and returns the worker to the pool. |
-| AG-HD-02 | Declaration discovery (a worker request, ADR-0056; the service never evaluates user scripts) (`PartMode::Declare` and check discovery) runs with tight script size limits: string 65536 bytes, array 10000 elements, map 1000 entries, `max_operations` 1000000; exceeding one is `ScriptError::Limit` and becomes that file's load error. Worker runs keep no script size limits (the resident-memory limit of the worker protects them, AG-PJ-05). A part file whose top level doubles a string 40 times leaves the service alive and `/status` answering with the load error naming the file. |
+| AG-HD-02 | Declaration discovery (a worker request, ADR-0055; the service never evaluates user scripts) (`PartMode::Declare` and check discovery) runs with tight script size limits: string 65536 bytes, array 10000 elements, map 1000 entries, `max_operations` 1000000; exceeding one is `ScriptError::Limit` and becomes that file's load error. Worker runs keep no script size limits (the resident-memory limit of the worker protects them, AG-PJ-05). A part file whose top level doubles a string 40 times leaves the service alive and `/status` answering with the load error naming the file. |
 | AG-HD-03 | The service writes a random token (32 hex characters) into `service.json` and requires it in the header `X-Qoob3d-Token` on every request; requests carrying an `Origin` header, or whose `Host` is not `127.0.0.1:<port>` or `localhost:<port>`, are refused with 403 before routing. The app client, CLI and MCP send the token. `project-app.md` WA-PR gains the same rule. |
 | AG-HD-04 | Clients percent-encode every path segment they build from a name (`/mesh/<part>`, `/task/<id>`, `/job/<id>`); a part named `Crane column` builds, shows in the app client and renders. |
 | AG-HD-05 | The live poller re-reads `service.json` whenever the service does not answer and reconnects to a service restarted on another port; a failed first connection is retried every poll interval (WA-LV-05). |
@@ -221,7 +222,7 @@ bind them.
 
 - R1: the three M0 probe parts written as scripts reproduce the analytic volumes from
   the M0 probe (`docs/concept/m0-report.md`, formulas in
-  `crates/qoob3d-kernel/tests/script_m0.rs`) to < 1e-6 relative; build times as AG-SC-15.
+  `crates/qoob3d-kernel/tests/script_examples.rs`) to < 1e-6 relative; build times as AG-SC-15.
 - R2: an endless script is killed after the time limit while the service answers; changing
   one part rebuilds only it and its dependents.
 - R3: CLI and service pass `crates/qoob3d-app/tests/service.rs`.

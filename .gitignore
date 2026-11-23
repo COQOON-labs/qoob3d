@@ -2,5 +2,5 @@
 .DS_Store
 *.stl
 *.step
-!/examples/**/*.step
+!/docs/script-api/lib/examples/*.step
 .claude/settings.local.json

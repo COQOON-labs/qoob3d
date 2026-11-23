@@ -1,4 +1,4 @@
-//! Harness self-test (ADR-0042): every case in `harness/sabotage/*.case` is a
+//! Harness self-test (ADR-0037): every case in `harness/sabotage/*.case` is a
 //! deliberate violation that the harness must reject. Each case runs in a
 //! fresh copy of the working tree (its own git repository), so the real
 //! checkout is never touched.

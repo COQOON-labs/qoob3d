@@ -1,4 +1,4 @@
-//! R5, guide and reference for agents (docs/requirements/agent.md §6.3,
+//! Guide and reference for agents (docs/requirements/agent.md §6.3,
 //! AG-MC-07..10; ADR-0054): the MCP server `qoob3d mcp [DIR]` over stdio
 //! against the real binary. Every test names its requirement ID.
 //!
@@ -7,7 +7,7 @@
 //! of the served reference runs through `run_script`, both in a project made
 //! by `qoob3d init`.
 //!
-//! Transport and client as in `tests/mcp.rs`: one JSON-RPC 2.0 message per
+//! Transport and client shared with `tests/mcp.rs` (`common/mcp.rs`): one JSON-RPC 2.0 message per
 //! line; [`Mcp`] reads stdout in a thread and waits for every answer with a
 //! timeout. Expected numbers are derived by hand next to the assertions;
 //! `VOL` = 1e-6 relative for volumes of boxes, `POS` = 1e-6 mm for bounding
@@ -16,20 +16,22 @@
 //! Processes and folders: [`Mcp`] closes stdin and kills the server on drop;
 //! `support::Project` stops the service and removes the folder.
 
+#[path = "common/artifacts.rs"]
+mod artifacts;
+#[path = "common/inspect.rs"]
+mod inspect;
+#[path = "common/mcp.rs"]
+mod mcp_client;
 #[path = "common/agent.rs"]
 mod support;
 
-use std::io::{BufRead as _, BufReader, Write as _};
-use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
+use artifacts::{git, git_init, git_tracked, png_colors, png_size};
+use inspect::assert_vec;
+use mcp_client::{Mcp, base64_decode, short};
 use serde_json::{Value, json};
-use support::{
-    BIN, Project, Service, VOL, assert_rel, assert_vec, check_envelope, cli, git, git_init,
-    git_tracked, png_colors, png_size, wait_until,
-};
+use support::{Project, Service, VOL, assert_rel, cli};
 
 /// Bounding boxes in results (AG-HD-11).
 const POS: f64 = 1e-6;
@@ -42,151 +44,10 @@ const CLI: Duration = Duration::from_secs(90);
 const VIEWS: [&str; 7] = ["iso", "front", "back", "left", "right", "top", "bottom"];
 
 // ===========================================================================
-// MCP client (as in tests/mcp.rs)
+// MCP client (shared in common/mcp.rs)
 // ===========================================================================
 
-/// At most 400 characters of a message for panic texts (renders are megabytes).
-fn short(text: &str) -> String {
-    if text.len() <= 400 {
-        return text.to_owned();
-    }
-    let head: String = text.chars().take(400).collect();
-    format!("{head}… ({} bytes)", text.len())
-}
-
-/// The answer of one `tools/call` (AG-MC-02).
-struct Tool {
-    envelope: Value,
-    content: Vec<Value>,
-}
-
-impl Tool {
-    /// `result` of an envelope with `ok: true`.
-    fn ok(&self) -> &Value {
-        assert_eq!(self.envelope["ok"], json!(true), "{}", short(&self.envelope.to_string()));
-        &self.envelope["result"]
-    }
-
-    /// `result.text` of a text tool (`guide`, `api_reference`).
-    fn text(&self) -> String {
-        self.ok()["text"]
-            .as_str()
-            .unwrap_or_else(|| panic!("result.text: {}", short(&self.envelope.to_string())))
-            .to_owned()
-    }
-
-    /// The call was refused and the error names every word.
-    fn refused(&self, words: &[&str], what: &str) {
-        let text = self.envelope.to_string();
-        assert_eq!(self.envelope["ok"], json!(false), "{what} must be refused: {}", short(&text));
-        for w in words {
-            assert!(text.contains(w), "{what}: the error must name {w}: {}", short(&text));
-        }
-        assert_eq!(self.content.len(), 1, "{what}: an error has the text envelope only");
-    }
-}
-
-/// A running `qoob3d mcp <DIR>`.
-struct Mcp {
-    child: Child,
-    stdin: Option<ChildStdin>,
-    lines: Receiver<String>,
-    log: PathBuf,
-    next_id: u64,
-}
-
 impl Mcp {
-    /// A fresh, initialized session for `p`, working directory outside it.
-    fn open(p: &Project) -> Self {
-        let log = p.root.join("mcp.log");
-        let err = std::fs::OpenOptions::new().create(true).append(true).open(&log);
-        let mut child = Command::new(BIN)
-            .arg("mcp")
-            .arg(&p.dir)
-            .current_dir(&p.root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(err.expect("open mcp.log"))
-            .spawn()
-            .expect("spawn qoob3d mcp");
-        let stdin = child.stdin.take();
-        let out = BufReader::new(child.stdout.take().expect("stdout"));
-        let (tx, lines) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in out.lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-        let mut mcp = Self { child, stdin, lines, log, next_id: 0 };
-        let params = json!({
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": {"name": "qoob3d-tests", "version": "0"},
-        });
-        let answer = mcp.request("initialize", &params, QUICK);
-        assert!(answer.get("error").is_none(), "initialize: {}", short(&answer.to_string()));
-        mcp.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string());
-        mcp
-    }
-
-    fn stderr(&self) -> String {
-        let text = std::fs::read_to_string(&self.log).unwrap_or_default();
-        let start = text.len().saturating_sub(3000);
-        text.get(start..).unwrap_or_default().to_owned()
-    }
-
-    fn send(&mut self, line: &str) {
-        let stdin = self.stdin.as_mut().expect("stdin open");
-        let sent = writeln!(stdin, "{line}").and_then(|()| stdin.flush());
-        if let Err(e) = sent {
-            panic!("the server closed stdin ({e}); stderr:\n{}", self.stderr());
-        }
-    }
-
-    /// A request with a fresh numeric id; its response (notifications of
-    /// the server are skipped).
-    fn request(&mut self, method: &str, params: &Value, timeout: Duration) -> Value {
-        self.next_id += 1;
-        let id = self.next_id;
-        self.send(
-            &json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string(),
-        );
-        loop {
-            let line = match self.lines.recv_timeout(timeout) {
-                Ok(line) => line,
-                Err(e) => panic!("{method}: no answer ({e}); stderr:\n{}", self.stderr()),
-            };
-            let message: Value = serde_json::from_str(&line)
-                .unwrap_or_else(|e| panic!("stdout line is not JSON ({e}): {}", short(&line)));
-            if message.get("method").is_none() {
-                assert_eq!(message["id"], json!(id), "{method}: {}", short(&line));
-                return message;
-            }
-        }
-    }
-
-    /// `tools/call`: the first content is the text with the JSON envelope,
-    /// `isError` = `!ok` (AG-MC-02).
-    fn call(&mut self, tool: &str, arguments: &Value) -> Tool {
-        let params = json!({"name": tool, "arguments": arguments});
-        let response = self.request("tools/call", &params, TOOL);
-        let text = short(&response.to_string());
-        assert!(response.get("error").is_none(), "{tool} {arguments}: protocol error: {text}");
-        let result = &response["result"];
-        let content = result["content"].as_array().cloned().unwrap_or_default();
-        assert!(!content.is_empty(), "{tool}: no content: {text}");
-        assert_eq!(content[0]["type"], json!("text"), "{tool}: {text}");
-        let body = content[0]["text"].as_str().unwrap_or_default();
-        let envelope: Value = serde_json::from_str(body).unwrap_or_else(|e| {
-            panic!("{tool}: content[0].text is no JSON envelope ({e}): {text}")
-        });
-        let ok = check_envelope(&envelope);
-        assert_eq!(result["isError"], json!(!ok), "{tool}: isError = !ok: {text}");
-        Tool { envelope, content }
-    }
-
     /// `resources/read` of one text resource.
     fn resource(&mut self, uri: &str) -> String {
         let r = self.request("resources/read", &json!({"uri": uri}), QUICK);
@@ -194,17 +55,6 @@ impl Mcp {
             .as_str()
             .unwrap_or_else(|| panic!("{uri}: no text: {}", short(&r.to_string())))
             .to_owned()
-    }
-}
-
-impl Drop for Mcp {
-    fn drop(&mut self) {
-        drop(self.stdin.take());
-        let child = &mut self.child;
-        if !wait_until(Duration::from_secs(3), || child.try_wait().is_ok_and(|s| s.is_some())) {
-            self.child.kill().ok();
-        }
-        self.child.wait().ok();
     }
 }
 
@@ -584,31 +434,6 @@ fn small_project(name: &str) -> Project {
     p
 }
 
-/// Standard base64 (RFC 4648 §4), decoded independently of the server.
-fn base64_decode(text: &str) -> Vec<u8> {
-    let value = |c: u8| -> u32 {
-        match c {
-            b'A'..=b'Z' => u32::from(c - b'A'),
-            b'a'..=b'z' => u32::from(c - b'a') + 26,
-            b'0'..=b'9' => u32::from(c - b'0') + 52,
-            b'+' => 62,
-            b'/' => 63,
-            other => panic!("not standard base64: byte {other:#x}"),
-        }
-    };
-    let bytes = text.as_bytes();
-    assert!(bytes.len().is_multiple_of(4), "base64 length {} is no multiple of 4", bytes.len());
-    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-    for quad in bytes.as_chunks::<4>().0 {
-        let pad = quad.iter().rev().take_while(|c| **c == b'=').count();
-        assert!(pad <= 2, "at most two padding characters");
-        let n = quad[..4 - pad].iter().fold(0u32, |n, c| (n << 6) | value(*c)) << (6 * pad);
-        let triple = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
-        out.extend_from_slice(&triple[..3 - pad]);
-    }
-    out
-}
-
 /// A successful `render`: the result and the PNG, which is the only image
 /// content and the file `result.path` under `out/renders/` (AG-MC-04).
 fn rendered(mcp: &mut Mcp, p: &Project, arguments: &Value) -> (Value, Vec<u8>) {
@@ -743,7 +568,7 @@ fn states(list: &Value) -> Vec<(String, String)> {
 fn ag_mc_10_task_get_returns_the_parts_and_checks_with_their_states() {
     let p = small_project("task-project");
     // A running service, so the first task_get can wait for discovery
-    // (ADR-0056); the MCP server uses it (AG-MC-01).
+    // (ADR-0055); the MCP server uses it (AG-MC-01).
     let s = Service::start(&p);
     s.wait_discovery();
     let mut mcp = Mcp::open(&p);
@@ -781,7 +606,7 @@ fn ag_mc_10_task_get_returns_the_parts_and_checks_with_their_states() {
     // A changed part file shows up without a status call: A and its
     // dependent B are no longer current, the check that read A is stale.
     p.write("parts/a.rhai", "part(\"A\", #{}, |deps| box(20, 10, 12));\n");
-    // Discovery of the changed file runs in a worker (ADR-0056).
+    // Discovery of the changed file runs in a worker (ADR-0055).
     s.wait_discovery();
     let changed = mcp.call("task_get", &json!({"id": "T-0001"})).ok().clone();
     let parts = states(&changed["project"]["parts"]);

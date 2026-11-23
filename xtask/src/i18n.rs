@@ -12,8 +12,6 @@ use std::path::{Path, PathBuf};
 
 const LOCALES: &str = "crates/qoob3d-app/locales";
 const APP_SRC: &str = "crates/qoob3d-app/src";
-/// Other crates that name translation keys (e.g. tool field labels).
-const KEY_ONLY_SRC: &[&str] = &["crates/qoob3d-sketch/src"];
 /// Calls that take a translation key as first argument.
 const KEY_CALLS: &[&str] = &["tr(\"", "tr_args(\""];
 /// Widget calls whose first string literal is user-visible.
@@ -55,21 +53,16 @@ pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
     let mut used = BTreeSet::new();
     let mut files = Vec::new();
     collect_rs(&root.join(APP_SRC), &mut files);
-    let app_files = files.len();
-    for dir in KEY_ONLY_SRC {
-        collect_rs(&root.join(dir), &mut files);
-    }
-    for (index, file) in files.into_iter().enumerate() {
+    for file in files {
         let Ok(text) = fs::read_to_string(&file) else { continue };
         let rel = file.strip_prefix(root).unwrap_or(&file).display().to_string();
-        let key_only = index >= app_files;
-        let ui_file = !key_only && !NON_UI_FILES.iter().any(|f| rel.ends_with(f));
+        let ui_file = !NON_UI_FILES.iter().any(|f| rel.ends_with(f));
         for (no, line) in text.lines().enumerate() {
             if line.trim_start().starts_with("//") {
                 continue;
             }
             let mut keys_here = literals_after(line, KEY_CALLS);
-            if ui_file || key_only {
+            if ui_file {
                 keys_here.extend(all_literals(line).into_iter().filter(|l| looks_like_key(l)));
             }
             for key in keys_here {

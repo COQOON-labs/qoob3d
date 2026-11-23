@@ -1,4 +1,4 @@
-//! R4 without MCP: checks, tasks, throwaway scripts, measure, save, init and
+//! Agent workflow without MCP: checks, tasks, throwaway scripts, measure, save, init and
 //! the project render against the real `qoob3d` binary
 //! (docs/requirements/agent.md §4.2–4.4: AG-CK-01..03, AG-SV-04..08,
 //! AG-RD-01; ADR-0054; envelope from docs/requirements/project-app.md §1),
@@ -13,6 +13,10 @@
 //! Processes and folders: `support::Project` stops the service of its folder
 //! on drop and removes the folder (see `common/agent.rs`).
 
+#[path = "common/artifacts.rs"]
+mod artifacts;
+#[path = "common/inspect.rs"]
+mod inspect;
 #[path = "common/agent.rs"]
 mod support;
 
@@ -20,12 +24,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use qoob3d_app::live;
+use artifacts::{git, git_init, git_tracked, png_colors, png_size};
+use inspect::assert_vec;
+use qoob3d_app::client;
 use serde_json::{Value, json};
-use support::{
-    BIN, Project, Service, VOL, assert_rel, assert_vec, cli, git, git_init, git_tracked,
-    png_colors, png_size, service_json, wait_until,
-};
+use support::{BIN, Project, Service, VOL, assert_rel, cli, service_json, wait_until};
 
 const POS: f64 = 1e-6;
 /// `wait_s` for synchronous requests; boxes build in milliseconds.
@@ -225,7 +228,7 @@ fn ag_ck_01_02_03_checks_run_record_expectations_and_report_states() {
     let s = Service::start(&p);
 
     // AG-CK-03: declared checks are known before any run. Discovery runs
-    // in a worker (ADR-0056): wait until it has seen every file.
+    // in a worker (ADR-0055): wait until it has seen every file.
     s.wait_discovery();
     let st = status(&s);
     let all = ["a_volume", "spacing", "inclusive", "nan", "wrong", "broken", "ghost"];
@@ -1348,8 +1351,8 @@ fn ag_hd_04_parts_with_awkward_names_build_load_in_the_app_client_and_render() {
     let keys = by_name(&st["parts"]);
 
     // The app client (W1): every mesh arrives and is the mesh of that part.
-    let dir = live::ProjectDir::open(&p.dir).expect("project dir");
-    let client = live::Client::connect(&dir, &[BIN.to_owned()], Duration::from_secs(20))
+    let dir = client::ProjectDir::open(&p.dir).expect("project dir");
+    let client = client::Client::connect(&dir, &[BIN.to_owned()], Duration::from_secs(20))
         .expect("connect to the running service");
     let listed: BTreeSet<String> =
         client.status().expect("status").into_iter().map(|part| part.name).collect();

@@ -11,7 +11,7 @@ script of `qoob3d-kernel` after the one of this crate, and on a clean checkout
 the kernel looked for the OCCT headers before OCCT was built. With
 `links = "occt"` Cargo runs this build script first and hands its
 `cargo:include=` to direct dependents as `DEP_OCCT_INCLUDE`. See
-`docs/adr/0047-opencascade-sys-fork-with-links-key.md`.
+`docs/adr/0004-occt-integration.md`.
 
 ## Modifications
 
@@ -30,5 +30,5 @@ the kernel looked for the OCCT headers before OCCT was built. With
    (`BUILTIN_OCCT_VERSION` in `include/Standard_Version.hxx`, every library of
    `OCCT_LIBS` in `lib/`). For this, `Cargo.toml` pins `occt-sys = "=7.8.1"`;
    bump both together. CI restores that install from its cache, so OCCT is not
-   rebuilt (`docs/adr/0050-ci-caches-the-occt-install-by-version.md`). Marked
+   rebuilt (`docs/adr/0004-occt-integration.md`). Marked
    with `// QOOB3D:`.

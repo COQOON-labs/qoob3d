@@ -1,6 +1,6 @@
 ---
 name: critic
-description: Checks a diff against the critic checklist (harness/critic-checklist.md) and returns structured findings as JSON. For every review before a push; runs with a fresh context, without the author's reasoning. Changes nothing.
+description: Checks a diff against the critic checklist (harness/critic-checklist.md) and returns structured findings as JSON. For a review when the user or the author wants one; runs with a fresh context, without the author's reasoning. Changes nothing.
 tools: Read, Grep, Glob, Bash
 disallowedTools: Edit, Write, NotebookEdit
 model: inherit

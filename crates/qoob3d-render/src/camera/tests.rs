@@ -97,13 +97,6 @@ fn both_projections_use_reverse_z_and_agree_at_target() {
 }
 
 #[test]
-fn grid_snap_step_follows_zoom() {
-    assert_eq!(grid_snap_step(100.0), 10.0);
-    assert_eq!(grid_snap_step(20.0), 1.0);
-    assert_eq!(grid_snap_step(50.0), 10.0, "fine lines faded → coarser step");
-}
-
-#[test]
 fn interpolation_hits_endpoints() {
     let a = Camera::default();
     let mut b = Camera { distance: 400.0, target: Vec3::new(5.0, 0.0, 0.0), ..a };

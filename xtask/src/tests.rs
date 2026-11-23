@@ -154,7 +154,7 @@ fn rust_files(src: &Path, dir: &Path, files: &mut Vec<String>) {
     }
 }
 
-// One git helper (critic K-13 on bd0fade, ADR-0048): `git` / `git_command` in
+// One git helper: `git` / `git_command` in
 // main.rs are the only place that spawns git, so every git call drops the
 // variables a hook exports. Every other module under xtask/src, also nested
 // ones, has a production part (before `#[cfg(test)] mod tests;`; `tests.rs`
@@ -168,7 +168,7 @@ fn no_module_but_main_spawns_git_itself() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     rust_files(&src, &src, &mut files);
-    for known in ["main.rs", "selftest.rs", "worktree.rs", "printers.rs", "guard/tests.rs"] {
+    for known in ["main.rs", "selftest.rs", "docs.rs", "printers.rs", "paths/tests.rs"] {
         assert!(files.iter().any(|f| f == known), "{known} was not scanned: {files:?}");
     }
     let main = fs::read_to_string(src.join("main.rs")).unwrap();
@@ -209,7 +209,7 @@ fn lock_version<'a>(lock: &'a str, name: &str) -> Option<&'a str> {
         .and_then(|block| quoted_after(block, "version = \""))
 }
 
-// OCCT version pins agree (ADR-0050): the fork's build script skips the OCCT
+// OCCT version pins agree (ADR-0004): the fork's build script skips the OCCT
 // build only when the install holds `BUILTIN_OCCT_VERSION`, while occt-sys
 // (pinned exactly in the fork's Cargo.toml, resolved in Cargo.lock) builds and
 // installs its own version. If the strings differ, the installed version never
@@ -232,6 +232,103 @@ fn occt_version_pins_agree() {
         "OCCT version pins disagree: BUILTIN_OCCT_VERSION in \
          third_party/opencascade-sys/build.rs = {constant:?}, occt-sys pin in \
          third_party/opencascade-sys/Cargo.toml = {pin:?}, occt-sys in Cargo.lock = \
-         {locked:?}; a mismatch silently rebuilds OCCT on every build (ADR-0050)"
+         {locked:?}; a mismatch silently rebuilds OCCT on every build (ADR-0004)"
     );
+}
+
+/// The text of `rel` in the repository.
+fn repo_file(rel: &str) -> String {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+}
+
+// GUI git clients such as Sourcetree quarantine every file their child
+// processes create, and Gatekeeper refuses a quarantined xtask (finding of
+// 2026-10-15). So each hook has `lib.sh` build xtask, which clears the
+// attribute, and runs the binary directly: `cargo xtask` would re-link and
+// re-quarantine it.
+#[test]
+fn hooks_build_xtask_and_run_the_binary_directly() {
+    for hook in [".githooks/commit-msg", ".githooks/pre-push"] {
+        let text = repo_file(hook);
+        let code: Vec<&str> =
+            text.lines().map(str::trim).filter(|line| !line.starts_with('#')).collect();
+        if let Some(line) = code.iter().find(|line| line.contains("cargo xtask")) {
+            panic!("{hook} still runs `cargo xtask`: {line}");
+        }
+        let build = code.iter().position(|line| *line == "build_xtask");
+        let run = code.iter().position(|line| line.contains("\"$xtask_binary\""));
+        assert!(
+            build.is_some() && build < run,
+            "{hook} must call build_xtask before it runs \"$xtask_binary\""
+        );
+    }
+}
+
+/// Writes an executable shell script `name` with `body` into `dir`.
+fn write_stub(dir: &Path, name: &str, body: &str) {
+    let path = dir.join(name);
+    fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    fs::set_permissions(&path, permissions).unwrap();
+}
+
+/// Runs `build_xtask` of `.githooks/lib.sh` on a system that `uname` reports
+/// as `system`. Stubs stand in for `cargo` (creates the binary, as the build
+/// does), `uname` and `xattr`; returns the logged `cargo` and `xattr` calls
+/// and the path of the binary.
+fn run_build_xtask(test: &str, system: &str) -> (Vec<String>, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("qoob3d-hooks-{test}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let stubs = dir.join("bin");
+    fs::create_dir_all(&stubs).unwrap();
+    write_stub(
+        &stubs,
+        "cargo",
+        "printf 'cargo %s\\n' \"$*\" >> \"$STUB_LOG\"\n\
+         mkdir -p \"$CARGO_TARGET_DIR/debug\" && : > \"$CARGO_TARGET_DIR/debug/xtask\"\n",
+    );
+    write_stub(&stubs, "uname", "printf '%s\\n' \"$STUB_UNAME\"\n");
+    write_stub(&stubs, "xattr", "printf 'xattr %s\\n' \"$*\" >> \"$STUB_LOG\"\n");
+    let log = dir.join("calls.log");
+    let target = dir.join("target");
+    // lib.sh puts the real cargo first on PATH; the stubs go in front afterwards.
+    let script = "source .githooks/lib.sh\nPATH=\"$STUBS:$PATH\"\nbuild_xtask\n";
+    let mut command = Command::new("bash");
+    command
+        .args(["-c", script])
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join(".."))
+        .env("STUBS", &stubs)
+        .env("STUB_LOG", &log)
+        .env("STUB_UNAME", system)
+        .env("CARGO_TARGET_DIR", &target);
+    for key in HOOK_GIT_ENV {
+        command.env_remove(key);
+    }
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let calls = fs::read_to_string(&log).unwrap_or_default().lines().map(str::to_owned).collect();
+    fs::remove_dir_all(&dir).unwrap();
+    (calls, target.join("debug/xtask"))
+}
+
+// On macOS `build_xtask` builds the xtask package and then removes
+// com.apple.quarantine from the built binary.
+#[test]
+fn build_xtask_on_darwin_strips_the_quarantine_after_the_build() {
+    let (calls, binary) = run_build_xtask("darwin", "Darwin");
+    let strip = format!("xattr -d com.apple.quarantine {}", binary.display());
+    assert_eq!(
+        calls,
+        ["cargo build --quiet --package xtask".to_owned(), strip],
+        "build_xtask must remove com.apple.quarantine from the binary after the build"
+    );
+}
+
+// Elsewhere there is no quarantine attribute and `xattr` never runs.
+#[test]
+fn build_xtask_on_linux_never_runs_xattr() {
+    let (calls, _) = run_build_xtask("linux", "Linux");
+    assert_eq!(calls, ["cargo build --quiet --package xtask"]);
 }

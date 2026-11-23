@@ -1,7 +1,7 @@
-//! Compiles QOOB3D's own OCCT wrappers (ADR-0014) against the OCCT that
+//! Compiles QOOB3D's own OCCT wrappers (ADR-0004) against the OCCT that
 //! `opencascade-sys` has built. Its fork declares `links = "occt"`, so Cargo
 //! runs this script after it and passes the include dir as `DEP_OCCT_INCLUDE`
-//! (ADR-0047).
+//! (ADR-0004).
 
 use std::path::PathBuf;
 

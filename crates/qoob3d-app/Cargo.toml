@@ -14,7 +14,6 @@ path = "src/main.rs"
 [dependencies]
 qoob3d-core.workspace = true
 qoob3d-kernel.workspace = true
-qoob3d-sketch.workspace = true
 rfd = "0.17"
 qoob3d-render.workspace = true
 eframe = { workspace = true, features = ["persistence"] }
@@ -24,7 +23,6 @@ fluent-bundle = "0.16"
 unic-langid = "0.9"
 glam.workspace = true
 anyhow.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap = { version = "4.6", features = ["derive"] }
@@ -34,5 +32,5 @@ png = "0.18"
 workspace = true
 
 [dev-dependencies]
-# Headless UI tests and screenshots of the real app (ADR-0018).
+# Headless UI tests and screenshots of the real app (ADR-0013).
 egui_kittest = { version = "0.36.2", features = ["eframe", "wgpu", "snapshot"] }

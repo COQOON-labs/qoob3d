@@ -45,12 +45,9 @@
 #include <BRepTools.hxx>
 #include <BRep_Builder.hxx>
 #include <Bnd_Box.hxx>
-#include <GeomAPI_Interpolate.hxx>
 #include <GeomLib.hxx>
-#include <Geom_BSplineCurve.hxx>
 #include <ShapeFix_Face.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
-#include <TColgp_HArray1OfPnt.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <TopoDS_Wire.hxx>
@@ -287,7 +284,7 @@ void curve_edges(const Qoob3dCurves &c, std::vector<TopoDS_Shape> &edges, std::v
 }
 
 // Splits a helper face by all curves (General Fuse) and returns every closed
-// region with the ids of its boundary curves (ADR-0028).
+// region with the ids of its boundary curves (ADR-0004).
 std::vector<Region> split_regions(const Qoob3dCurves &c) {
   std::vector<TopoDS_Shape> edges;
   std::vector<int> ids;
@@ -409,48 +406,6 @@ TopoDS_Shape unify(const TopoDS_Shape &s) {
 }
 
 } // namespace
-
-Qoob3dRegions qoob3d_sketch_regions(const Qoob3dCurves &curves, double deflection) {
-  return guarded("sketch_regions", [&] {
-    Qoob3dRegions out;
-    out.vertex_starts.push_back(0);
-    out.index_starts.push_back(0);
-    out.key_starts.push_back(0);
-    for (const Region &region : split_regions(curves)) {
-      const TopoDS_Face &face = region.face;
-      GProp_GProps props;
-      BRepGProp::SurfaceProperties(face, props);
-
-      BRepMesh_IncrementalMesh mesher(face, deflection, Standard_False, 0.3, Standard_True);
-      TopLoc_Location loc;
-      const Handle(Poly_Triangulation) &tri = BRep_Tool::Triangulation(face, loc);
-      if (tri.IsNull()) {
-        throw std::runtime_error("profile face could not be triangulated");
-      }
-      const gp_Trsf trsf = loc.Transformation();
-      for (int i = 1; i <= tri->NbNodes(); ++i) {
-        const gp_Pnt p = tri->Node(i).Transformed(trsf);
-        out.positions.push_back(p.X());
-        out.positions.push_back(p.Y());
-      }
-      for (int t = 1; t <= tri->NbTriangles(); ++t) {
-        int a, b, c;
-        tri->Triangle(t).Get(a, b, c);
-        out.indices.push_back(a - 1);
-        out.indices.push_back(b - 1);
-        out.indices.push_back(c - 1);
-      }
-      for (uint32_t id : region.key) {
-        out.key_ids.push_back(id);
-      }
-      out.areas.push_back(props.Mass());
-      out.vertex_starts.push_back(static_cast<uint32_t>(out.positions.size() / 2));
-      out.index_starts.push_back(static_cast<uint32_t>(out.indices.size()));
-      out.key_starts.push_back(static_cast<uint32_t>(out.key_ids.size()));
-    }
-    return out;
-  });
-}
 
 // ---------------------------------------------------------------- solid modelling
 
@@ -789,154 +744,6 @@ uint32_t qoob3d_solid_count(const TopoDS_Shape &shape) {
     TopTools_IndexedMapOfShape solids;
     TopExp::MapShapes(shape, TopAbs_SOLID, solids);
     return static_cast<uint32_t>(solids.Extent());
-  });
-}
-
-std::unique_ptr<TopoDS_Shape> qoob3d_solid(const TopoDS_Shape &shape, uint32_t index) {
-  return guarded("solid", [&] {
-    TopTools_IndexedMapOfShape solids;
-    TopExp::MapShapes(shape, TopAbs_SOLID, solids);
-    if (index >= static_cast<uint32_t>(solids.Extent())) {
-      throw std::runtime_error("solid index out of range");
-    }
-    return own(solids(static_cast<int>(index) + 1));
-  });
-}
-
-std::unique_ptr<TopoDS_Shape> qoob3d_append(const TopoDS_Shape &a, const TopoDS_Shape &b) {
-  return guarded("append", [&] {
-    BRep_Builder bb;
-    TopoDS_Compound out;
-    bb.MakeCompound(out);
-    for (const TopoDS_Shape *s : {&a, &b}) {
-      if (s->IsNull()) {
-        continue;
-      }
-      if (s->ShapeType() == TopAbs_COMPOUND) {
-        for (TopoDS_Iterator it(*s); it.More(); it.Next()) {
-          bb.Add(out, it.Value());
-        }
-      } else {
-        bb.Add(out, *s);
-      }
-    }
-    return own(out);
-  });
-}
-
-namespace {
-
-Handle(Geom_BSplineCurve) interpolate(const std::vector<gp_Pnt> &pts) {
-  Handle(TColgp_HArray1OfPnt) arr = new TColgp_HArray1OfPnt(1, static_cast<int>(pts.size()));
-  for (size_t i = 0; i < pts.size(); ++i) {
-    arr->SetValue(static_cast<int>(i) + 1, pts[i]);
-  }
-  GeomAPI_Interpolate interp(arr, Standard_False, 1e-7);
-  interp.Perform();
-  if (!interp.IsDone()) {
-    throw std::runtime_error("spline interpolation failed");
-  }
-  return interp.Curve();
-}
-
-} // namespace
-
-std::unique_ptr<TopoDS_Shape> qoob3d_outline_prism(rust::Slice<const double> points,
-                                                   rust::Slice<const uint32_t> starts,
-                                                   rust::Slice<const uint32_t> kinds,
-                                                   rust::Slice<const double> holes,
-                                                   rust::Slice<const double> normal,
-                                                   rust::Slice<const double> vector) {
-  return guarded("outline_prism", [&] {
-    if (starts.size() < 2 || kinds.size() + 1 != starts.size()) {
-      throw std::runtime_error("outline pieces are inconsistent");
-    }
-    auto pt = [&](uint32_t i) {
-      if (3 * i + 2 >= points.size()) {
-        throw std::runtime_error("outline point out of range");
-      }
-      return gp_Pnt(points[3 * i], points[3 * i + 1], points[3 * i + 2]);
-    };
-    BRepBuilderAPI_MakeWire wire;
-    for (size_t k = 0; k + 1 < starts.size(); ++k) {
-      const uint32_t a = starts[k], b = starts[k + 1];
-      if (b < a + 2) {
-        throw std::runtime_error("outline piece needs two points");
-      }
-      if (kinds[k] == 1 && b - a >= 3) {
-        std::vector<gp_Pnt> pts;
-        for (uint32_t i = a; i < b; ++i) {
-          pts.push_back(pt(i));
-        }
-        wire.Add(BRepBuilderAPI_MakeEdge(interpolate(pts)).Edge());
-      } else {
-        for (uint32_t i = a; i + 1 < b; ++i) {
-          wire.Add(BRepBuilderAPI_MakeEdge(pt(i), pt(i + 1)).Edge());
-        }
-      }
-      if (!wire.IsDone()) {
-        throw std::runtime_error("outline is not connected");
-      }
-    }
-    if (!wire.Wire().Closed()) {
-      throw std::runtime_error("outline is not closed");
-    }
-    BRepBuilderAPI_MakeFace face(wire.Wire(), Standard_True);
-    if (!face.IsDone()) {
-      throw std::runtime_error("outline is not planar");
-    }
-    const gp_Dir n(vec3(normal, "normal"));
-    for (size_t i = 0; i + 3 < holes.size(); i += 4) {
-      gp_Circ c(gp_Ax2(gp_Pnt(holes[i], holes[i + 1], holes[i + 2]), n), holes[i + 3]);
-      TopoDS_Wire w = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(c).Edge()).Wire();
-      face.Add(TopoDS::Wire(w.Reversed()));
-    }
-    ShapeFix_Face fix(face.Face());
-    fix.Perform();
-    BRepPrimAPI_MakePrism prism(fix.Face(), vec3(vector, "extrude vector"));
-    prism.Build();
-    if (!prism.IsDone()) {
-      throw std::runtime_error("extrusion failed");
-    }
-    return own(prism.Shape());
-  });
-}
-
-std::unique_ptr<TopoDS_Shape> qoob3d_sweep_circle(rust::Slice<const double> path, double radius,
-                                                  rust::Slice<const double> binormal) {
-  return guarded("sweep_circle", [&] {
-    if (path.size() < 9 || path.size() % 3 != 0) {
-      throw std::runtime_error("sweep path needs at least three points");
-    }
-    std::vector<gp_Pnt> pts;
-    for (size_t i = 0; i < path.size(); i += 3) {
-      pts.emplace_back(path[i], path[i + 1], path[i + 2]);
-    }
-    Handle(Geom_BSplineCurve) curve = interpolate(pts);
-    TopoDS_Wire spine = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(curve).Edge()).Wire();
-
-    gp_Pnt p0;
-    gp_Vec t0;
-    curve->D1(curve->FirstParameter(), p0, t0);
-    gp_Circ section_circle(gp_Ax2(p0, gp_Dir(t0)), radius);
-    TopoDS_Wire section =
-        BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(section_circle).Edge()).Wire();
-
-    BRepOffsetAPI_MakePipeShell pipe(spine);
-    if (binormal.size() == 3) {
-      pipe.SetMode(gp_Dir(binormal[0], binormal[1], binormal[2]));
-    } else {
-      pipe.SetMode(Standard_True); // Frenet: exact for helices
-    }
-    pipe.Add(section);
-    pipe.Build();
-    if (!pipe.IsDone()) {
-      throw std::runtime_error("sweep failed");
-    }
-    if (!pipe.MakeSolid()) {
-      throw std::runtime_error("sweep could not be closed into a solid");
-    }
-    return own(pipe.Shape());
   });
 }
 

@@ -1,4 +1,4 @@
-//! Script kernel hardening (R5): docs/requirements/agent.md §6.1 AG-HD-02
+//! Script kernel hardening: docs/requirements/agent.md §6.1 AG-HD-02
 //! (script size limits of declaration discovery) and AG-HD-06 (`import` with
 //! a non-literal path), ADR-0053.
 //!
@@ -256,12 +256,12 @@ fn ag_hd_06_non_literal_import_is_refused_in_declare_mode_too() {
 }
 
 // ---------------------------------------------------------------------------
-// ADR-0056: the size measurement of declare mode costs linear time
+// ADR-0055: the size measurement of declare mode costs linear time
 // ---------------------------------------------------------------------------
 
 /// Loop iterations of [`counting`] that cost about 900 000 operations in
 /// declare mode (4 per iteration there; 250 000 iterations reach the
-/// 1 000 000 of AG-HD-02). `adr_0056_counting_premise` checks the bounds
+/// 1 000 000 of AG-HD-02). `discovery_counting_premise` checks the bounds
 /// that do not depend on how declare mode counts.
 const LONG_TOP_LEVEL: u32 = 225_000;
 
@@ -270,7 +270,7 @@ fn counting(n: u32) -> String {
     format!("let x = 0;\nfor i in 0..{n} {{ x += 1; }}\n")
 }
 
-/// Debug-build bound of ADR-0056 for a top level of about a million
+/// Debug-build bound of ADR-0055 for a top level of about a million
 /// operations. Plain evaluation of that many operations takes well under a
 /// second in a debug build; the quadratic staged measurement (a measurement
 /// every 4096 operations) needed 3.7 s for this loop and more than the 20 s
@@ -278,7 +278,7 @@ fn counting(n: u32) -> String {
 const LINEAR_BOUND: Duration = Duration::from_secs(3);
 
 #[test]
-fn adr_0056_counting_premise() {
+fn discovery_counting_premise() {
     // The premise of the tests below: the counting loop is a long top
     // level (more than 600 000 operations even by the cheaper count of a
     // plain run, measured with its operation limit) and it fits into the
@@ -291,8 +291,8 @@ fn adr_0056_counting_premise() {
 }
 
 #[test]
-fn adr_0056_a_long_top_level_without_violation_finishes_in_linear_time() {
-    // ADR-0056: "The measuring stages double (4096, 8192, …), so the total
+fn discovery_a_long_top_level_without_violation_finishes_in_linear_time() {
+    // ADR-0055: "The measuring stages double (4096, 8192, …), so the total
     // cost is linear in the operations of the file." About 900 000
     // operations and no size violation: the part after the loop is
     // declared, within 3 s.
@@ -305,7 +305,7 @@ fn adr_0056_a_long_top_level_without_violation_finishes_in_linear_time() {
 }
 
 #[test]
-fn adr_0056_a_violation_after_a_long_top_level_is_reported_in_linear_time() {
+fn discovery_a_violation_after_a_long_top_level_is_reported_in_linear_time() {
     // The same loop, then a string that crosses 65536 bytes on line 4
     // (16 B * 2^13, a few dozen operations more). The loop alone runs to
     // its end (premise), so line 4 can only be the size limit; it must be
@@ -327,7 +327,7 @@ fn adr_0056_a_violation_after_a_long_top_level_is_reported_in_linear_time() {
 }
 
 #[test]
-fn adr_0056_a_violation_early_in_a_long_top_level_is_still_found() {
+fn discovery_a_violation_early_in_a_long_top_level_is_still_found() {
     // Doubling stages must not lose a violation: the array passes 10 000
     // elements after 10 001 of 100 000 iterations and keeps its 20 000
     // elements to the end of the loop on line 2. The same loop without the

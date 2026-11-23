@@ -264,11 +264,6 @@ struct State {
     tokens: Vec<Option<String>>,
     /// Bodies of `POST /build`.
     builds: Vec<String>,
-    /// Armed by the test: what the next `POST /build` will do.
-    on_build: Option<(usize, Vec<FakePart>)>,
-    /// After `POST /build`: answer this many more `/status` requests with
-    /// the old parts, then switch to the new ones (a build taking time).
-    after_build: Option<(usize, Vec<FakePart>)>,
     /// Next `/mesh/<name>` answers with this header key instead (one shot).
     header_key_once: HashMap<String, String>,
     status_delay: Duration,
@@ -293,8 +288,6 @@ impl FakeService {
             log: Vec::new(),
             tokens: Vec::new(),
             builds: Vec::new(),
-            on_build: None,
-            after_build: None,
             header_key_once: HashMap::new(),
             status_delay: Duration::ZERO,
             status_error: false,
@@ -319,12 +312,6 @@ impl FakeService {
 
     pub(crate) fn set_parts(&self, parts: Vec<FakePart>) {
         self.lock().parts = parts;
-    }
-
-    /// Once `POST /build` arrives, `/status` reports the old parts for
-    /// `polls` more requests, then `parts` (a build that takes a while).
-    pub(crate) fn on_build(&self, polls: usize, parts: Vec<FakePart>) {
-        self.lock().on_build = Some((polls, parts));
     }
 
     pub(crate) fn set_header_key_once(&self, part: &str, key: &str) {
@@ -459,14 +446,6 @@ fn status_body(state: &mut State) -> (u16, Vec<u8>) {
     if state.status_error {
         return (500, error_envelope("internal", "broken"));
     }
-    if let Some((polls, _)) = &mut state.after_build {
-        if *polls == 0 {
-            let (_, parts) = state.after_build.take().expect("checked above");
-            state.parts = parts;
-        } else {
-            *polls -= 1;
-        }
-    }
     let list: Vec<_> = state
         .parts
         .iter()
@@ -521,9 +500,6 @@ fn handle(mut stream: TcpStream, state: &Arc<Mutex<State>>) {
     } else if request == "POST /build" {
         let mut s = lock();
         s.builds.push(String::from_utf8_lossy(&body).into_owned());
-        if let Some(next) = s.on_build.take() {
-            s.after_build = Some(next);
-        }
         drop(s);
         let result = serde_json::json!({"job": "j1", "state": "running"});
         (200, "application/json", envelope(&result))

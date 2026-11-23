@@ -8,6 +8,7 @@
 
 mod graph;
 mod imports;
+pub mod layout;
 mod values;
 
 use std::path::{Path, PathBuf};
@@ -18,9 +19,6 @@ use sha2::{Digest, Sha256};
 pub use graph::{Graph, PartDecl};
 pub use imports::resolve_imports;
 pub use values::{Value, ValueStatus, Values};
-
-/// Name of the project file in the project root.
-const CONFIG_FILE: &str = "qoob3d.toml";
 
 /// Longest time limit of a job: one day (AG-HD-01).
 const MAX_TIME_S: f64 = 86400.0;
@@ -160,7 +158,7 @@ impl Config {
     /// positive or above their maximum (AG-HD-01),
     /// `[cache] keep = 0`, non-positive mesh settings.
     pub fn load(root: &Path) -> Result<Self, ProjectError> {
-        let file = PathBuf::from(CONFIG_FILE);
+        let file = PathBuf::from(layout::CONFIG_FILE);
         let text = read_text(&root.join(&file))?;
         let raw: RawConfig = toml::from_str(&text)
             .map_err(|e| ProjectError::Toml { file: file.clone(), message: e.to_string() })?;

@@ -1,12 +1,12 @@
-# A test function without #[cfg(test)] in production code (ADR-0039, found by the critic)
+# A test function without #[cfg(test)] in production code (ADR-0037, found by the critic)
 command: cargo xtask hygiene
 expect: test code belongs in its own file
 --- patch
-diff --git a/crates/qoob3d-core/src/profile.rs b/crates/qoob3d-core/src/profile.rs
---- a/crates/qoob3d-core/src/profile.rs
-+++ b/crates/qoob3d-core/src/profile.rs
-@@ -33,3 +33,6 @@
-
+diff --git a/crates/qoob3d-core/src/mesh.rs b/crates/qoob3d-core/src/mesh.rs
+--- a/crates/qoob3d-core/src/mesh.rs
++++ b/crates/qoob3d-core/src/mesh.rs
+@@ -295,3 +295,6 @@
+ 
  #[cfg(test)]
  mod tests;
 +

@@ -2,8 +2,7 @@
 
 use clap::Parser as _;
 use qoob3d_app::{
-    app, batch, cli, headless_render, init, live, mcp, project_render, service, service_cli, smoke,
-    worker,
+    app, cli, client, init, mcp, project_render, service, service_cli, smoke, worker,
 };
 
 fn main() -> anyhow::Result<()> {
@@ -34,20 +33,13 @@ fn main() -> anyhow::Result<()> {
     }
 
     // WA-OP-01: a folder that is no project ends the app before any window.
-    let project = match cli.project.as_deref().map(live::ProjectDir::open).transpose() {
+    let project = match cli.project.as_deref().map(client::ProjectDir::open).transpose() {
         Ok(project) => project,
         Err(err) => {
             eprintln!("error: {err:#}");
             std::process::exit(2);
         }
     };
-    if let (Some(project), Some(out)) = (&project, &cli.render) {
-        return render_project(&cli, project, out);
-    }
-
-    if cli.render.is_some() || cli.export.is_some() || cli.report {
-        return headless(&cli);
-    }
 
     let (smoke, smoke_result) = if cli.smoke_test {
         let (test, result) = smoke::SmokeTest::start();
@@ -70,9 +62,8 @@ fn main() -> anyhow::Result<()> {
         Box::new(move |cc| {
             let options = app::StartOptions {
                 // The smoke test needs a body to orbit around (pivot check).
-                demo: cli.demo || smoke.is_some(),
+                demo: smoke.is_some(),
                 smoke,
-                open: cli.file.clone(),
                 project_dir: project.map(|p| p.dir().to_path_buf()),
             };
             Ok(Box::new(app::QoobApp::new(cc, options)?))
@@ -93,68 +84,6 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
-    }
-    Ok(())
-}
-
-fn render_view(cli: &cli::Cli) -> headless_render::RenderView {
-    headless_render::RenderView {
-        preset: cli.view.into(),
-        orthographic: cli.ortho,
-        zoom: cli.zoom,
-        printer: cli.printer.clone(),
-        build_volume: cli.volume,
-    }
-}
-
-/// `--project <DIR> --render <PNG>` (WA-HL-01): failed parts are named on
-/// stderr and give exit code 1, after the PNG is written.
-fn render_project(
-    cli: &cli::Cli,
-    project: &live::ProjectDir,
-    out: &std::path::Path,
-) -> anyhow::Result<()> {
-    let (scene, failed) = live::build_and_load(project, &live::service_command_from_env())?;
-    if scene.faces.is_empty() {
-        anyhow::bail!("no part of {} has a mesh to render", project.dir().display());
-    }
-    headless_render::run(out, render_view(cli), cli.size, Some(scene))?;
-    for name in &failed {
-        eprintln!("error: part {name} failed to build");
-    }
-    if !failed.is_empty() {
-        std::process::exit(1);
-    }
-    Ok(())
-}
-
-/// `--render`, `--export`, `--report` without a window (ADR-0013, ADR-0033).
-fn headless(cli: &cli::Cli) -> anyhow::Result<()> {
-    let mut kernel = qoob3d_kernel::Kernel::spawn(|| {});
-    let mut ok = true;
-    let mut scene = None;
-    if let Some(file) = &cli.file {
-        let doc = std::sync::Arc::new(batch::load(file)?);
-        let result = batch::rebuild(&mut kernel, &doc)?;
-        let report = batch::report(&doc, &result);
-        ok = report.ok;
-        if cli.report {
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        }
-        for e in &report.errors {
-            eprintln!("error in {}: {}", e.name, e.error);
-        }
-        if let Some(out) = &cli.export {
-            let n = batch::export(&mut kernel, &doc, out)?;
-            eprintln!("exported {n} bodies to {}", out.display());
-        }
-        scene = Some(batch::scene(&result));
-    }
-    if let Some(out) = &cli.render {
-        headless_render::run(out, render_view(cli), cli.size, scene)?;
-    }
-    if !ok {
-        std::process::exit(1);
     }
     Ok(())
 }

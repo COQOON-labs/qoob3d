@@ -1,37 +1,30 @@
 # qoob3d-kernel
 
-OpenCascade connection. Runs entirely in its own worker thread.
+OpenCascade connection: the script kernel (ADR-0053). A script runs, builds and measures its
+shapes on the thread that called `script::run`; the app runs scripts in worker processes.
 
 ## Rules
 
 - **OCCT types never leave this crate.** The public API consists only of types from
-  `qoob3d-core` and plain data (ADR-0005). This also applies to `occt_glam` (glam 0.24 from
-  opencascade).
-- New kernel functionality = new `Request`/`Response` variant, handled in
-  `worker.rs::handle`.
+  `qoob3d-core`, `script::Shape` and plain data (ADR-0036).
 - **Our own OCCT operations** belong in `cpp/qoob3d_occt.cpp` and the bridge `src/occt.rs`
-  (ADR-0014). Wrap every function with `guarded(...)` so that `Standard_Failure` →
+  (ADR-0004). Wrap every function with `guarded(...)` so that `Standard_Failure` →
   `std::runtime_error` → `Err`. Results as flat buffers (`rust::Vec`), logic in Rust as far
   as possible.
-- `opencascade` (high level) and `opencascade-sys` are forks in `third_party/`. Every change
-  there belongs in the fork's `README.md` (LGPL).
+- `opencascade-sys` is a fork in `third_party/` (ADR-0004), used with the feature `builtin`
+  (OCCT built from source into `target/OCCT`). Every change there belongs in the fork's
+  `README.md` (LGPL).
 - Tests check real geometry: volume, `MeshReport::is_watertight()`, normal direction,
   number of edges (seams must not appear as edges).
 
 ## Files
 
-- `src/worker.rs`: `Kernel`, `Request` (`DemoPart`, `Rebuild`, `Export`), `Response`,
-  worker loop, `rebuild_blocking`/`export_blocking` (CLI/tests only). Of several
-  waiting `Rebuild`s only the newest is computed.
-- `src/model.rs`: rebuild of the features into bodies, booleans (join/cut against touched bodies),
-  hash chain cache, feature errors (ADR-0031). Shapes as `UniquePtr<TopoDS_Shape>` only here.
-- `tests/features.rs`: every shape with analytic volume, join/cut, error case, cache,
-  export accuracy, v2 fixture.
-- `src/profiles.rs`: `sketch_profiles` → regions via General Fuse (`qoob3d_sketch_regions`
-  in C++, ADR-0028). Construction and degenerate curves do not count.
-- `src/tessellate.rs`: call of the C++ mesher → `ShapeMesh`, structure check, demo part.
+- `src/occt.rs`: the cxx bridge `ffi`, `Shape` (an owned, never null `TopoDS_Shape`), `occ()`
+  and `shape()` turn caught OCCT exceptions and null shapes into `KernelError`.
+- `src/tessellate.rs`: call of the C++ mesher → `ShapeMesh`, structure check.
 - `src/script.rs` + `src/script/`: script kernel (ADR-0053): `run`, `ScriptError`, `Shape`,
-  sandboxed imports, STL/3MF/STEP export (STL/3MF at 0.01 mm chordal tolerance, ADR-0034);
+  sandboxed imports, STEP export (STL/3MF are written by the service from the cached meshes,
+  tessellated with the project's `[mesh]` settings, ADR-0034);
   `api.rs` solids (named kinds `BOX`…`TORUS`), booleans (batched, plausibility AG-SC-12),
   transforms, measures, `countersink`/`counterbore`, `mass`, `overhangs`/`bed_area`;
   `profile.rs` profiles, profile algebra (AG-PF-02), `rounded_rect`, `rotate`, `offset`,
@@ -45,13 +38,13 @@ OpenCascade connection. Runs entirely in its own worker thread.
   distance, common volume for callers in Rust; BREP
   read/write and `Shape::mesh` for the cache. Runs on the calling thread, not
   the worker. Every API change updates `docs/script-api.md` (its examples run in
-  `tests/script.rs` and `tests/script_r5.rs` with the project folder `docs/script-api`; the
+  `tests/script.rs` and `tests/script_helpers.rs` with the project folder `docs/script-api`; the
   imported example assets live in `docs/script-api/lib/examples/`, and `qoob3d init` copies
   them). The reference is served to agents over MCP: no repository paths, requirement IDs,
   ADR numbers or Rust notes in it – those belong here.
 - `src/occt.rs` + `cpp/`: own cxx bridge. `build.rs` compiles it against the OCCT headers
   from `DEP_OCCT_INCLUDE` (set by the `opencascade-sys` fork in `third_party/opencascade-sys`
-  via `links = "occt"`, ADR-0047).
+  via `links = "occt"`, ADR-0004).
 
 ## Pitfalls
 
@@ -63,7 +56,7 @@ OpenCascade connection. Runs entirely in its own worker thread.
   reference.
 - The helper face for General Fuse is larger than all curves. Regions that touch its boundary
   (ID −1) are the outside and are discarded.
-- New OCCT operations get an **analytic** volume check in `tests/features.rs`.
+- New OCCT operations get an **analytic** volume check in `tests/script*.rs`.
 - `BRepBuilderAPI_MakeEdge(gp_Circ, a0, a1)`: angles refer to the X direction of the
   `gp_Ax2` – always set it explicitly (`gp_Ax2(P, Z, X)`).
 - Revolved bodies have degenerate edges at the poles; the mesher discards triangles with
@@ -90,7 +83,7 @@ OpenCascade connection. Runs entirely in its own worker thread.
 - Rhai's own size limits miss `a += a` on arrays and assignment into containers (`m[k] = v`).
   Declare mode therefore turns fast operators off and measures the variables after stages
   that double (4096, 8192, … operations, each run from the start because Rhai cannot resume):
-  the total cost stays below twice the last stage (ADR-0056). Memory grown between two
+  the total cost stays below twice the last stage (ADR-0055). Memory grown between two
   measurements is not seen there; discovery runs in a worker whose memory limit stops it.
   `Engine::on_var` would avoid the reruns but is `#[deprecated]` in Rhai and would exceed the
   lint-suppression cap (`harness/ratchet.txt`).
@@ -108,4 +101,4 @@ OpenCascade connection. Runs entirely in its own worker thread.
 
 ## Relevant ADRs
 
-ADR-0004, ADR-0005, ADR-0011, ADR-0012, ADR-0014, ADR-0028, ADR-0031, ADR-0032, ADR-0034, ADR-0047
+ADR-0004, ADR-0034, ADR-0036, ADR-0053, ADR-0055

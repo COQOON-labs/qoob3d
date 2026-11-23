@@ -2,12 +2,12 @@
 command: cargo clippy -p qoob3d-core --all-targets -- -D warnings
 expect: without reason
 --- patch
-diff --git a/crates/qoob3d-core/src/profile/tests.rs b/crates/qoob3d-core/src/profile/tests.rs
---- a/crates/qoob3d-core/src/profile/tests.rs
-+++ b/crates/qoob3d-core/src/profile/tests.rs
-@@ -12,3 +12,7 @@
-     assert!(square.contains([0.0, 5.0]), "on the border");
-     assert!(!square.contains([11.0, 5.0]));
+diff --git a/crates/qoob3d-core/src/mesh/tests.rs b/crates/qoob3d-core/src/mesh/tests.rs
+--- a/crates/qoob3d-core/src/mesh/tests.rs
++++ b/crates/qoob3d-core/src/mesh/tests.rs
+@@ -136,3 +136,7 @@
+         proptest::prop_assert!((r.volume_mm3 - expected).abs() / expected < 1e-3, "{:?}", r);
+     }
  }
 +
 +#[test]
