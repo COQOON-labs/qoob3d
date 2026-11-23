@@ -16,14 +16,12 @@
 //! cargo xtask review <tip> <revs>  critic record for pushed code (ADR-0041)
 //! cargo xtask rules            every rule in harness/rules.md has existing checks (ADR-0040)
 //! cargo xtask selftest         the harness rejects every sabotage in harness/sabotage/ (ADR-0042)
-//! cargo xtask guard            Claude Code PreToolUse hook: JSON on stdin, exit 2 = deny (ADR-0043)
 //! cargo xtask harness-changes <base> <head>  harness files changed in between, for CI (ADR-0037)
 //! ```
 
 mod arch;
 mod commits;
 mod docs;
-mod guard;
 mod hygiene;
 mod i18n;
 mod models;
@@ -60,7 +58,6 @@ fn main() -> ExitCode {
         Some("hygiene") => report("hygiene", hygiene::check(&root)),
         Some("commits") => commits_step(&root, &args[1..]),
         Some("setup") => setup(&root),
-        Some("guard") => return guard_hook(&root),
         Some("harness-changes") => {
             if let [base, head] = &args[1..] {
                 harness_changes(&root, base, head)
@@ -92,7 +89,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask <check [--fast] | check-rev <rev> | arch | docs [--fix] | i18n | hygiene | rules | selftest | commits <revs> | review <tip> <revs> | guard | harness-changes <base> <head> | setup | models [--write] | screenshot [dir]>"
+                "usage: cargo xtask <check [--fast] | check-rev <rev> | arch | docs [--fix] | i18n | hygiene | rules | selftest | commits <revs> | review <tip> <revs> | harness-changes <base> <head> | setup | models [--write] | screenshot [dir]>"
             );
             return ExitCode::from(2);
         }
@@ -221,28 +218,6 @@ fn commits_step(root: &Path, args: &[String]) -> bool {
             false
         }
         revs => report("commits", commits::check_range(root, revs)),
-    }
-}
-
-/// Exit code 2 tells Claude Code to block the tool call and show stderr.
-fn guard_hook(root: &Path) -> ExitCode {
-    let env = |key: &str| std::env::var(key).ok();
-    let session = guard::Session::from_env_values(
-        env("QOOB3D_HARNESS_UNLOCK").as_deref(),
-        env("HOME").as_deref(),
-    );
-    let input = std::io::read_to_string(std::io::stdin())
-        .map_err(|e| e.to_string())
-        .and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string()));
-    match input
-        .map_err(|e| format!("guard: unreadable hook input: {e}"))
-        .and_then(|v| guard::pre_tool_use(root, &session, &v))
-    {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(reason) => {
-            eprintln!("{reason}");
-            ExitCode::from(2)
-        }
     }
 }
 

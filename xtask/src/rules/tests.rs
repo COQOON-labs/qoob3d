@@ -124,7 +124,6 @@ const SUBCOMMANDS: &[&str] = &[
     "hygiene",
     "commits",
     "setup",
-    "guard",
     "rules",
     "selftest",
     "review",
@@ -197,10 +196,10 @@ fn step_removed_from_check_turns_its_rule_red() {
 // rule red.
 #[test]
 fn subcommand_removed_from_dispatch_turns_its_rule_red() {
-    let main_rs = edited_main("Some(\"guard\")", "Some(\"withdrawn-step\")");
-    let checks = ["xtask:guard".to_owned(), "xtask:selftest".to_owned()];
-    let root = root_with_main("removed_guard", &main_rs, &register_of(&checks));
-    assert_eq!(check(&root), Err(vec!["R-01: check `xtask:guard` does not exist".to_owned()]));
+    let main_rs = edited_main("Some(\"setup\")", "Some(\"withdrawn-step\")");
+    let checks = ["xtask:setup".to_owned(), "xtask:selftest".to_owned()];
+    let root = root_with_main("removed_setup", &main_rs, &register_of(&checks));
+    assert_eq!(check(&root), Err(vec!["R-01: check `xtask:setup` does not exist".to_owned()]));
     fs::remove_dir_all(&root).unwrap();
 }
 

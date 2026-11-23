@@ -168,7 +168,7 @@ fn no_module_but_main_spawns_git_itself() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     rust_files(&src, &src, &mut files);
-    for known in ["main.rs", "selftest.rs", "worktree.rs", "printers.rs", "guard/tests.rs"] {
+    for known in ["main.rs", "selftest.rs", "worktree.rs", "printers.rs", "paths/tests.rs"] {
         assert!(files.iter().any(|f| f == known), "{known} was not scanned: {files:?}");
     }
     let main = fs::read_to_string(src.join("main.rs")).unwrap();
