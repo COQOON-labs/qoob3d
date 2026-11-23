@@ -3141,6 +3141,7 @@ dependencies = [
  "png",
  "qoob3d-core",
  "qoob3d-kernel",
+ "qoob3d-project",
  "qoob3d-render",
  "rfd",
  "serde",
@@ -3173,6 +3174,18 @@ dependencies = [
  "rhai",
  "serde_json",
  "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "qoob3d-project"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "qoob3d-core",
+ "qoob3d-kernel",
+ "serde",
+ "serde_json",
  "tracing",
 ]
 

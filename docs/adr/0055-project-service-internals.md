@@ -121,10 +121,10 @@ pure Rust; a hand-written parser or hash would cost more to maintain. `rhai` in
 
 ## References
 
-- Code: `crates/qoob3d-app/src/service.rs`, `crates/qoob3d-app/src/service/`
+- Code: `crates/qoob3d-project/src/service.rs`, `crates/qoob3d-project/src/service/`
   (`pool.rs`, `jobs.rs`, `discovery.rs`, `snapshot.rs`, `http.rs`, `bench.rs`),
-  `crates/qoob3d-app/src/worker.rs`, `crates/qoob3d-app/src/worker/probe.rs`,
-  `crates/qoob3d-app/src/client.rs`, `crates/qoob3d-kernel/src/script/project.rs`,
+  `crates/qoob3d-project/src/worker.rs`, `crates/qoob3d-project/src/worker/probe.rs`,
+  `crates/qoob3d-project/src/client.rs`, `crates/qoob3d-kernel/src/script/project.rs`,
   `crates/qoob3d-kernel/src/script/limits.rs`, `crates/qoob3d-core/src/project/layout.rs`
 - Requirements: `docs/requirements/agent.md` (AG-HD-01 … AG-HD-09, AG-PJ-05, sections 2–6)
 - Related: ADR-0053, ADR-0054

@@ -25,9 +25,7 @@ pub struct Cli {
     pub smoke_test: bool,
 }
 
-/// Name of [`Command::RenderProject`] on the command line, for callers that
-/// start it as a child process (the MCP tool `render`).
-pub const RENDER_PROJECT: &str = "render-project";
+pub use qoob3d_project::RENDER_PROJECT;
 
 /// Script project commands (ADR-0053, docs/requirements/agent.md §2–3).
 #[derive(Debug, Subcommand)]

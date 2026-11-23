@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use qoob3d_core::ShapeMesh;
 
-use crate::client::{Client, Part, PartState, ProjectDir, START_TIMEOUT};
+use qoob3d_project::client::{Client, Part, PartState, ProjectDir, START_TIMEOUT};
 
 /// Status poll interval of the live view (WA-LV-01).
 pub const POLL_INTERVAL: Duration = Duration::from_millis(500);

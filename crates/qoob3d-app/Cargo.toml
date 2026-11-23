@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 qoob3d-core.workspace = true
 qoob3d-kernel.workspace = true
+qoob3d-project.workspace = true
 rfd = "0.17"
 qoob3d-render.workspace = true
 eframe = { workspace = true, features = ["persistence"] }

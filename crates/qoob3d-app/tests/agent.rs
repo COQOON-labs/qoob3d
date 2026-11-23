@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use artifacts::{git, git_init, git_tracked, png_colors, png_size};
 use inspect::assert_vec;
-use qoob3d_app::client;
+use qoob3d_project::client;
 use serde_json::{Value, json};
 use support::{BIN, Project, Service, VOL, assert_rel, cli, service_json, wait_until};
 

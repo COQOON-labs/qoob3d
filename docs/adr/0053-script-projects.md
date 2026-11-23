@@ -92,8 +92,7 @@ in `qoob3d-core::project`, the script engine in `qoob3d-kernel::script`.
 - Agents do not know the API from training, so the reference, the guide and the examples must
   be complete; tests enforce that every documented function and example works.
 - An OCCT segfault or hang costs one job, not the service or the app.
-- Service and MCP still live in `qoob3d-app`; they move to their own crate once the workspace
-  manifest is unlocked (ADR-0037).
+- Service, workers and MCP live in `qoob3d-project`, without GPU or UI (ADR-0036).
 
 ## Rejected alternatives
 
@@ -112,8 +111,8 @@ in `qoob3d-core::project`, the script engine in `qoob3d-kernel::script`.
 
 - Code: `crates/qoob3d-kernel/src/script.rs`, `crates/qoob3d-kernel/src/script/`,
   `crates/qoob3d-core/src/project/`, `crates/qoob3d-core/src/qmesh.rs`,
-  `crates/qoob3d-app/src/{service.rs,worker.rs,cli.rs,live.rs}`,
-  `crates/qoob3d-app/src/service/{pool,jobs,snapshot}.rs`
+  `crates/qoob3d-project/src/{service.rs,worker.rs}`, `crates/qoob3d-app/src/{cli.rs,live.rs}`,
+  `crates/qoob3d-project/src/service/{pool,jobs,snapshot}.rs`
 - `docs/script-api.md`, `docs/requirements/agent.md`, `docs/requirements/project-app.md`,
   `docs/concept/werft-concept.md`, `docs/concept/m0-report.md`
 - Related: ADR-0004, ADR-0036, ADR-0054, ADR-0055

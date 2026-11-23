@@ -59,8 +59,8 @@ the service itself never runs OCCT.
 
 - `crates/qoob3d-core/src/export.rs` (+ `export/tests.rs`), `crates/qoob3d-core/src/mesh.rs`
   (`welded`, `WELD_TOLERANCE_MM`), `crates/qoob3d-core/src/project/mod.rs` (`Mesh`)
-- `crates/qoob3d-app/src/service.rs` (`export`, `export_mesh`, `export_step`),
-  `crates/qoob3d-app/src/worker.rs` (`write_step`), `crates/qoob3d-app/src/service_cli.rs`
+- `crates/qoob3d-project/src/service.rs` (`export`, `export_mesh`, `export_step`),
+  `crates/qoob3d-project/src/worker.rs` (`write_step`), `crates/qoob3d-app/src/service_cli.rs`
 - `crates/qoob3d-kernel/src/script.rs` (`export_step`), `crates/qoob3d-kernel/cpp/`
 - `docs/requirements/agent.md` (AG-SC-14, AG-PF-05)
 - ADR-0002, ADR-0004, ADR-0013, ADR-0054, ADR-0055
