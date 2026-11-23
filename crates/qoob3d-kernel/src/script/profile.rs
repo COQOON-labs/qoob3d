@@ -1,6 +1,6 @@
 //! 2D profiles, extrude/revolve/loft and pipe of the script API (AG-SC-07,
 //! AG-SC-08, AG-SC-17), sections (AG-SC-21). An outline keeps its curves and plane; the face is made by the
-//! sketch region code (`qoob3d_profile_faces`, ADR-0028) when it is used.
+//! sketch region code (`qoob3d_profile_faces`, ADR-0004) when it is used.
 //! Profile algebra (AG-PF-02) combines such faces in the plane z = 0.
 
 use std::f64::consts::{FRAC_PI_2, PI};

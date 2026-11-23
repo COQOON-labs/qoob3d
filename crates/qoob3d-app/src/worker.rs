@@ -3,7 +3,7 @@
 //! line from stdin and answers one JSON line per job on stdout, staying warm
 //! between jobs. The service owns limits and replaces a worker that crashes
 //! or is killed. Declaration discovery of part and check files runs here as
-//! well (`Probe::Declare`, ADR-0056): the service never evaluates scripts.
+//! well (`Probe::Declare`, ADR-0055): the service never evaluates scripts.
 //!
 //! OCCT's STEP translator prints to stdout too, so answers are framed: every
 //! answer line contains `{"job":` and the service ignores everything before
@@ -14,6 +14,7 @@ use std::io::{BufRead as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use qoob3d_core::project::layout;
 use qoob3d_core::project::{self, KeyInputs, Mesh, Values};
 use qoob3d_core::qmesh;
 use qoob3d_kernel::script::{self, PartMode, RunOptions, ScriptError};
@@ -23,7 +24,6 @@ use serde_json::{Value, json};
 mod probe;
 
 pub(crate) use self::probe::Probe;
-use crate::service::snapshot::cache_dir;
 
 /// Enters every cache key (§2.1): another program version rebuilds.
 const PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -152,7 +152,7 @@ impl PartError {
 }
 
 /// What a part or check file declares, without running any closure: the
-/// answer to `Probe::Declare` (ADR-0056).
+/// answer to `Probe::Declare` (ADR-0055).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct Declaration {
     pub(crate) parts: Vec<PartDeclaration>,
@@ -320,7 +320,8 @@ fn build(request: &Request, name: &str) -> Result<(String, Value), PartError> {
         dependency_keys,
     });
 
-    let folder = request.cache.as_ref().map_or_else(|| cache_dir(dir, name), |c| c.join(name));
+    let folder =
+        request.cache.as_ref().map_or_else(|| layout::cache_dir(dir, name), |c| c.join(name));
     std::fs::create_dir_all(&folder).map_err(|e| io_error(&folder, e))?;
     let base = folder.join(&key);
     let brep = base.with_extension("brep");

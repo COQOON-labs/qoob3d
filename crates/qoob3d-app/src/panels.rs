@@ -58,7 +58,7 @@ fn settings_menu(ui: &mut egui::Ui, settings: &mut Settings) {
     ui.checkbox(&mut settings.left_drag_orbit, tr("settings-left-drag-orbit"))
         .on_hover_text(tr("settings-left-drag-orbit-tip"));
 
-    // "My printers" (ADR-0023): pinned on top of the printer list.
+    // "My printers" (ADR-0021): pinned on top of the printer list.
     ui.separator();
     ui.label(theme::caption(&tr("settings-printers")));
     ui.checkbox(&mut settings.only_favorite_printers, tr("settings-only-favorites"));

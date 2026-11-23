@@ -15,6 +15,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
+use qoob3d_core::project::layout;
 use qoob3d_core::{ShapeMesh, qmesh};
 use serde::Deserialize;
 
@@ -42,7 +43,7 @@ impl ProjectDir {
         if !dir.is_dir() {
             bail!("project folder {} does not exist", dir.display());
         }
-        if !dir.join("qoob3d.toml").is_file() {
+        if !dir.join(layout::CONFIG_FILE).is_file() {
             bail!("{} is not a QOOB3D project (no qoob3d.toml)", dir.display());
         }
         Ok(Self { dir: dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()) })
@@ -58,7 +59,7 @@ impl ProjectDir {
     }
 
     fn service_json(&self) -> PathBuf {
-        self.dir.join(".qoob3d").join("service.json")
+        layout::service_json(&self.dir)
     }
 
     /// Port and token from `.qoob3d/service.json`, `None` if missing or

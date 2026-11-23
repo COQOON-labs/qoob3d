@@ -209,7 +209,7 @@ fn lock_version<'a>(lock: &'a str, name: &str) -> Option<&'a str> {
         .and_then(|block| quoted_after(block, "version = \""))
 }
 
-// OCCT version pins agree (ADR-0050): the fork's build script skips the OCCT
+// OCCT version pins agree (ADR-0004): the fork's build script skips the OCCT
 // build only when the install holds `BUILTIN_OCCT_VERSION`, while occt-sys
 // (pinned exactly in the fork's Cargo.toml, resolved in Cargo.lock) builds and
 // installs its own version. If the strings differ, the installed version never
@@ -232,7 +232,7 @@ fn occt_version_pins_agree() {
         "OCCT version pins disagree: BUILTIN_OCCT_VERSION in \
          third_party/opencascade-sys/build.rs = {constant:?}, occt-sys pin in \
          third_party/opencascade-sys/Cargo.toml = {pin:?}, occt-sys in Cargo.lock = \
-         {locked:?}; a mismatch silently rebuilds OCCT on every build (ADR-0050)"
+         {locked:?}; a mismatch silently rebuilds OCCT on every build (ADR-0004)"
     );
 }
 

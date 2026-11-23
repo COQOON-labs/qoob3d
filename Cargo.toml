@@ -24,11 +24,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # QOOB3D fork of opencascade-sys 0.3.0 with `links = "occt"`, so the kernel's
-# build script runs after OCCT is built (third_party/opencascade-sys/README.md, ADR-0047).
+# build script runs after OCCT is built (third_party/opencascade-sys/README.md, ADR-0004).
 [patch.crates-io]
 opencascade-sys = { path = "third_party/opencascade-sys" }
 
-# Lint policy (ADR-0040). Every suppression is `#[expect(lint, reason = "…")]`;
+# Lint policy (ADR-0037). Every suppression is `#[expect(lint, reason = "…")]`;
 # `xtask hygiene` caps their number (harness/ratchet.txt).
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -48,7 +48,7 @@ unimplemented = "warn"
 # Size and complexity limits (thresholds in clippy.toml).
 too_many_lines = "warn"
 cognitive_complexity = "warn"
-# Style decisions from docs/design/code-style.md (ADR-0040).
+# Style decisions from docs/design/code-style.md (ADR-0037).
 unwrap_used = "warn"
 semicolon_if_nothing_returned = "warn"
 items_after_statements = "warn"

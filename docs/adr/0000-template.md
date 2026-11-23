@@ -9,12 +9,12 @@ supersedes: []
 superseded_by: null
 ---
 
-<!-- Copy as NNNN-kebab-title.md, next free number, add to the index in README.md.
+<!-- Copy as NNNN-kebab-title.md, next free number, then `cargo xtask docs --fix`.
      Required fields in the front matter: id, title, status, date, crates, tags, supersedes,
      superseded_by.
      status: proposed | accepted | superseded | rejected
-     Accepted ADRs are not rewritten in substance – instead create a new ADR
-     that supersedes them (maintain supersedes / superseded_by). Typos and links are fine. -->
+     ADRs are topic documents: a changed decision updates the ADR of its topic, the history
+     is in Git. A new file only for a new topic. -->
 
 ## Context
 

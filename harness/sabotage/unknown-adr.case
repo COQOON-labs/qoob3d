@@ -1,0 +1,13 @@
+# Code refers to an ADR that does not exist (ADR-0001)
+command: cargo xtask docs
+expect: refers to unknown ADR-0003
+--- patch
+diff --git a/crates/qoob3d-core/src/mesh.rs b/crates/qoob3d-core/src/mesh.rs
+--- a/crates/qoob3d-core/src/mesh.rs
++++ b/crates/qoob3d-core/src/mesh.rs
+@@ -295,3 +295,5 @@
+ 
+ #[cfg(test)]
+ mod tests;
++
++// See ADR-0003.

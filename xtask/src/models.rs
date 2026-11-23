@@ -1,4 +1,4 @@
-//! The reference project as a quality gate (ADR-0033).
+//! The reference project as a quality gate (ADR-0013).
 //!
 //! `models/` is a script project whose checks compare every part with a
 //! formula. The gate proves the path "design → slicer", headless through the

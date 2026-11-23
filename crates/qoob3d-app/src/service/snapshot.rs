@@ -4,21 +4,17 @@
 //!
 //! Declarations come from discovery (`discovery.rs`): a worker evaluates
 //! each part and check file with a recording `part()` and without the CAD
-//! API, so the service never evaluates a script (ADR-0056). A file that does
+//! API, so the service never evaluates a script (ADR-0055). A file that does
 //! not load is a load error of that file; the other files' parts stay.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use qoob3d_core::project::layout;
 use qoob3d_core::project::{self, Config, Graph, KeyInputs, PartDecl, Values};
 use serde_json::Value;
 
 use crate::worker::{Declaration, ErrorKind, PartError, key_version};
-
-/// `.qoob3d/cache/<part>` of the project in `dir`.
-pub(crate) fn cache_dir(dir: &Path, part: &str) -> PathBuf {
-    dir.join(".qoob3d").join("cache").join(part)
-}
 
 /// What a part or check file declares, or why it does not load.
 pub(crate) type Declared = Result<Declaration, PartError>;
@@ -108,7 +104,7 @@ pub(crate) struct Snapshot {
     pub(crate) values: Values,
     /// In build order: every part after its dependencies.
     pub(crate) parts: Vec<PartSource>,
-    /// Part files that do not load (AG-PJ-02, ADR-0056).
+    /// Part files that do not load (AG-PJ-02, ADR-0055).
     pub(crate) load_errors: Vec<PartError>,
 }
 
@@ -281,7 +277,7 @@ impl Record {
 
 /// Cache `.json` of `part` with `key`, if the entry is complete.
 pub(crate) fn cached(dir: &Path, part: &str, key: &str) -> Option<Value> {
-    let base = cache_dir(dir, part).join(key);
+    let base = layout::cache_dir(dir, part).join(key);
     if !base.with_extension("brep").is_file() || !base.with_extension("qmsh").is_file() {
         return None;
     }
@@ -292,7 +288,7 @@ pub(crate) fn cached(dir: &Path, part: &str, key: &str) -> Option<Value> {
 /// Removes all but the newest `keep` cache entries of `part` (by the
 /// modification time of the `.json`), never the entry `current` (AG-PF-04).
 pub(crate) fn evict(dir: &Path, part: &str, current: &str, keep: usize) {
-    let folder = cache_dir(dir, part);
+    let folder = layout::cache_dir(dir, part);
     let Ok(entries) = std::fs::read_dir(&folder) else {
         return;
     };
@@ -318,7 +314,7 @@ pub(crate) fn evict(dir: &Path, part: &str, current: &str, keep: usize) {
 /// The newest complete cache entry of `part`: the last build of an earlier
 /// service run.
 fn newest(dir: &Path, part: &str) -> Option<(String, Value)> {
-    let entries = std::fs::read_dir(cache_dir(dir, part)).ok()?;
+    let entries = std::fs::read_dir(layout::cache_dir(dir, part)).ok()?;
     let newest = entries
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
@@ -387,7 +383,7 @@ pub(crate) fn views(
             error = Some(e.clone());
             State::Failed
         } else if matches!(part.discovered, Discovered::Running) {
-            // ADR-0056: earlier declarations while the file is rediscovered.
+            // ADR-0055: earlier declarations while the file is rediscovered.
             State::Outdated
         } else if r.failed.as_ref().is_some_and(|(k, _)| *k == expected) {
             error = r.failed.as_ref().map(|(_, e)| e.clone());

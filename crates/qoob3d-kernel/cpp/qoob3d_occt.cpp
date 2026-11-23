@@ -284,7 +284,7 @@ void curve_edges(const Qoob3dCurves &c, std::vector<TopoDS_Shape> &edges, std::v
 }
 
 // Splits a helper face by all curves (General Fuse) and returns every closed
-// region with the ids of its boundary curves (ADR-0028).
+// region with the ids of its boundary curves (ADR-0004).
 std::vector<Region> split_regions(const Qoob3dCurves &c) {
   std::vector<TopoDS_Shape> edges;
   std::vector<int> ids;

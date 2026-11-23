@@ -1,4 +1,4 @@
-//! Declaration discovery (ADR-0056): what the part and check files declare.
+//! Declaration discovery (ADR-0055): what the part and check files declare.
 //! The service never evaluates a script: every file whose bytes (or
 //! literally imported modules) changed goes to a worker as `Probe::Declare`,
 //! under the project's time limit and the worker's memory limit, on a thread
@@ -122,7 +122,7 @@ fn file_json(f: &FileDecl) -> Value {
 }
 
 impl Service {
-    /// `POST /discover {"files": [..]|null, "wait_s": f64}` (ADR-0056):
+    /// `POST /discover {"files": [..]|null, "wait_s": f64}` (ADR-0055):
     /// waits up to `wait_s` for the discovery of those part and check files
     /// (others are ignored) and answers `{"files": [{file, state, parts?,
     /// checks?, error?}], "discovering": [..]}`.

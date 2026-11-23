@@ -1,6 +1,6 @@
 //! Script kernel (ADR-0053, `docs/requirements/agent.md` §1): models are Rhai
 //! scripts on our OCCT wrappers. The script is glue only; every geometric
-//! operation is one call into `cpp/qoob3d_occt.cpp` (ADR-0004, ADR-0014).
+//! operation is one call into `cpp/qoob3d_occt.cpp` (ADR-0004).
 //! The API reference for scripts is `docs/script-api.md` (AG-SC-16).
 //!
 //! Shapes live on the thread that runs the script (OCCT handles are not
@@ -22,14 +22,13 @@ use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
 use qoob3d_core::ShapeMesh;
-use qoob3d_core::export::{self, ExportObject};
 use rhai::module_resolvers::{DummyModuleResolver, FileModuleResolver};
 use rhai::{Engine, EvalAltResult, Module, ModuleResolver, Position, Scope, Shared};
 
+use crate::KernelError;
 use crate::occt::ffi;
 use crate::occt::{self, occ};
 use crate::tessellate::{tessellate_angle, tessellate_raw};
-use crate::{EXPORT_TESSELLATION_TOLERANCE_MM, KernelError};
 
 pub use check::{CheckOptions, CheckResult, Expectation};
 pub use measure::{common_volume, distance};
@@ -433,35 +432,8 @@ fn import_statement(text: &str, pos: Position, path: &str) -> Option<(Position, 
     Some((Position::new(u16::try_from(line).ok()?, u16::try_from(column).ok()?), literal))
 }
 
-/// Binary STL of all shapes (ADR-0034), meshed at the export tolerance.
-pub fn export_stl(shapes: &[(String, Shape)], path: &Path) -> Result<(), KernelError> {
-    write_meshes(shapes, path, export::stl)
-}
-
-/// 3MF with one object per shape (ADR-0034).
-pub fn export_3mf(shapes: &[(String, Shape)], path: &Path) -> Result<(), KernelError> {
-    write_meshes(shapes, path, export::three_mf)
-}
-
 /// STEP (AP214) of all shapes as one compound.
 pub fn export_step(shapes: &[(String, Shape)], path: &Path) -> Result<(), KernelError> {
     let all = compound(shapes.iter().map(|(_, s)| s))?;
     occ(ffi::qoob3d_write_step(all.get(), utf8(path)?))
-}
-
-fn write_meshes(
-    shapes: &[(String, Shape)],
-    path: &Path,
-    encode: fn(&[ExportObject<'_>]) -> Vec<u8>,
-) -> Result<(), KernelError> {
-    let meshes = shapes
-        .iter()
-        .map(|(name, s)| Ok((name, tessellate_raw(s.get(), EXPORT_TESSELLATION_TOLERANCE_MM)?)))
-        .collect::<Result<Vec<_>, KernelError>>()?;
-    let objects: Vec<ExportObject<'_>> = meshes
-        .iter()
-        .map(|(name, mesh)| ExportObject { name: (*name).clone(), mesh: &mesh.faces })
-        .collect();
-    std::fs::write(path, encode(&objects))
-        .map_err(|e| KernelError::Io(format!("{}: {e}", path.display())))
 }

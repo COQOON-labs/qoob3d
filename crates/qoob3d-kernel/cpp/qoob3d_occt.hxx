@@ -1,4 +1,4 @@
-// QOOB3D's own OCCT wrappers (ADR-0014).
+// QOOB3D's own OCCT wrappers (ADR-0004).
 //
 // Rules for everything in this file:
 // - every function catches Standard_Failure (which does NOT derive from
@@ -18,11 +18,11 @@ struct Qoob3dMesh;
 Qoob3dMesh qoob3d_tessellate(const TopoDS_Shape &shape, double linear_deflection,
                              double angular_deflection);
 
-// Sketch curves for region computations (ADR-0028), all in the local plane
+// Sketch curves for region computations (ADR-0004), all in the local plane
 // z = 0: lines (x0 y0 x1 y1), circles (cx cy r), arcs (cx cy r a0 a1, CCW).
 struct Qoob3dCurves;
 
-// Solid modelling (ADR-0031). Shapes are owned by the kernel worker thread.
+// Solid modelling (ADR-0004). Shapes stay on the thread that runs the script.
 // Faces of the given profiles (keys are concatenated, `key_starts` has a
 // sentinel), placed into the plane frame (origin u v n, 12 values).
 std::unique_ptr<TopoDS_Shape> qoob3d_profile_faces(const Qoob3dCurves &curves,

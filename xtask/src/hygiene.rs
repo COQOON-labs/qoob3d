@@ -5,7 +5,7 @@
 //! - the number of suppressed lints (each lint in an `#[expect(…)]`, also
 //!   inside `cfg_attr`) never grows beyond `harness/ratchet.txt`,
 //! - the repository is English: no German umlauts or sharp s outside
-//!   `harness/language-allowlist.txt` (ADR-0045),
+//!   `harness/language-allowlist.txt` (ADR-0001),
 //! - `.github/CODEOWNERS` names an owner for every harness path.
 
 use std::fs;
@@ -340,7 +340,7 @@ pub(crate) fn check_language(rel: &str, text: &str, allow: &Allowlist) -> Vec<St
         if let Some(c) = line.chars().find(|c| GERMAN_CHARS.contains(c)) {
             problems.push(format!(
                 "{rel}:{}: `{c}` is not English – the repository is English, German only in \
-                 locales/de/ (ADR-0045, {LANGUAGE_ALLOWLIST})",
+                 locales/de/ (ADR-0001, {LANGUAGE_ALLOWLIST})",
                 no + 1
             ));
         }

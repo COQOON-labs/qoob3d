@@ -5,12 +5,13 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
+use qoob3d_core::project::layout;
 use qoob3d_core::project::{Limits, Mesh};
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::jobs::Work;
-use super::snapshot::{Snapshot, State, cache_dir, views};
+use super::snapshot::{Snapshot, State, views};
 use super::{Answer, Failure, Service, body, unknown_job};
 use crate::worker::{self, ErrorKind, PartError, Probe, Request};
 
@@ -36,7 +37,8 @@ impl Service {
             .into_iter()
             .filter(|v| v.state == State::Current)
             .filter_map(|v| {
-                let brep = cache_dir(&self.dir, &v.name).join(v.key?).with_extension("brep");
+                let brep =
+                    layout::cache_dir(&self.dir, &v.name).join(v.key?).with_extension("brep");
                 Some((v.name, brep))
             })
             .collect()
@@ -112,7 +114,7 @@ impl Service {
                 .iter()
                 .map(|p| {
                     let key = job.key(p).unwrap_or_default();
-                    (p.clone(), cache_dir(&self.dir, p).join(key).with_extension("brep"))
+                    (p.clone(), layout::cache_dir(&self.dir, p).join(key).with_extension("brep"))
                 })
                 .collect()
         };

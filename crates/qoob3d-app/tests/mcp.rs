@@ -1,5 +1,5 @@
-//! R4: the MCP server `qoob3d mcp [DIR]` over stdio against the real binary
-//! (docs/requirements/agent.md §4.5 AG-MC-01..06 and §7 acceptance R4;
+//! The MCP server `qoob3d mcp [DIR]` over stdio against the real binary
+//! (docs/requirements/agent.md §4.5 AG-MC-01..06 and the §7 acceptance;
 //! §6.2 AG-TK-05..07: the agent binds parts and checks with `task_update`;
 //! ADR-0054). Every test names its requirement IDs.
 //!
@@ -17,21 +17,25 @@
 //! `support::Project` stops the service the server started on demand and
 //! removes the folder (see `common/agent.rs`).
 
+#[path = "common/artifacts.rs"]
+mod artifacts;
+#[path = "common/inspect.rs"]
+mod inspect;
+#[path = "common/mcp.rs"]
+mod mcp_client;
 #[path = "common/agent.rs"]
 mod support;
 
 use std::collections::BTreeSet;
-use std::io::{BufRead as _, BufReader, Write as _};
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 
+use artifacts::{git, git_init, git_tracked, png_colors, png_size};
+use inspect::assert_vec;
+use mcp_client::{Mcp, Tool, VERSIONS, short};
 use serde_json::{Value, json};
-use support::{
-    BIN, Project, Service, VOL, assert_rel, assert_vec, check_envelope, cli, git, git_init,
-    git_tracked, png_colors, png_size, service_json, wait_until,
-};
+use support::{BIN, Project, Service, VOL, assert_rel, cli, service_json, wait_until};
 
 /// Smallest distance between a pin and its hole (coaxial cylinders): OCCT's
 /// extrema search is good to about 1e-7 mm; 1e-4 mm is a thousandth of the
@@ -43,206 +47,17 @@ const QUICK: Duration = Duration::from_secs(30);
 const TOOL: Duration = Duration::from_secs(120);
 const CLI: Duration = Duration::from_secs(90);
 const MIB: usize = 1024 * 1024;
-const VERSIONS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
 /// The script API reference the binary must embed (AG-MC-05).
 const SCRIPT_API: &str = include_str!("../../../docs/script-api.md");
 
 // ===========================================================================
-// MCP client
+// MCP client (shared in common/mcp.rs)
 // ===========================================================================
 
-/// At most 400 characters of a message for panic texts (renders are megabytes).
-fn short(text: &str) -> String {
-    if text.len() <= 400 {
-        return text.to_owned();
-    }
-    let head: String = text.chars().take(400).collect();
-    format!("{head}… ({} bytes)", text.len())
-}
-
-/// A stdout line as JSON-RPC 2.0 message: a response (`id` with exactly one
-/// of `result`/`error`) or a notification/request (`method`).
-fn protocol_message(line: &str) -> Value {
-    let v: Value = serde_json::from_str(line)
-        .unwrap_or_else(|e| panic!("stdout line is not JSON ({e}): {}", short(line)));
-    assert_eq!(v["jsonrpc"], json!("2.0"), "not JSON-RPC 2.0: {}", short(line));
-    let response = v.get("id").is_some() && (v.get("result").is_some() != v.get("error").is_some());
-    assert!(response || v["method"].is_string(), "no response, no request: {}", short(line));
-    v
-}
-
-/// The answer of one `tools/call` (AG-MC-02).
-struct Tool {
-    envelope: Value,
-    content: Vec<Value>,
-}
-
-impl Tool {
-    /// `result` of an envelope with `ok: true`.
-    fn ok(&self) -> &Value {
-        assert_eq!(self.envelope["ok"], json!(true), "{}", short(&self.envelope.to_string()));
-        &self.envelope["result"]
-    }
-
-    /// The call was refused and the error names every word.
-    fn refused(&self, words: &[&str], what: &str) {
-        let text = self.envelope.to_string();
-        assert_eq!(self.envelope["ok"], json!(false), "{what} must be refused: {}", short(&text));
-        for w in words {
-            assert!(text.contains(w), "{what}: the error must name {w}: {}", short(&text));
-        }
-    }
-
-    fn error_kind(&self) -> &str {
-        self.envelope["error"]["kind"].as_str().unwrap_or_default()
-    }
-}
-
-/// A running `qoob3d mcp`.
-struct Mcp {
-    child: Child,
-    stdin: Option<ChildStdin>,
-    lines: Receiver<String>,
-    log: PathBuf,
-    next_id: u64,
-    /// Names of all tools called so far.
-    called: BTreeSet<String>,
-}
-
 impl Mcp {
-    /// `qoob3d mcp <DIR>`, working directory outside the project.
-    fn spawn(p: &Project) -> Self {
-        Self::start(Command::new(BIN).arg("mcp").arg(&p.dir).current_dir(&p.root), p)
-    }
-
     /// `qoob3d mcp` in the project folder (AG-MC-01: DIR defaults to it).
     fn spawn_in_project(p: &Project) -> Self {
         Self::start(Command::new(BIN).arg("mcp").current_dir(&p.dir), p)
-    }
-
-    fn start(command: &mut Command, p: &Project) -> Self {
-        let log = p.root.join("mcp.log");
-        let err = std::fs::OpenOptions::new().create(true).append(true).open(&log);
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(err.expect("open mcp.log"))
-            .spawn()
-            .expect("spawn qoob3d mcp");
-        let stdin = child.stdin.take();
-        let out = BufReader::new(child.stdout.take().expect("stdout"));
-        let (tx, lines) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in out.lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-        Self { child, stdin, lines, log, next_id: 0, called: BTreeSet::new() }
-    }
-
-    fn stderr(&self) -> String {
-        let text = std::fs::read_to_string(&self.log).unwrap_or_default();
-        let start = text.len().saturating_sub(3000);
-        text.get(start..).unwrap_or_default().to_owned()
-    }
-
-    /// Writes one line to the server.
-    fn send(&mut self, line: &str) {
-        let stdin = self.stdin.as_mut().expect("stdin open");
-        let sent = writeln!(stdin, "{line}").and_then(|()| stdin.flush());
-        if let Err(e) = sent {
-            panic!("the server closed stdin ({e}); stderr:\n{}", self.stderr());
-        }
-    }
-
-    /// The next stdout line as checked protocol message.
-    fn recv(&mut self, timeout: Duration) -> Value {
-        match self.lines.recv_timeout(timeout) {
-            Ok(line) => protocol_message(&line),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                panic!("no answer within {timeout:?}; stderr:\n{}", self.stderr())
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("the server closed stdout without an answer; stderr:\n{}", self.stderr())
-            }
-        }
-    }
-
-    /// The next response; notifications of the server are checked and skipped.
-    fn response(&mut self, timeout: Duration) -> Value {
-        loop {
-            let message = self.recv(timeout);
-            if message.get("method").is_none() {
-                return message;
-            }
-        }
-    }
-
-    /// A request with a fresh numeric id; the whole response.
-    fn request(&mut self, method: &str, params: &Value, timeout: Duration) -> Value {
-        self.next_id += 1;
-        let id = self.next_id;
-        self.send(
-            &json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string(),
-        );
-        let response = self.response(timeout);
-        assert_eq!(response["id"], json!(id), "{method}: {}", short(&response.to_string()));
-        response
-    }
-
-    /// `result` of a request that must succeed.
-    fn result(&mut self, method: &str, params: &Value) -> Value {
-        let response = self.request(method, params, QUICK);
-        assert!(response.get("error").is_none(), "{method}: {}", short(&response.to_string()));
-        response["result"].clone()
-    }
-
-    fn notify(&mut self, method: &str) {
-        self.send(&json!({"jsonrpc": "2.0", "method": method}).to_string());
-    }
-
-    /// `initialize` with `version`, then `notifications/initialized`; the result.
-    fn initialize(&mut self, version: &str) -> Value {
-        let params = json!({
-            "protocolVersion": version,
-            "capabilities": {},
-            "clientInfo": {"name": "qoob3d-tests", "version": "0"},
-        });
-        let result = self.result("initialize", &params);
-        self.notify("notifications/initialized");
-        result
-    }
-
-    /// A fresh, initialized session for `p`.
-    fn open(p: &Project) -> Self {
-        let mut mcp = Self::spawn(p);
-        mcp.initialize(VERSIONS[2]);
-        mcp
-    }
-
-    /// `tools/call`: one text content with the JSON envelope, `isError` =
-    /// `!ok` (AG-MC-02); only a successful `render` has a second content.
-    fn call(&mut self, tool: &str, arguments: &Value) -> Tool {
-        self.called.insert(tool.to_owned());
-        let params = json!({"name": tool, "arguments": arguments});
-        let response = self.request("tools/call", &params, TOOL);
-        let text = short(&response.to_string());
-        assert!(response.get("error").is_none(), "{tool} {arguments}: protocol error: {text}");
-        let result = &response["result"];
-        let content = result["content"].as_array().cloned().unwrap_or_default();
-        assert!(!content.is_empty(), "{tool}: no content: {text}");
-        assert_eq!(content[0]["type"], json!("text"), "{tool}: {text}");
-        let body = content[0]["text"].as_str().unwrap_or_default();
-        let envelope: Value = serde_json::from_str(body).unwrap_or_else(|e| {
-            panic!("{tool}: content[0].text is no JSON envelope ({e}): {text}")
-        });
-        let ok = check_envelope(&envelope);
-        assert_eq!(result["isError"], json!(!ok), "{tool}: isError = !ok: {text}");
-        let contents = if tool == "render" && ok { 2 } else { 1 };
-        assert_eq!(content.len(), contents, "{tool}: number of contents: {text}");
-        Tool { envelope, content }
     }
 
     /// Closes stdin: the server must exit by itself and must not have
@@ -261,14 +76,9 @@ impl Mcp {
     }
 }
 
-impl Drop for Mcp {
-    fn drop(&mut self) {
-        drop(self.stdin.take());
-        let child = &mut self.child;
-        if !wait_until(Duration::from_secs(3), || child.try_wait().is_ok_and(|s| s.is_some())) {
-            self.child.kill().ok();
-        }
-        self.child.wait().ok();
+impl Tool {
+    fn error_kind(&self) -> &str {
+        self.envelope["error"]["kind"].as_str().unwrap_or_default()
     }
 }
 
@@ -311,13 +121,6 @@ fn small_project(name: &str) -> Project {
     p
 }
 
-fn text_of(tool: &Tool) -> String {
-    tool.ok()["text"]
-        .as_str()
-        .unwrap_or_else(|| panic!("result.text: {}", tool.envelope))
-        .to_owned()
-}
-
 // ===========================================================================
 // AG-MC-01: protocol
 // ===========================================================================
@@ -340,7 +143,7 @@ fn ag_mc_01_initialize_answers_with_a_supported_protocol_version() {
         let instructions = r["instructions"].as_str().unwrap_or_default().to_owned();
         assert!(!instructions.trim().is_empty(), "instructions: {r}");
         if client == VERSIONS[2] {
-            let guide = text_of(&mcp.call("guide", &json!({})));
+            let guide = mcp.call("guide", &json!({})).text();
             assert_eq!(instructions.trim(), guide.trim(), "instructions are the guide");
         }
         mcp.finish();
@@ -484,7 +287,7 @@ fn ag_mc_02_every_tool_answers_with_the_envelope() {
     git_init(&p.dir);
     // AG-MC-01: a running service is used, not replaced.
     let s = Service::start(&p);
-    // Discovery runs in a worker (ADR-0056): project_status lists A and B
+    // Discovery runs in a worker (ADR-0055): project_status lists A and B
     // only once it has seen their files.
     s.wait_discovery();
     let running = service_json(&p.dir);
@@ -514,8 +317,8 @@ fn call_information_tools(mcp: &mut Mcp) {
     assert_eq!(names, set(&["A", "B"]), "{}", st.envelope);
     assert!(st.ok()["checks"].is_array(), "status lists the checks: {}", st.envelope);
 
-    assert!(!text_of(&mcp.call("guide", &json!({}))).trim().is_empty());
-    assert!(text_of(&mcp.call("api_reference", &json!({}))).contains("# Script API reference"));
+    assert!(!mcp.call("guide", &json!({})).text().trim().is_empty());
+    assert!(mcp.call("api_reference", &json!({})).text().contains("# Script API reference"));
 
     // All values plus the assumptions: a_size is an assumption (VALUES).
     let values = mcp.call("values", &json!({}));
@@ -759,11 +562,11 @@ fn ag_mc_02_api_reference_whole_or_searched_sections() {
     let p = small_project("mcp-reference");
     let mut mcp = Mcp::open(&p);
     // Without search: the whole docs/script-api.md, embedded in the binary.
-    let whole = text_of(&mcp.call("api_reference", &json!({})));
+    let whole = mcp.call("api_reference", &json!({})).text();
     assert_eq!(whole.trim(), SCRIPT_API.trim(), "the reference is docs/script-api.md");
 
     // Heading match: the section of `fillet`, not unrelated solids.
-    let fillet = text_of(&mcp.call("api_reference", &json!({"search": "fillet"})));
+    let fillet = mcp.call("api_reference", &json!({"search": "fillet"})).text();
     assert!(fillet.contains("### `fillet(s, edges, r) -> Shape`"), "{}", short(&fillet));
     assert!(fillet.contains("Rounds the selected edges"), "sections come with their text");
     assert!(
@@ -776,30 +579,30 @@ fn ag_mc_02_api_reference_whole_or_searched_sections() {
     );
     assert!(fillet.len() < whole.len() / 2, "a search returns less than the whole reference");
     // Case-insensitive.
-    let upper = text_of(&mcp.call("api_reference", &json!({"search": "FILLET"})));
+    let upper = mcp.call("api_reference", &json!({"search": "FILLET"})).text();
     assert_eq!(upper, fillet, "the search ignores case");
 
     // Text match: "Stadium" occurs only in the text of `slot`, not in a heading.
     assert_eq!(SCRIPT_API.matches("tadium").count(), 1, "the reference changed: adjust this test");
-    let slot = text_of(&mcp.call("api_reference", &json!({"search": "stadium"})));
+    let slot = mcp.call("api_reference", &json!({"search": "stadium"})).text();
     assert!(slot.contains("`slot(l, w) -> Profile`"), "{}", short(&slot));
     assert!(slot.contains("Stadium (oblong hole)"), "{}", short(&slot));
     assert!(!slot.contains("### `torus(") && !slot.contains("### `fillet("), "{}", short(&slot));
 
     // The FDM helpers an agent needs for the acceptance task are findable.
-    let hole = text_of(&mcp.call("api_reference", &json!({"search": "clearance"})));
+    let hole = mcp.call("api_reference", &json!({"search": "clearance"})).text();
     assert!(hole.contains("### `hole(d, l, clearance) -> Shape`"), "{}", short(&hole));
 
     // No match: not the whole reference.
     let none = mcp.call("api_reference", &json!({"search": "zzz-no-such-function"}));
     if none.envelope["ok"] == json!(true) {
-        assert!(!text_of(&none).contains("### `box("), "no match must not return everything");
+        assert!(!none.text().contains("### `box("), "no match must not return everything");
     }
     mcp.finish();
 }
 
 // ===========================================================================
-// §3.1: file_write reports what the written file declares (ADR-0056)
+// §3.1: file_write reports what the written file declares (ADR-0055)
 // ===========================================================================
 
 /// Names in a list of declarations: `[{name, …}]` or plain strings.
@@ -894,7 +697,7 @@ fn file_write_of_a_nested_script_notes_that_it_is_not_discovered() {
     // the result carries a `note` saying which locations are discovered.
     let p = small_project("mcp-note");
     // A running service, so the status below can wait for discovery
-    // (ADR-0056); the MCP server uses it (AG-MC-01).
+    // (ADR-0055); the MCP server uses it (AG-MC-01).
     let s = Service::start(&p);
     let mut mcp = Mcp::open(&p);
     let part = "part(\"Nested\", #{}, |deps| box(4, 4, 4));\n";
@@ -1306,7 +1109,7 @@ fn ag_mc_05_resources_serve_the_reference_the_guide_and_examples() {
     assert_eq!(text.trim(), SCRIPT_API.trim());
     // The guide resource is the guide tool.
     let (_, guide) = read_resource(&mut mcp, "qoob3d://guide");
-    assert_eq!(guide.trim(), text_of(&mcp.call("guide", &json!({}))).trim());
+    assert_eq!(guide.trim(), mcp.call("guide", &json!({})).text().trim());
 
     // One resource per example script, each readable and a script.
     let examples: Vec<&str> =
@@ -1333,7 +1136,7 @@ fn ag_mc_05_resources_serve_the_reference_the_guide_and_examples() {
 fn ag_mc_06_07_the_guide_fits_120_lines_and_names_the_loop() {
     let p = small_project("mcp-guide");
     let mut mcp = Mcp::open(&p);
-    let guide = text_of(&mcp.call("guide", &json!({})));
+    let guide = mcp.call("guide", &json!({})).text();
     let lines = guide.trim().lines().count();
     // AG-MC-07 raised the bound of AG-MC-06 from 60 to 120 lines.
     assert!((10..=120).contains(&lines), "the guide has {lines} lines (at most 120)");
@@ -1457,7 +1260,7 @@ fn part_states(mcp: &mut Mcp) -> Vec<(String, String)> {
 }
 
 #[test]
-fn r4_acceptance_an_agent_builds_box_and_lid_over_mcp_and_the_human_sets_done() {
+fn acceptance_an_agent_builds_box_and_lid_over_mcp_and_the_human_sets_done() {
     // The human's side: an empty project in Git with one task file.
     let p = Project::new("box-with-lid", "");
     p.write(TASK_FILE, TASK);
@@ -1505,7 +1308,7 @@ fn accept_take_the_task(mcp: &mut Mcp) {
     // Nothing exists yet: the gate names both parts and both checks.
     gate_refuses(mcp, &["Box", "Lid", "pin_clearance", "lid_volume"], "review before any work");
 
-    let reference = text_of(&mcp.call("api_reference", &json!({"search": "pin"})));
+    let reference = mcp.call("api_reference", &json!({"search": "pin"})).text();
     assert!(
         reference.contains("`pin(d, l) -> Shape`") && reference.contains("`hole(d, l, clearance)")
     );

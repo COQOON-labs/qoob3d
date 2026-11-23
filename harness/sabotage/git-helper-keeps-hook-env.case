@@ -1,5 +1,5 @@
 # The shared git helper no longer removes the variables a git hook exports, so
-# xtask's git calls from a hook could mean another repository (ADR-0048)
+# xtask's git calls from a hook could mean another repository (ADR-0037)
 command: cargo test -p xtask --quiet git_command_removes_the_hook_git_environment
 expect: git_command_removes_the_hook_git_environment
 --- patch

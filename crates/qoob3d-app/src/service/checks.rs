@@ -53,7 +53,7 @@ pub(crate) struct CheckRecord {
     parts: BTreeMap<String, Option<String>>,
 }
 
-/// All checks of the check files `files` (discovered, ADR-0056), by file
+/// All checks of the check files `files` (discovered, ADR-0055), by file
 /// and call order. A file under rediscovery contributes its last checks.
 ///
 /// # Errors

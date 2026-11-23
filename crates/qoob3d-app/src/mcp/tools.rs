@@ -394,7 +394,7 @@ impl Server {
     /// `file_write`; a part or check file comes back with what it declares
     /// (`declared: {parts, checks}`) or its `load_error`, a `lib/` file with
     /// the `load_errors` of all files, once the service has discovered them
-    /// (ADR-0056). So `/status` shows the new parts afterwards. A script in a
+    /// (ADR-0055). So `/status` shows the new parts afterwards. A script in a
     /// sub folder of `parts/` or `checks/` gets a `note` instead.
     fn file_write(&self, path: &str, content: &str) -> Result<Reply, Refusal> {
         let mut result = files::write(self.project.dir(), path, content).map_err(bad_request)?;

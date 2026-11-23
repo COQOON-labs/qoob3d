@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+use qoob3d_core::project::layout;
 use qoob3d_core::qmesh;
 use serde_json::{Value, json};
 
@@ -43,7 +44,7 @@ pub(super) fn run(dir: &Path) -> Answer {
         return Err(e.clone().into());
     }
     let exe = std::env::current_exe().map_err(|e| Failure::new(500, ErrorKind::Io, e))?;
-    let cache = dir.join(".qoob3d").join(format!("bench-{}", std::process::id()));
+    let cache = layout::data_dir(dir).join(format!("bench-{}", std::process::id()));
     let result = measure(dir, &snapshot, &exe, &cache);
     std::fs::remove_dir_all(&cache).ok();
     result

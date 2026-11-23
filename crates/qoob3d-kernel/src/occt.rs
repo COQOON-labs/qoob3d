@@ -1,4 +1,4 @@
-//! cxx bridge to QOOB3D's own OCCT wrappers in `cpp/` (ADR-0014).
+//! cxx bridge to QOOB3D's own OCCT wrappers in `cpp/` (ADR-0004).
 #![expect(
     unsafe_code,
     unreachable_pub,
@@ -24,7 +24,7 @@ pub(crate) mod ffi {
         edge_starts: Vec<u32>,
     }
 
-    /// Sketch curves in the local plane (ADR-0028): lines `x0 y0 x1 y1`,
+    /// Sketch curves in the local plane (ADR-0004): lines `x0 y0 x1 y1`,
     /// circles `cx cy r`, arcs `cx cy r a0 a1` (CCW, radians).
     struct Qoob3dCurves {
         lines: Vec<f64>,

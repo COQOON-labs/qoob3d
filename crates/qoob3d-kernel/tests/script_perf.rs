@@ -1,4 +1,4 @@
-//! Performance package P1, kernel side (docs/requirements/agent.md §5):
+//! Performance, kernel side (docs/requirements/agent.md §5):
 //! AG-PF-01 (batched booleans in parallel mode keep their results) and
 //! AG-PF-02 (profile algebra, the 1000-hole plate and its speed-up).
 //!
@@ -21,15 +21,16 @@
 //! times, and a neighbour test running OCCT on the other cores would distort
 //! the ratio.
 
+mod common;
+
 use std::f64::consts::PI;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use qoob3d_kernel::script::{RunOptions, RunOutput, ScriptError, Shape, run};
+use common::{VOL, assert_bbox, assert_rel, printed, run_err, run_ok, shape, src};
+use qoob3d_kernel::script::{RunOutput, ScriptError};
 
-const VOL: f64 = 1e-6;
 const SAME: f64 = 1e-9;
-const POS: f64 = 1e-6;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -43,67 +44,12 @@ fn serial() -> MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn src(lines: &[&str]) -> String {
-    lines.join("\n")
-}
-
-fn run_ok(source: &str) -> RunOutput {
-    run(source, &RunOptions::default())
-        .unwrap_or_else(|e| panic!("script failed: {e:?}\n--- script ---\n{source}"))
-}
-
-fn run_err(source: &str) -> ScriptError {
-    match run(source, &RunOptions::default()) {
-        Ok(out) => panic!(
-            "script must fail but returned {} shapes, printed {:?}\n{source}",
-            out.shapes.len(),
-            out.printed
-        ),
-        Err(e) => e,
-    }
-}
-
-fn shape<'a>(out: &'a RunOutput, name: &str) -> &'a Shape {
-    &out.shapes
-        .iter()
-        .find(|(n, _)| n == name)
-        .unwrap_or_else(|| {
-            panic!(
-                "no shape {name:?}, have {:?}",
-                out.shapes.iter().map(|s| &s.0).collect::<Vec<_>>()
-            )
-        })
-        .1
-}
-
-fn assert_rel(actual: f64, expected: f64, tol: f64, what: &str) {
-    let rel = (actual - expected).abs() / expected.abs();
-    assert!(rel < tol, "{what}: got {actual}, expected {expected} (rel {rel:e} >= {tol:e})");
-}
-
 /// Valid, `solids` solids, volume to `tol` relative.
 fn assert_solid(out: &RunOutput, name: &str, expected: f64, solids: usize, tol: f64) {
     let s = shape(out, name);
     assert!(s.is_valid(), "{name} is not a valid solid");
     assert_eq!(s.solid_count(), solids, "solids of {name}");
     assert_rel(s.volume(), expected, tol, &format!("volume of {name}"));
-}
-
-fn assert_bbox(out: &RunOutput, name: &str, min: [f64; 3], max: [f64; 3]) {
-    let (a, b) = shape(out, name).bbox();
-    for i in 0..3 {
-        assert!(
-            (a[i] - min[i]).abs() < POS && (b[i] - max[i]).abs() < POS,
-            "bbox of {name}: got {a:?}..{b:?}, expected {min:?}..{max:?}"
-        );
-    }
-}
-
-/// Printed line `i` as a number (Rhai prints floats round-trip exact).
-fn printed(out: &RunOutput, i: usize) -> f64 {
-    let line =
-        out.printed.get(i).unwrap_or_else(|| panic!("no printed line {i}: {:?}", out.printed));
-    line.trim().parse().unwrap_or_else(|e| panic!("printed line {i} {line:?} is no number: {e}"))
 }
 
 /// Unit-free square polygon `[x0, x1] × [y0, y1]` as script text.

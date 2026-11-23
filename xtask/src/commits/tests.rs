@@ -4,10 +4,10 @@ use std::process::Command;
 
 use super::*;
 
-/// The identity in `harness/identity.txt` (spec section 2, ADR-0044).
+/// The identity in `harness/identity.txt` (spec section 2, ADR-0037).
 const ALLOWED: &str = "Benjamin Gr\u{f6}ner <bgroener@coqoon.com>";
 
-// ADR-0038: a `…-by:` trailer naming an AI tool is rejected, case-insensitively.
+// ADR-0037: a `…-by:` trailer naming an AI tool is rejected, case-insensitively.
 #[test]
 fn rejects_ai_trailers() {
     for line in [
@@ -31,7 +31,7 @@ fn rejects_ai_trailers() {
     }
 }
 
-// ADR-0038: a "generated with/by" note naming an AI tool is rejected.
+// ADR-0037: a "generated with/by" note naming an AI tool is rejected.
 #[test]
 fn rejects_generated_by_ai() {
     for line in [
@@ -45,7 +45,7 @@ fn rejects_generated_by_ai() {
     }
 }
 
-// ADR-0038: the robot emoji is rejected on its own; one problem per line even
+// ADR-0037: the robot emoji is rejected on its own; one problem per line even
 // if a line matches several rules.
 #[test]
 fn rejects_robot_emoji_once_per_line() {
@@ -54,7 +54,7 @@ fn rejects_robot_emoji_once_per_line() {
     assert_eq!(check_message(message).len(), 1);
 }
 
-// ADR-0038: one problem per offending line.
+// ADR-0037: one problem per offending line.
 #[test]
 fn counts_each_offending_line() {
     let message = "Add export\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n\
@@ -62,7 +62,7 @@ fn counts_each_offending_line() {
     assert_eq!(check_message(message).len(), 2);
 }
 
-// ADR-0038 (rejected alternative): mentioning an AI in normal text, human
+// ADR-0037 (rejected alternative): mentioning an AI in normal text, human
 // co-authors and trailers without an AI are fine.
 #[test]
 fn accepts_normal_messages() {
@@ -81,14 +81,14 @@ fn accepts_normal_messages() {
     }
 }
 
-// ADR-0038: a trailer key has no spaces; a prose line ending in "by:" is not
+// ADR-0037: a trailer key has no spaces; a prose line ending in "by:" is not
 // a trailer (and does not say "generated").
 #[test]
 fn trailer_keys_have_no_spaces() {
     assert!(check_message("Add docs\n\nThanks to reviewed by: Claude\n").is_empty());
 }
 
-// ADR-0044 (spec section 2): the first line that is neither empty nor a `#`
+// ADR-0037 (spec section 2): the first line that is neither empty nor a `#`
 // comment, trimmed, is the allowed identity.
 #[test]
 fn allowed_identity_is_first_non_comment_line() {
@@ -104,7 +104,7 @@ fn allowed_identity_is_first_non_comment_line() {
     }
 }
 
-// ADR-0044 (spec section 2): the repository file names the project identity.
+// ADR-0037 (spec section 2): the repository file names the project identity.
 #[test]
 fn repository_identity_file_names_the_owner() {
     assert_eq!(IDENTITY_FILE, "harness/identity.txt");
@@ -112,7 +112,7 @@ fn repository_identity_file_names_the_owner() {
     assert_eq!(allowed_identity(text), Some(ALLOWED.to_owned()));
 }
 
-// ADR-0044 (spec section 2): the exact allowed identity passes, also with
+// ADR-0037 (spec section 2): the exact allowed identity passes, also with
 // surrounding whitespace (compared after trimming).
 #[test]
 fn project_identity_passes() {
@@ -123,7 +123,7 @@ fn project_identity_passes() {
     }
 }
 
-// ADR-0044 (spec section 2): any other identity, also with the same name or
+// ADR-0037 (spec section 2): any other identity, also with the same name or
 // the same mail, is one problem naming role, identity and allowed identity.
 #[test]
 fn other_identities_are_rejected() {
@@ -145,7 +145,7 @@ fn other_identities_are_rejected() {
     }
 }
 
-// ADR-0038/ADR-0044 (spec section 2): an AI identity is "an AI tool" and, if it
+// ADR-0037 (spec section 2): an AI identity is "an AI tool" and, if it
 // differs from the allowed one, also "not the project identity".
 #[test]
 fn ai_identities_are_rejected() {
@@ -166,7 +166,7 @@ fn ai_identities_are_rejected() {
     assert!(problems[0].contains("author `Copilot Bot <bot@example.com>` is an AI tool"));
 }
 
-// ADR-0044 (spec section 2): `git var GIT_AUTHOR_IDENT` output → `Name <mail>`.
+// ADR-0037 (spec section 2): `git var GIT_AUTHOR_IDENT` output → `Name <mail>`.
 #[test]
 fn ident_name_email_strips_timestamp() {
     assert_eq!(ident_name_email("Name <mail> 1700000000 +0200"), "Name <mail>");
@@ -212,7 +212,7 @@ fn commit_as(root: &Path, file: &str, author: (&str, &str), committer: (&str, &s
     git_in(root, &env, &["commit", "-q", "-m", &format!("Add {file}")]);
 }
 
-// ADR-0044 (spec section 2): `check_range` checks author and committer of every
+// ADR-0037 (spec section 2): `check_range` checks author and committer of every
 // commit against `harness/identity.txt`.
 #[test]
 fn check_range_rejects_foreign_author_and_committer() {
@@ -237,7 +237,7 @@ fn check_range_rejects_foreign_author_and_committer() {
     fs::remove_dir_all(&root).unwrap();
 }
 
-// ADR-0044 (spec section 2): without an identity line the range fails with one
+// ADR-0037 (spec section 2): without an identity line the range fails with one
 // problem naming the file.
 #[test]
 fn check_range_without_identity_file_fails() {

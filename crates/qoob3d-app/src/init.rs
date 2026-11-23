@@ -7,11 +7,10 @@
 use std::path::Path;
 
 use anyhow::{Context as _, bail};
+use qoob3d_core::project::layout;
 
-/// Folders of a project (AG-PJ-01, ADR-0054).
-const FOLDERS: [&str; 5] = ["parts", "lib", "values", "checks", "tasks"];
 /// What Git must not track: service data and generated output.
-const IGNORED: [&str; 2] = [".qoob3d/", "out/"];
+const IGNORED: [&str; 2] = [layout::DATA_DIR, layout::OUT_DIR];
 /// `(path, content)` of the files the reference examples import; the master
 /// copies live beside the reference.
 const EXAMPLES: [(&str, &[u8]); 2] = [
@@ -24,11 +23,11 @@ const EXAMPLES: [(&str, &[u8]); 2] = [
 /// # Errors
 /// `dir` already has `qoob3d.toml`, or a folder or file cannot be written.
 pub fn run(dir: &Path) -> anyhow::Result<()> {
-    let config = dir.join("qoob3d.toml");
+    let config = dir.join(layout::CONFIG_FILE);
     if config.exists() {
         bail!("{} already is a QOOB3D project (qoob3d.toml exists)", dir.display());
     }
-    for folder in FOLDERS {
+    for folder in layout::FOLDERS {
         let path = dir.join(folder);
         std::fs::create_dir_all(&path).with_context(|| format!("creating {}", path.display()))?;
     }
@@ -52,12 +51,12 @@ pub fn run(dir: &Path) -> anyhow::Result<()> {
 
     let ignore = dir.join(".gitignore");
     let mut lines = std::fs::read_to_string(&ignore).unwrap_or_default();
-    for entry in IGNORED {
+    for entry in IGNORED.map(|folder| format!("{folder}/")) {
         if !lines.lines().any(|l| l.trim().trim_start_matches('/') == entry) {
             if !lines.is_empty() && !lines.ends_with('\n') {
                 lines.push('\n');
             }
-            lines.push_str(entry);
+            lines.push_str(&entry);
             lines.push('\n');
         }
     }

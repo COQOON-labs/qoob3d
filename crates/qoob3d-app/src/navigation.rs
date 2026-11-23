@@ -10,7 +10,7 @@
 //! | Trackpad: two-finger swipe      | Pan                                      |
 //! | Trackpad: Shift + two fingers   | Orbit around the point under the cursor  |
 //! | Trackpad: pinch                 | Zoom towards the cursor                  |
-//! | Left drag / three-finger drag   | Orbit (setting, default on; ADR-0022)    |
+//! | Left drag / three-finger drag   | Orbit (setting, default on; ADR-0008)    |
 
 use eframe::egui::{self, CursorIcon, Event, MouseWheelUnit, PointerButton, Pos2, Rect, Response};
 use glam::{Vec2, Vec3};

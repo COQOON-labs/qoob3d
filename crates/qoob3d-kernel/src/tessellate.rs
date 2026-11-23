@@ -1,5 +1,5 @@
 //! Conversion of OCCT shapes into [`ShapeMesh`]es via our own C++ mesher
-//! (`cpp/qoob3d_occt.cpp`, ADR-0014): face ids per triangle, correctly
+//! (`cpp/qoob3d_occt.cpp`, ADR-0004): face ids per triangle, correctly
 //! oriented normals and feature edges that lie exactly on the faces.
 
 use qoob3d_core::{Polylines, ShapeMesh, TriMesh};

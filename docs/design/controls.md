@@ -1,7 +1,7 @@
 # Controls
 
 Descriptive specification. Decisions and rationale: ADR-0008 (navigation),
-ADR-0015 (ViewCube, overlays), ADR-0017 (pivot via raycast), ADR-0022 (left-drag orbit).
+ADR-0019 (ViewCube, overlays), ADR-0008 (pivot via raycast), ADR-0008 (left-drag orbit).
 Project behaviour: `docs/requirements/project-app.md`.
 
 ## Viewport navigation (1:1 Fusion 360)

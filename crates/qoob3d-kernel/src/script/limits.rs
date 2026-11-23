@@ -1,6 +1,6 @@
 //! Size limits of declaration discovery (docs/requirements/agent.md
 //! AG-HD-02): a file that doubles a string forty times at its top level gets
-//! a clear load error with its line. Discovery runs in a worker (ADR-0056),
+//! a clear load error with its line. Discovery runs in a worker (ADR-0055),
 //! whose memory limit stops what the measurements below do not see.
 //!
 //! Rhai's own size limits check what a function call returns or changes. An
@@ -10,7 +10,7 @@
 //! `STAGE_OPERATIONS`, from the start each time (Rhai cannot resume a run),
 //! and after every stage the variables are measured. Doubling keeps the
 //! total cost below twice the last stage, linear in the operations of the
-//! script (ADR-0056); a loop can pile up unseen what fits between two
+//! script (ADR-0055); a loop can pile up unseen what fits between two
 //! measurements, which the worker's memory limit bounds. A script that fits
 //! the first stage costs nothing extra.
 //! A measurement notices the growth after the statement that caused it;

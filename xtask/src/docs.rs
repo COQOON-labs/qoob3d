@@ -16,7 +16,7 @@ const REQUIRED_KEYS: &[&str] =
     &["id", "title", "status", "date", "crates", "tags", "supersedes", "superseded_by"];
 const REQUIRED_SECTIONS: &[&str] = &["## Context", "## Decision", "## Consequences"];
 const KNOWN_CRATES: &[&str] =
-    &["qoob3d-core", "qoob3d-kernel", "qoob3d-render", "qoob3d-sketch", "qoob3d-app", "xtask"];
+    &["qoob3d-core", "qoob3d-kernel", "qoob3d-render", "qoob3d-app", "xtask"];
 const INDEX_START: &str = "<!-- adr-index:start";
 const INDEX_END: &str = "<!-- adr-index:end -->";
 /// File types scanned for `ADR-NNNN` references.

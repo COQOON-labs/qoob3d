@@ -17,7 +17,7 @@ all other crates.
 ## Files
 
 - `src/mesh.rs`: `ShapeMesh` (faces + edges), `TriMesh` (with `face_ids`), `Polylines`,
-  `Aabb`, `MeshReport` (watertight/manifold, volume; ADR-0013), `raycast` (ADR-0017).
+  `Aabb`, `MeshReport` (watertight/manifold, volume; ADR-0013), `raycast` (ADR-0008).
 - `src/export.rs`: STL, 3MF, ZIP writer/reader with CRC-32 (ADR-0034).
 - `src/qmesh.rs`: indexed mesh transfer format service → app (WA-QM-*, ADR-0053); the reader
   checks sizes against the input before allocating.
@@ -25,7 +25,9 @@ all other crates.
 - `src/project/`: script project folder (AG-PJ-01..04, ADR-0053): `qoob3d.toml` (limits, workers
   with `recycle_mb`, `[cache] keep`, `[mesh]`; AG-PF-03..05; limits are finite and bounded,
   AG-HD-01), `values/*.toml` with mandatory source/status and optional `unit`, imports (never
-  outside the project), build graph, cache key.
+  outside the project), build graph, cache key. `layout.rs` spells the names of the project
+  (`qoob3d.toml`, the agent folders, `.qoob3d/` with `service.json`, the lock and the cache,
+  `out/`); nobody else writes these literals.
 - `src/tasks/`: task inbox (AG-TK-01..07, ADR-0054): `tasks/NNNN-slug.md` with TOML header, body
   and `## Log`; `create` (holds an OS lock on `tasks/` while it picks the number), `update`,
   `bind` and `apply` (`Change`: lists, state and note in one byte-preserving, atomic write;
@@ -39,4 +41,4 @@ all other crates.
 
 ## Relevant ADRs
 
-ADR-0036, ADR-0006, ADR-0013, ADR-0017, ADR-0021, ADR-0034, ADR-0053, ADR-0054
+ADR-0036, ADR-0006, ADR-0013, ADR-0008, ADR-0021, ADR-0034, ADR-0053, ADR-0054

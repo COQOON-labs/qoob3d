@@ -8,6 +8,7 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use qoob3d_core::project::layout;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -16,7 +17,7 @@ use super::{Answer, Failure, Service, body, unknown_job};
 use crate::worker::ErrorKind;
 
 /// Never part of a save: service data and generated output.
-const EXCLUDED: [(&str, &str); 2] = [(".qoob3d", ":(exclude).qoob3d"), ("out", ":(exclude)out")];
+const EXCLUDED: [&str; 2] = [layout::DATA_DIR, layout::OUT_DIR];
 
 #[derive(Deserialize)]
 struct SaveBody {
@@ -89,19 +90,22 @@ impl Service {
         // anyway, so its exclusion is left out there.
         let mut add = vec!["add", "--all", "--", "."];
         // Ignored paths are listed as `!! <folder>/`.
-        let listed =
-            git(&self.dir, &["status", "--porcelain", "--ignored", "--", ".qoob3d", "out"])?;
+        let listed = git(
+            &self.dir,
+            &["status", "--porcelain", "--ignored", "--", EXCLUDED[0], EXCLUDED[1]],
+        )?;
         let ignored = |folder: &str| {
             listed
                 .lines()
                 .any(|l| l.strip_prefix("!! ").is_some_and(|p| p.trim_end_matches('/') == folder))
         };
+        let excludes = EXCLUDED.map(|folder| format!(":(exclude){folder}"));
         add.extend(
-            EXCLUDED.iter().filter(|(folder, _)| !ignored(folder)).map(|(_, exclude)| exclude),
+            EXCLUDED.iter().zip(&excludes).filter(|(f, _)| !ignored(f)).map(|(_, e)| e.as_str()),
         );
         git(&self.dir, &add)?;
         let mut commit = vec!["commit", "--quiet", "--message", &request.message, "--", "."];
-        commit.extend(EXCLUDED.iter().map(|(_, exclude)| exclude));
+        commit.extend(excludes.iter().map(String::as_str));
         git(&self.dir, &commit)?;
         let commit = git(&self.dir, &["log", "-1", "--format=%H"])?;
         Ok(json!({"commit": commit}))

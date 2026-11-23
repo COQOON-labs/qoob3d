@@ -1,4 +1,4 @@
-# German text with umlauts outside locales/de/ (ADR-0045)
+# German text with umlauts outside locales/de/ (ADR-0001)
 command: cargo xtask hygiene
 expect: is not English
 --- patch

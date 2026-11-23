@@ -1,6 +1,6 @@
 # docs.rs spawns git itself instead of using the shared git helper, so a
 # GIT_DIR exported by a hook would point it at another repository (one git
-# helper for every xtask module, ADR-0048; critic K-13 on bd0fade)
+# helper for every xtask module, ADR-0037; critic K-13 on bd0fade)
 command: cargo test -p xtask --quiet no_module_but_main_spawns_git_itself
 expect: docs.rs builds its own git command
 --- patch

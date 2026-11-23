@@ -1,5 +1,5 @@
 //! The 3D viewport widget: offscreen scene (ADR-0019) plus egui overlays –
-//! ViewCube, navigation bar, orbit pivot marker, status line (ADR-0015).
+//! ViewCube, navigation bar, orbit pivot marker, status line (ADR-0019).
 
 use eframe::egui::{
     self, Align2, Color32, FontId, Id, Pos2, Rect, RichText, Sense, Stroke, TextureId, pos2, vec2,
@@ -143,7 +143,7 @@ impl Viewport {
         self.layout = Some(ViewportLayout { rect, viewcube: viewcube_rect });
         let now = ui.input(|i| i.time);
 
-        // --- navigation (ADR-0008, ADR-0022, ADR-0027) -------------------------
+        // --- navigation (ADR-0008) ------------------------------------
         let pick = |ray: qoob3d_render::Ray| {
             scene
                 .and_then(|s| s.faces.raycast(ray.origin.to_array(), ray.dir.to_array()))
@@ -220,7 +220,7 @@ impl Viewport {
         SceneFrame { rect, now, fit_bounds }
     }
 
-    /// Orbit pivot, ViewCube, navigation bar and status line (ADR-0015).
+    /// Orbit pivot, ViewCube, navigation bar and status line (ADR-0019).
     pub fn show_overlays(
         &mut self,
         ui: &mut egui::Ui,
@@ -308,7 +308,7 @@ impl Viewport {
         fit
     }
 
-    /// Printer selection (ADR-0021, ADR-0023): search field, "my printers"
+    /// Printer selection (ADR-0021): search field, "my printers"
     /// on top, the rest grouped by vendor (hidden if the user only wants
     /// their own), markers for printers with restricted zones.
     fn printer_picker(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {

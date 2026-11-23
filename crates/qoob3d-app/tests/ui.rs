@@ -1,4 +1,4 @@
-//! Headless UI tests of the real app with egui_kittest + wgpu (ADR-0018).
+//! Headless UI tests of the real app with egui_kittest + wgpu (ADR-0013).
 //!
 //! `QOOB3D_SCREENSHOT_DIR=<dir> cargo test -p qoob3d-app --test ui` (or
 //! `cargo xtask screenshot`) additionally writes `<dir>/ui.png`, so humans
@@ -347,7 +347,7 @@ fn empty_state_offers_to_open_a_project() {
 }
 
 /// Every `.rs` file below `dir`, recursively, except unit test
-/// files named `tests.rs` (ADR-0039): production submodules can hold UI
+/// files named `tests.rs` (ADR-0037): production submodules can hold UI
 /// texts too.
 fn ui_source_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
@@ -367,7 +367,7 @@ fn ui_source_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     files
 }
 
-// ADR-0020/ADR-0039: the glyph test scans production submodules at any depth
+// ADR-0020/ADR-0037: the glyph test scans production submodules at any depth
 // (`src/a/b.rs`, `src/a/b/c.rs`) and skips only files named `tests.rs`
 // (also nested ones); non-`.rs` files are no sources.
 #[test]

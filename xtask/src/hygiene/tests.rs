@@ -4,7 +4,7 @@ use super::*;
 
 const REL: &str = "crates/qoob3d-core/src/expr.rs";
 
-// ADR-0039: `#[cfg(test)]` followed by `mod tests;` is fine, also indented
+// ADR-0037: `#[cfg(test)]` followed by `mod tests;` is fine, also indented
 // and with blank lines in between.
 #[test]
 fn accepts_out_of_line_test_module() {
@@ -21,7 +21,7 @@ fn accepts_out_of_line_test_module() {
     }
 }
 
-// ADR-0039: an inline test module is rejected with `rel:<line of the cfg>`;
+// ADR-0037: an inline test module is rejected with `rel:<line of the cfg>`;
 // since addendum F4 its `#[test]` line (5) is a problem of its own, too
 // ("every line whose trimmed start is `#[test]` … is a problem").
 #[test]
@@ -43,7 +43,7 @@ fn test_code_message(line: usize) -> String {
     format!("{REL}:{line}: test code belongs in its own file: `#[cfg(test)] mod tests;` + tests.rs")
 }
 
-// ADR-0039 (addendum F4): a bare test attribute in production code is a
+// ADR-0037 (addendum F4): a bare test attribute in production code is a
 // problem even without any `#[cfg(test)]`: `#[test]`, `#[tokio::test…`,
 // `#[should_panic…`, indented or not, with `rel:<line of the attribute>`.
 #[test]
@@ -65,7 +65,7 @@ fn f4_bare_test_attributes_are_flagged() {
     }
 }
 
-// ADR-0039 (addendum F4): each attribute line is its own problem.
+// ADR-0037 (addendum F4): each attribute line is its own problem.
 #[test]
 fn f4_every_test_attribute_line_is_reported() {
     let text =
@@ -78,7 +78,7 @@ fn f4_every_test_attribute_line_is_reported() {
     );
 }
 
-// ADR-0039 (addendum F4): only lines whose trimmed start is one of the three
+// ADR-0037 (addendum F4): only lines whose trimmed start is one of the three
 // attributes count; comments, strings and similar-looking attributes pass.
 #[test]
 fn f4_lookalikes_pass() {
@@ -95,7 +95,7 @@ fn f4_lookalikes_pass() {
     }
 }
 
-// ADR-0039 (addendum F4): `check_source` itself flags test attributes in any
+// ADR-0037 (addendum F4): `check_source` itself flags test attributes in any
 // text; it is the caller (`check`) that skips test files (`tests.rs`,
 // `tests/`).
 #[test]
@@ -108,7 +108,7 @@ fn f4_check_source_flags_regardless_of_path_and_caller_filters() {
     assert!(!paths::is_test(REL));
 }
 
-// ADR-0039: anything other than exactly `mod tests;` after the cfg line is a
+// ADR-0037: anything other than exactly `mod tests;` after the cfg line is a
 // problem, including the end of the file.
 #[test]
 fn rejects_other_test_only_items() {
@@ -123,7 +123,7 @@ fn rejects_other_test_only_items() {
     }
 }
 
-// ADR-0039 (extended): a line starting with `#[cfg(test)]` is fine only if the
+// ADR-0037 (extended): a line starting with `#[cfg(test)]` is fine only if the
 // rest of that line is exactly `mod tests;`; any other rest is one problem
 // with `rel:<line>`, regardless of what follows on the next line.
 #[test]
@@ -148,7 +148,7 @@ fn single_line_cfg_test_must_declare_mod_tests() {
     }
 }
 
-// ADR-0039: one problem per offending cfg line, each with its own line number.
+// ADR-0037: one problem per offending cfg line, each with its own line number.
 #[test]
 fn reports_every_offending_line() {
     let text =
@@ -159,7 +159,7 @@ fn reports_every_offending_line() {
     assert!(problems.iter().any(|p| p.contains(&format!("{REL}:5"))), "{problems:?}");
 }
 
-// ADR-0040: a crate manifest must inherit the workspace lints.
+// ADR-0037: a crate manifest must inherit the workspace lints.
 #[test]
 fn manifest_inherits_workspace_lints() {
     let ok = "[package]\nname = \"x\"\n\n[lints]\nworkspace = true\n\n[dependencies]\nserde_json = \"1\"\n";
@@ -168,7 +168,7 @@ fn manifest_inherits_workspace_lints() {
     assert!(check_manifest("crates/x/Cargo.toml", last).is_empty());
 }
 
-// ADR-0040: missing `[lints]`, `workspace = false`, `workspace = true` in
+// ADR-0037: missing `[lints]`, `workspace = false`, `workspace = true` in
 // another section, or only `[workspace.lints]` → exactly one problem.
 #[test]
 fn manifest_without_inherited_lints() {
@@ -185,7 +185,7 @@ fn manifest_without_inherited_lints() {
     }
 }
 
-// ADR-0040: every `expect` attribute counts, outer and inner, indented or
+// ADR-0037: every `expect` attribute counts, outer and inner, indented or
 // not; `allow`, comments and string mentions do not count.
 // Changed with the "count suppressed lints" spec: an attribute that does not
 // start its line (`fn a() {} #[expect(dead_code)]`) used to count 0; it is a
@@ -220,7 +220,7 @@ fn assert_counts(cases: &[(&str, usize)]) {
     }
 }
 
-// ADR-0040 (count suppressed lints): the ratchet counts lints, not attribute
+// ADR-0037 (count suppressed lints): the ratchet counts lints, not attribute
 // lines. Each lint argument of `expect(…)` is one suppression, a lint path
 // (`clippy::too_many_lines`) is one lint, `reason = …` is no lint, and commas
 // or parentheses inside the reason string are part of the string.
@@ -245,7 +245,7 @@ fn counts_every_lint_of_an_expect_attribute() {
     ]);
 }
 
-// ADR-0040 (count suppressed lints): `cfg_attr(<predicate>, attr, …)` applies
+// ADR-0037 (count suppressed lints): `cfg_attr(<predicate>, attr, …)` applies
 // its attributes conditionally; every `expect` among them counts with its
 // lints, also nested. The predicate (with its own commas and parentheses) is
 // no attribute, even when a cfg option is called `expect`.
@@ -269,7 +269,7 @@ fn counts_expect_inside_cfg_attr() {
     ]);
 }
 
-// ADR-0040 (count suppressed lints): an attribute is a token sequence, so it
+// ADR-0037 (count suppressed lints): an attribute is a token sequence, so it
 // counts across lines and with whitespace between any two tokens. The inner
 // attribute of crates/qoob3d-kernel/src/occt.rs (2 lints, a reason with a
 // string continuation and `(ADR-0004),`) and the outer one of
@@ -277,7 +277,7 @@ fn counts_expect_inside_cfg_attr() {
 #[test]
 fn counts_attributes_spread_over_lines_and_whitespace() {
     let occt = concat!(
-        "//! cxx bridge to QOOB3D's own OCCT wrappers in `cpp/` (ADR-0014).\n",
+        "//! cxx bridge to QOOB3D's own OCCT wrappers in `cpp/` (ADR-0004).\n",
         "#![expect(\n",
         "    unsafe_code,\n",
         "    unreachable_pub,\n",
@@ -308,7 +308,7 @@ fn counts_attributes_spread_over_lines_and_whitespace() {
     ]);
 }
 
-// ADR-0040 (count suppressed lints): text inside string literals (normal,
+// ADR-0037 (count suppressed lints): text inside string literals (normal,
 // with escaped quotes, raw with any number of `#`, byte and raw byte strings)
 // is no attribute; an attribute right after the literal ends counts.
 #[test]
@@ -336,7 +336,7 @@ fn ignores_expect_inside_string_literals() {
     ]);
 }
 
-// ADR-0040 (count suppressed lints): line comments (`//`, `///`, `//!`) and
+// ADR-0037 (count suppressed lints): line comments (`//`, `///`, `//!`) and
 // block comments (also nested and doc block comments) hide attributes; a
 // line comment ends at the newline, a block comment at its matching `*/`,
 // and a quote inside a comment opens no string.
@@ -362,7 +362,7 @@ fn ignores_expect_inside_comments() {
     ]);
 }
 
-// ADR-0040 (count suppressed lints): `allow` is rejected by clippy separately
+// ADR-0037 (count suppressed lints): `allow` is rejected by clippy separately
 // and is no suppression here; the word `expect` outside an expect attribute
 // (method calls, other attribute names, arguments of other attributes,
 // identifiers) does not count.
@@ -383,7 +383,7 @@ fn other_attributes_and_the_word_expect_do_not_count() {
     ]);
 }
 
-// ADR-0040 (count suppressed lints): a char literal is no string, so a `"`
+// ADR-0037 (count suppressed lints): a char literal is no string, so a `"`
 // inside one opens nothing, and a lifetime is no char literal; attributes
 // after them count.
 #[test]
@@ -401,7 +401,7 @@ fn char_literals_and_lifetimes_open_no_string() {
     ]);
 }
 
-// ADR-0040 (spec section 4.3): exceeding the ratchet is one problem with the
+// ADR-0037 (spec section 4.3): exceeding the ratchet is one problem with the
 // count, the limit and the file.
 #[test]
 fn ratchet_message_is_english() {
@@ -427,11 +427,11 @@ const O_UMLAUT: char = '\u{f6}';
 fn language_message(rel: &str, line: usize, c: char) -> String {
     format!(
         "{rel}:{line}: `{c}` is not English \u{2013} the repository is English, German only in \
-         locales/de/ (ADR-0045, harness/language-allowlist.txt)"
+         locales/de/ (ADR-0001, harness/language-allowlist.txt)"
     )
 }
 
-// ADR-0045 (spec section 4.1): `path:` and `word:` entries, trimmed; comments
+// ADR-0001 (spec section 4.1): `path:` and `word:` entries, trimmed; comments
 // and blank lines are ignored.
 #[test]
 fn parses_language_allowlist() {
@@ -454,7 +454,7 @@ fn parses_language_allowlist() {
     assert_eq!(parse_allowlist("# only comments\n\n"), Allowlist::default());
 }
 
-// ADR-0045 (spec section 4.1): every forbidden character is flagged with
+// ADR-0001 (spec section 4.1): every forbidden character is flagged with
 // `path:line` and the character.
 #[test]
 fn german_characters_are_flagged() {
@@ -466,7 +466,7 @@ fn german_characters_are_flagged() {
     }
 }
 
-// ADR-0045 (spec section 4.1): one problem per offending line, naming the
+// ADR-0001 (spec section 4.1): one problem per offending line, naming the
 // first forbidden character of that line.
 #[test]
 fn one_problem_per_line_with_first_character() {
@@ -478,7 +478,7 @@ fn one_problem_per_line_with_first_character() {
     );
 }
 
-// ADR-0045 (spec section 4.1): ASCII and other non-ASCII characters
+// ADR-0001 (spec section 4.1): ASCII and other non-ASCII characters
 // (typography, math, units, accents) are fine.
 #[test]
 fn other_characters_pass() {
@@ -488,7 +488,7 @@ fn other_characters_pass() {
     assert!(check_language("docs/a.md", "", &Allowlist::default()).is_empty());
 }
 
-// ADR-0045 (spec section 4.1): a path entry ending in `/` allowlists every
+// ADR-0001 (spec section 4.1): a path entry ending in `/` allowlists every
 // file below it, any other entry exactly that file.
 #[test]
 fn allowlisted_paths_pass() {
@@ -522,7 +522,7 @@ fn allowlisted_paths_pass() {
     }
 }
 
-// ADR-0045 (spec section 4.1): allowlisted words are removed from the line
+// ADR-0001 (spec section 4.1): allowlisted words are removed from the line
 // before the check; other forbidden characters on the same line still count.
 #[test]
 fn allowlisted_words_pass() {
@@ -562,7 +562,7 @@ fn codeowners_message(entry: &str) -> String {
     format!(".github/CODEOWNERS has no owner line for harness path `{entry}`")
 }
 
-// ADR-0044 (spec section 4.2): a file with an owner line for every harness
+// ADR-0037 (spec section 4.2): a file with an owner line for every harness
 // entry passes.
 #[test]
 fn complete_codeowners_passes() {
@@ -574,7 +574,7 @@ fn complete_codeowners_passes() {
     assert!(check_codeowners(literal).is_empty(), "{:?}", check_codeowners(literal));
 }
 
-// ADR-0044 (spec section 4.2): a missing line, a commented-out line, a line
+// ADR-0037 (spec section 4.2): a missing line, a commented-out line, a line
 // without owner or a different first token do not cover the entry.
 #[test]
 fn incomplete_codeowners_is_flagged() {
@@ -614,7 +614,7 @@ fn put(root: &Path, rel: &str, content: &[u8]) {
     fs::write(path, content).unwrap();
 }
 
-// ADR-0045 (spec section 4.1): `check` scans tracked and untracked files that
+// ADR-0001 (spec section 4.1): `check` scans tracked and untracked files that
 // are not ignored, skips files that are not UTF-8 and honours the allowlist.
 #[test]
 fn check_scans_versioned_text_files() {
@@ -644,7 +644,7 @@ fn check_scans_versioned_text_files() {
     fs::remove_dir_all(&root).unwrap();
 }
 
-// ADR-0044 (spec section 4.2): `check` reports a missing CODEOWNERS file.
+// ADR-0037 (spec section 4.2): `check` reports a missing CODEOWNERS file.
 #[test]
 fn check_reports_missing_codeowners() {
     let root =

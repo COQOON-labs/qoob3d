@@ -23,7 +23,7 @@ scripts; an AI agent works on it over MCP, the human gives tasks and accepts res
 | Style register (binding taste decisions) | `docs/design/code-style.md` |
 
 Stack: Rust 1.99 (Edition 2024, `rust-toolchain.toml`) · OpenCascade 7.8.1 via a fork of
-`opencascade-sys` 0.3.0 in `third_party/` (ADR-0047) + own cxx wrappers (ADR-0014) ·
+`opencascade-sys` 0.3.0 in `third_party/` (ADR-0004) + own cxx wrappers (ADR-0004) ·
 Rhai 1.27 (script language, ADR-0053) · eframe/egui 0.36.2 · wgpu 30 (only via `qoob3d_render::wgpu`) · glam 0.34 · egui_kittest (tests).
 
 ## Commands
@@ -39,7 +39,7 @@ cargo xtask commits main..HEAD              # commit policy: identity, no AI att
 cargo xtask docs [--fix]                    # docs lint; --fix regenerates the ADR index
 cargo xtask i18n                            # translations complete, no hard-coded UI texts
 cargo xtask printers <orca>/resources/profiles  # regenerate the printer database (ADR-0021)
-cargo xtask models                          # reference project models/: build, checks, 3MF/STL exports (ADR-0033)
+cargo xtask models                          # reference project models/: build, checks, 3MF/STL exports (ADR-0013)
 cargo xtask screenshot                      # whole UI (egui_kittest) + reference project → target/screenshots/*.png
 cargo run -- --smoke-test                   # real app with synthetic input, exit code 0/1
 RUST_LOG=debug cargo run                    # with logging
@@ -68,7 +68,7 @@ needed (rustup is installed keg-only via Homebrew).
    is in Git. Reference the decision in code with `ADR-NNNN`.
 3. **Bugfix = a failing test first**, then the fix.
 4. **Lint exceptions only as `#[expect(lint, reason = "…")]`, `#[ignore = "reason"]`**, their
-   number is capped (ADR-0040). Never weaken assertions to get tests green.
+   number is capped (ADR-0037). Never weaken assertions to get tests green.
 5. **Never accept golden files and snapshots without asking the user.**
 6. **Crate boundaries** (ADR-0036): `core` without OCCT/GPU/UI; kernel and renderer do not know
    each other.
@@ -90,7 +90,7 @@ needed (rustup is installed keg-only via Homebrew).
 
 - **Everything in the repository is English:** code, comments, docs, CLAUDE.md files, harness,
   commit messages. The chat with the user may be German. German only in
-  `crates/qoob3d-app/locales/de/` and in tests that assert German translations (ADR-0045).
+  `crates/qoob3d-app/locales/de/` and in tests that assert German translations (ADR-0001).
 - **UI texts: English as base language, German as language pack** (ADR-0020). Never literals
   in UI code, always `tr("key")`, keys in all `crates/qoob3d-app/locales/*/main.ftl`.
 - Errors: `thiserror` in libraries, `anyhow` only in `qoob3d-app`. Logging with `tracing`.
@@ -103,14 +103,14 @@ Crate-specific pitfalls are in the respective `crates/<crate>/CLAUDE.md`.
 
 - **CMake ≥ 4** needs `CMAKE_POLICY_VERSION_MINIMUM=3.5` (`.cargo/config.toml`). Do not remove.
 - **OCCT is built once into `target/OCCT`** and skipped while the pinned version is installed
-  (ADR-0050). After compiler, flag or profile changes that should reach OCCT, delete
+  (ADR-0004). After compiler, flag or profile changes that should reach OCCT, delete
   `target/OCCT` (rebuild ~4 min).
 - **eframe 0.36:** the entry point is `App::ui(&mut self, ui, frame)`. For synthetic
   input there is `App::raw_input_hook`.
 - **egui deadlock:** no `Response`/`ctx` calls inside `ui.input(|i| …)`. In debug builds egui
   reports the deadlock only after 10 s, which is why `--smoke-test` (watchdog) catches it.
 - **C++ exceptions from OCCT** abort the process if they are not caught. Our own
-  wrappers use `guarded(...)` (ADR-0004, ADR-0014).
+  wrappers use `guarded(...)` (ADR-0004).
 - **Color space:** egui expects gamma-encoded texture samples. Render the viewport in sRGB, give
   egui a Unorm view (ADR-0019). Regression test in `crates/qoob3d-app/tests/ui.rs`.
 - **References to superseded ADRs** outside `docs/adr/` are reported as errors by the docs lint.
@@ -128,7 +128,7 @@ Crate-specific pitfalls are in the respective `crates/<crate>/CLAUDE.md`.
   `.with_step_dt(1.0 / 60.0)`. New egui areas (dialogs) are in place only after 1–2 frames;
   run a few steps before clicking.
 - **Use independent verifiers:** our own ZIP reader missed a writer bug, `unzip -t`
-  found it (ADR-0033). For file formats, always have a third-party tool check as well. If Bambu
+  found it (ADR-0013). For file formats, always have a third-party tool check as well. If Bambu
   Studio is installed (or `QOOB3D_BAMBU_STUDIO` is set), `cargo xtask models` loads every 3MF
   with `BambuStudio --info` (objects, manifold, volume).
 

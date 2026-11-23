@@ -1,4 +1,4 @@
-//! Fusion-style ViewCube (ADR-0015): drawn with egui on top of the 3D
+//! Fusion-style ViewCube (ADR-0019): drawn with egui on top of the 3D
 //! viewport. Faces, edges and corners are clickable and turn the camera to
 //! look from that direction. An edge or corner is *one* target even though
 //! it spans two or three faces. Labels lie in the face plane. The geometry

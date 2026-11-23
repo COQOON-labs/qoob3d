@@ -1,4 +1,4 @@
-# A test function without #[cfg(test)] in production code (ADR-0039, found by the critic)
+# A test function without #[cfg(test)] in production code (ADR-0037, found by the critic)
 command: cargo xtask hygiene
 expect: test code belongs in its own file
 --- patch

@@ -8,10 +8,10 @@ shapes on the thread that called `script::run`; the app runs scripts in worker p
 - **OCCT types never leave this crate.** The public API consists only of types from
   `qoob3d-core`, `script::Shape` and plain data (ADR-0036).
 - **Our own OCCT operations** belong in `cpp/qoob3d_occt.cpp` and the bridge `src/occt.rs`
-  (ADR-0014). Wrap every function with `guarded(...)` so that `Standard_Failure` →
+  (ADR-0004). Wrap every function with `guarded(...)` so that `Standard_Failure` →
   `std::runtime_error` → `Err`. Results as flat buffers (`rust::Vec`), logic in Rust as far
   as possible.
-- `opencascade-sys` is a fork in `third_party/` (ADR-0047), used with the feature `builtin`
+- `opencascade-sys` is a fork in `third_party/` (ADR-0004), used with the feature `builtin`
   (OCCT built from source into `target/OCCT`). Every change there belongs in the fork's
   `README.md` (LGPL).
 - Tests check real geometry: volume, `MeshReport::is_watertight()`, normal direction,
@@ -23,7 +23,8 @@ shapes on the thread that called `script::run`; the app runs scripts in worker p
   and `shape()` turn caught OCCT exceptions and null shapes into `KernelError`.
 - `src/tessellate.rs`: call of the C++ mesher → `ShapeMesh`, structure check.
 - `src/script.rs` + `src/script/`: script kernel (ADR-0053): `run`, `ScriptError`, `Shape`,
-  sandboxed imports, STL/3MF/STEP export (STL/3MF at 0.01 mm chordal tolerance, ADR-0034);
+  sandboxed imports, STEP export (STL/3MF are written by the service from the cached meshes,
+  tessellated with the project's `[mesh]` settings, ADR-0034);
   `api.rs` solids (named kinds `BOX`…`TORUS`), booleans (batched, plausibility AG-SC-12),
   transforms, measures, `countersink`/`counterbore`, `mass`, `overhangs`/`bed_area`;
   `profile.rs` profiles, profile algebra (AG-PF-02), `rounded_rect`, `rotate`, `offset`,
@@ -37,13 +38,13 @@ shapes on the thread that called `script::run`; the app runs scripts in worker p
   distance, common volume for callers in Rust; BREP
   read/write and `Shape::mesh` for the cache. Runs on the calling thread, not
   the worker. Every API change updates `docs/script-api.md` (its examples run in
-  `tests/script.rs` and `tests/script_r5.rs` with the project folder `docs/script-api`; the
+  `tests/script.rs` and `tests/script_helpers.rs` with the project folder `docs/script-api`; the
   imported example assets live in `docs/script-api/lib/examples/`, and `qoob3d init` copies
   them). The reference is served to agents over MCP: no repository paths, requirement IDs,
   ADR numbers or Rust notes in it – those belong here.
 - `src/occt.rs` + `cpp/`: own cxx bridge. `build.rs` compiles it against the OCCT headers
   from `DEP_OCCT_INCLUDE` (set by the `opencascade-sys` fork in `third_party/opencascade-sys`
-  via `links = "occt"`, ADR-0047).
+  via `links = "occt"`, ADR-0004).
 
 ## Pitfalls
 
@@ -82,7 +83,7 @@ shapes on the thread that called `script::run`; the app runs scripts in worker p
 - Rhai's own size limits miss `a += a` on arrays and assignment into containers (`m[k] = v`).
   Declare mode therefore turns fast operators off and measures the variables after stages
   that double (4096, 8192, … operations, each run from the start because Rhai cannot resume):
-  the total cost stays below twice the last stage (ADR-0056). Memory grown between two
+  the total cost stays below twice the last stage (ADR-0055). Memory grown between two
   measurements is not seen there; discovery runs in a worker whose memory limit stops it.
   `Engine::on_var` would avoid the reruns but is `#[deprecated]` in Rhai and would exceed the
   lint-suppression cap (`harness/ratchet.txt`).
@@ -100,4 +101,4 @@ shapes on the thread that called `script::run`; the app runs scripts in worker p
 
 ## Relevant ADRs
 
-ADR-0004, ADR-0014, ADR-0028, ADR-0034, ADR-0036, ADR-0047, ADR-0053, ADR-0055, ADR-0056
+ADR-0004, ADR-0034, ADR-0036, ADR-0004, ADR-0053, ADR-0055

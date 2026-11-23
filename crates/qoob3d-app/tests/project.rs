@@ -1,4 +1,4 @@
-//! Milestone W1: QOOB3D opens a script project folder and shows its parts
+//! QOOB3D opens a script project folder and shows its parts
 //! live (docs/requirements/project-app.md, ADR-0053). Every test names its
 //! requirement ID. All tests run against the fake `qoob3d serve` in `common/`.
 //!

@@ -33,5 +33,5 @@ png = "0.18"
 workspace = true
 
 [dev-dependencies]
-# Headless UI tests and screenshots of the real app (ADR-0018).
+# Headless UI tests and screenshots of the real app (ADR-0013).
 egui_kittest = { version = "0.36.2", features = ["eframe", "wgpu", "snapshot"] }

@@ -1,5 +1,5 @@
 //! User settings, persisted by eframe between sessions (ADR-0020, ADR-0021,
-//! ADR-0022). Unknown or missing fields fall back to the defaults.
+//! ADR-0008). Unknown or missing fields fall back to the defaults.
 
 use serde::{Deserialize, Serialize};
 

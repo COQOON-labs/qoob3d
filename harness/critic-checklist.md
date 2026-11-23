@@ -1,4 +1,4 @@
-# Critic checklist (ADR-0041)
+# Critic checklist (ADR-0037)
 
 The critic checks a diff against these items. Every finding names **one** ID, a location
 (`file:line`), the concrete consequence ("what breaks / what becomes more expensive") and the

@@ -1,7 +1,7 @@
-//! R2/R3 without MCP: project service, worker processes, cache and CLI
+//! Project service, worker processes, cache and CLI
 //! against the real `qoob3d` binary (docs/requirements/agent.md §2, §2.1,
 //! §3.1, §4; envelope and qmesh from docs/requirements/project-app.md;
-//! ADR-0053), and the service hardening of R5 (§6.1: AG-HD-01, 02, 03, 06,
+//! ADR-0053), and the service hardening (§6.1: AG-HD-01, 02, 03, 06,
 //! 10; ADR-0055). Every test names its requirement IDs.
 //!
 //! Test projects use only simple primitives (`box`, `cylinder`, `move`), so
@@ -10,30 +10,36 @@
 //! 1e-6 relative is the same margin as the R1 kernel tests. Meshes are f32:
 //! coordinates up to 40 mm round to < 4e-6 mm, so `F32_POS` = 1e-4 mm.
 //!
-//! Processes: every test owns its service through [`Service`], whose drop
-//! sends `/shutdown` and kills the service and its workers if they linger.
-//! The read-only checks share one built project in `built_project_*`.
+//! Processes: every test owns its service through `support::Service`, whose
+//! drop sends `/shutdown` and kills the service and its workers if they
+//! linger; `support::Project` stops what is left and removes the folder
+//! (helpers shared through `common/agent.rs`). The read-only checks share
+//! one built project in `built_project_*`.
+
+#[path = "common/builds.rs"]
+mod builds;
+#[path = "common/inspect.rs"]
+mod inspect;
+#[path = "common/agent.rs"]
+mod support;
 
 use std::collections::BTreeSet;
-use std::io::{BufRead as _, BufReader, Read as _, Write as _};
-use std::net::TcpStream;
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::io::{BufRead as _, BufReader, Write as _};
+use std::process::{ChildStdin, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use builds::WAIT_S;
+use inspect::assert_vec;
 use qoob3d_app::client;
 use qoob3d_core::qmesh;
 use serde_json::{Value, json};
+use support::{
+    BIN, Project, START, Service, VOL, alive, assert_rel, assert_rel_f64, cli, exchange, kill,
+    service_json, service_token, wait_until,
+};
 
-const BIN: &str = env!("CARGO_BIN_EXE_qoob3d");
-const VOL: f64 = 1e-6;
 const F32_POS: f64 = 1e-4;
-/// Upper bound for a service to come up (WA-OP-02 allows 20 s).
-const START: Duration = Duration::from_secs(20);
-/// `wait_s` for synchronous builds; simple boxes build in milliseconds.
-const WAIT_S: f64 = 60.0;
 
 // ===========================================================================
 // Test projects
@@ -99,29 +105,7 @@ part(\"Bad\", #{}, |deps| {
 });
 ";
 
-static NEXT: AtomicUsize = AtomicUsize::new(0);
-
-/// A temporary project `<root>/project/` with `qoob3d.toml`; removed on drop
-/// (after the [`Service`] guards declared later have stopped).
-struct Project {
-    root: PathBuf,
-    dir: PathBuf,
-}
-
 impl Project {
-    /// Project named `name`; `extra` is appended to `qoob3d.toml` (limits, workers).
-    fn new(name: &str, extra: &str) -> Self {
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("qoob3d-service-{name}-{}-{n}", std::process::id()));
-        std::fs::remove_dir_all(&root).ok();
-        let dir = root.join("project");
-        std::fs::create_dir_all(dir.join("parts")).expect("create project");
-        let p = Self { root, dir };
-        p.write("qoob3d.toml", &format!("[project]\nname = \"{name}\"\nunits = \"mm\"\n{extra}"));
-        p
-    }
-
     /// The four-part project of acceptance R2: A, B (depends on A), C
     /// (imports lib/form.rhai), D independent, plus values.
     fn abcd(name: &str) -> Self {
@@ -134,216 +118,13 @@ impl Project {
             .write("values/dims.toml", VALUES);
         p
     }
-
-    fn write(&self, rel: &str, text: &str) -> &Self {
-        let path = self.dir.join(rel);
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("create folder");
-        std::fs::write(&path, text).expect("write project file");
-        self
-    }
-
-    fn path(&self, rel: &str) -> PathBuf {
-        self.dir.join(rel)
-    }
-}
-
-impl Drop for Project {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.root).ok();
-    }
 }
 
 // ===========================================================================
-// HTTP and envelope
+// Service
 // ===========================================================================
-
-struct Reply {
-    code: u16,
-    head: String,
-    body: Vec<u8>,
-}
-
-impl Reply {
-    fn header(&self, name: &str) -> Option<String> {
-        self.head.lines().skip(1).find_map(|l| {
-            let (k, v) = l.split_once(':')?;
-            k.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_owned())
-        })
-    }
-
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.body).into_owned()
-    }
-
-    /// The JSON envelope `{ok, duration_s, warnings, result}` with `error`
-    /// `{kind, message}` when not ok (project-app.md §1), checked field by field.
-    fn envelope(&self) -> Value {
-        let v: Value = serde_json::from_slice(&self.body).unwrap_or_else(|e| {
-            panic!("no JSON envelope ({e}), HTTP {}: {}", self.code, self.text())
-        });
-        let ok = v["ok"].as_bool().unwrap_or_else(|| panic!("envelope without bool ok: {v}"));
-        let d =
-            v["duration_s"].as_f64().unwrap_or_else(|| panic!("envelope without duration_s: {v}"));
-        assert!(d >= 0.0 && d.is_finite(), "duration_s {d}");
-        assert!(v["warnings"].is_array(), "envelope without warnings array: {v}");
-        assert!(v.get("result").is_some(), "envelope without result: {v}");
-        if !ok {
-            assert!(v["error"]["kind"].is_string(), "error without kind: {v}");
-            assert!(v["error"]["message"].is_string(), "error without message: {v}");
-        }
-        v
-    }
-
-    /// `result` of an envelope with `ok: true`.
-    fn ok(&self) -> Value {
-        let v = self.envelope();
-        assert_eq!(v["ok"], json!(true), "HTTP {}: {v}", self.code);
-        v["result"].clone()
-    }
-}
-
-/// One HTTP/1.1 request to 127.0.0.1:`port` (`Connection: close`), with the
-/// service token in `X-Qoob3d-Token` when there is one (AG-HD-03).
-fn http(
-    port: u16,
-    token: Option<&str>,
-    method: &str,
-    path: &str,
-    body: Option<&Value>,
-    timeout: Duration,
-) -> Result<Reply, String> {
-    let body = body.map(Value::to_string).unwrap_or_default();
-    let token = token.map(|t| format!("X-Qoob3d-Token: {t}\r\n")).unwrap_or_default();
-    let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{token}Connection: close\r\n\
-         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-        body.len()
-    );
-    exchange(port, &req, timeout)
-}
-
-/// Sends `request` (a complete HTTP/1.1 request, written by the caller) to
-/// 127.0.0.1:`port` and reads the answer.
-fn exchange(port: u16, request: &str, timeout: Duration) -> Result<Reply, String> {
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let mut s = TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect: {e}"))?;
-    s.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
-    s.set_write_timeout(Some(timeout)).map_err(|e| e.to_string())?;
-    s.write_all(request.as_bytes()).map_err(|e| format!("write: {e}"))?;
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 65536];
-    let end = loop {
-        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            break i + 4;
-        }
-        let n = s.read(&mut chunk).map_err(|e| format!("read head: {e}"))?;
-        if n == 0 {
-            return Err("closed before the header ended".into());
-        }
-        buf.extend_from_slice(&chunk[..n]);
-    };
-    let head = String::from_utf8_lossy(&buf[..end]).into_owned();
-    let code = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or("status line")?;
-    let mut reply = Reply { code, head, body: buf[end..].to_vec() };
-    match reply.header("content-length").and_then(|l| l.parse::<usize>().ok()) {
-        Some(len) => {
-            while reply.body.len() < len {
-                let n = s.read(&mut chunk).map_err(|e| format!("read body: {e}"))?;
-                if n == 0 {
-                    return Err(format!("body truncated at {} of {len}", reply.body.len()));
-                }
-                reply.body.extend_from_slice(&chunk[..n]);
-            }
-        }
-        None => {
-            s.read_to_end(&mut reply.body).map_err(|e| format!("read body: {e}"))?;
-        }
-    }
-    Ok(reply)
-}
-
-// ===========================================================================
-// Processes
-// ===========================================================================
-
-/// `(pid, ppid, args)` of all processes (POSIX `ps`, Linux and macOS).
-fn processes() -> Vec<(u32, u32, String)> {
-    let out = Command::new("ps").args(["-A", "-o", "pid=,ppid=,args="]).output().expect("run ps");
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| {
-            let mut w = l.split_whitespace();
-            let pid = w.next()?.parse().ok()?;
-            let ppid = w.next()?.parse().ok()?;
-            Some((pid, ppid, w.collect::<Vec<_>>().join(" ")))
-        })
-        .collect()
-}
-
-/// Alive and not a zombie.
-fn alive(pid: u32) -> bool {
-    let out = Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output();
-    out.is_ok_and(|o| {
-        let stat = String::from_utf8_lossy(&o.stdout).trim().to_owned();
-        !stat.is_empty() && !stat.starts_with('Z')
-    })
-}
-
-fn kill(pid: u32, signal: &str) {
-    Command::new("kill").args([format!("-{signal}"), pid.to_string()]).output().ok();
-}
-
-/// Waits until `cond` holds, polling every 20 ms; false on timeout.
-fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if cond() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-/// `(port, pid)` from `.qoob3d/service.json` (project-app.md §1).
-fn service_json(dir: &Path) -> Option<(u16, u32)> {
-    let text = std::fs::read_to_string(dir.join(".qoob3d/service.json")).ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
-    Some((u16::try_from(v["port"].as_u64()?).ok()?, u32::try_from(v["pid"].as_u64()?).ok()?))
-}
-
-/// The token from `.qoob3d/service.json` that every request carries in the
-/// header `X-Qoob3d-Token` (AG-HD-03); `None` if the file has none.
-fn service_token(dir: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(dir.join(".qoob3d/service.json")).ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
-    v["token"].as_str().map(str::to_owned)
-}
-
-/// A running `qoob3d serve` for a project. Drop shuts it down and kills
-/// whatever is left (service and workers), so no test leaks processes.
-struct Service {
-    port: u16,
-    pid: u32,
-    /// From `service.json`, sent with every request (AG-HD-03).
-    token: Option<String>,
-    /// Set when this test spawned `serve` itself (reaped on drop).
-    child: Option<Child>,
-    log: PathBuf,
-    /// Every worker pid ever seen, killed on drop if still alive.
-    seen_workers: std::cell::RefCell<BTreeSet<u32>>,
-}
 
 impl Service {
-    /// Spawns `qoob3d serve <DIR>` and waits until it answers `/status`.
-    fn start(p: &Project) -> Self {
-        let mut command = Command::new(BIN);
-        command.arg("serve").arg(&p.dir);
-        Self::start_with(p, &mut command)
-    }
-
     /// As [`Service::start`] with the service limited to `kib` KiB of
     /// address space (`ulimit -v`, inherited by its workers): a script that
     /// allocates without bound makes the service fail instead of exhausting
@@ -354,113 +135,6 @@ impl Service {
         let script = format!("ulimit -v {kib} 2>/dev/null; exec \"$0\" serve \"$1\"");
         command.arg("-c").arg(script).arg(BIN).arg(&p.dir);
         Self::start_with(p, &mut command)
-    }
-
-    fn start_with(p: &Project, command: &mut Command) -> Self {
-        let log = p.root.join("serve.log");
-        let err = std::fs::File::create(&log).expect("create serve.log");
-        let child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(err)
-            .spawn()
-            .expect("spawn qoob3d serve");
-        let s = Self::wait_ready(p, Some(child), log);
-        let pid = s.child.as_ref().map(Child::id);
-        assert_eq!(Some(s.pid), pid, "service.json names the serve process");
-        s
-    }
-
-    /// Guard for a service started by someone else (the CLI, AG-SV-02).
-    fn attach(p: &Project) -> Self {
-        Self::wait_ready(p, None, p.root.join("serve.log"))
-    }
-
-    fn wait_ready(p: &Project, mut child: Option<Child>, log: PathBuf) -> Self {
-        let deadline = Instant::now() + START;
-        loop {
-            if let Some((port, pid)) = service_json(&p.dir) {
-                let token = service_token(&p.dir);
-                let wait = Duration::from_secs(1);
-                let probe = http(port, token.as_deref(), "GET", "/status", None, wait);
-                if probe.is_ok_and(|r| r.code == 200) {
-                    let seen = std::cell::RefCell::new(BTreeSet::new());
-                    return Self { port, pid, token, child, log, seen_workers: seen };
-                }
-            }
-            if let Some(Ok(Some(status))) = child.as_mut().map(Child::try_wait) {
-                let log = std::fs::read_to_string(&log).unwrap_or_default();
-                panic!("qoob3d serve exited early with {status}:\n{log}");
-            }
-            if Instant::now() >= deadline {
-                if let Some(c) = child.as_mut() {
-                    c.kill().ok();
-                    c.wait().ok();
-                }
-                panic!("service for {} not up within {START:?}", p.dir.display());
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-
-    fn log(&self) -> String {
-        let text = std::fs::read_to_string(&self.log).unwrap_or_default();
-        let start = text.len().saturating_sub(3000);
-        text.get(start..).unwrap_or_default().to_owned()
-    }
-
-    fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Reply {
-        self.try_request(method, path, body, Duration::from_secs(90))
-            .unwrap_or_else(|e| panic!("{method} {path}: {e}\nservice log:\n{}", self.log()))
-    }
-
-    /// One request with the service token; `Err` if there is no answer in `timeout`.
-    fn try_request(
-        &self,
-        method: &str,
-        path: &str,
-        body: Option<&Value>,
-        timeout: Duration,
-    ) -> Result<Reply, String> {
-        http(self.port, self.token.as_deref(), method, path, body, timeout)
-    }
-
-    fn get(&self, path: &str) -> Reply {
-        self.request("GET", path, None)
-    }
-
-    fn post(&self, path: &str, body: &Value) -> Reply {
-        self.request("POST", path, Some(body))
-    }
-
-    fn status(&self) -> Value {
-        let r = self.get("/status");
-        assert_eq!(r.code, 200);
-        r.ok()
-    }
-
-    /// `POST /discover {"files": null, "wait_s": 20}` (ADR-0056, §3.1):
-    /// waits until every part and check file is discovered and asserts that
-    /// nothing is left in `discovering`. Discovery runs in a worker, so the
-    /// first `/status` after a start or a file write may not list the
-    /// declarations yet; call this before reading parts or checks from
-    /// `/status`. 20 s: the start-up budget (WA-OP-02), far above one worker
-    /// round trip per file. Returns the result.
-    fn wait_discovery(&self) -> Value {
-        let r = self.post("/discover", &json!({"files": null, "wait_s": 20}));
-        let result = r.ok();
-        assert_eq!(result["discovering"], json!([]), "discovery did not finish: {result}");
-        result
-    }
-
-    /// `POST /build` with `wait_s` = [`WAIT_S`]; the build result (§3.1),
-    /// also when parts failed.
-    fn build(&self, parts: Option<&[&str]>) -> Value {
-        let r = self.post("/build", &json!({"parts": parts, "wait_s": WAIT_S}));
-        let v = r.envelope();
-        let result = v["result"].clone();
-        assert!(result["parts"].is_object(), "no build result: {v}\nlog:\n{}", self.log());
-        result
     }
 
     /// `POST /build` with `wait_s = 0` → the job id (§3.1).
@@ -484,49 +158,6 @@ impl Service {
             }
             assert!(Instant::now() < deadline, "job {id} still {state} after {timeout:?}: {job}");
             std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-
-    /// Live `qoob3d worker` children of the service.
-    fn workers(&self) -> Vec<u32> {
-        let w: Vec<u32> = processes()
-            .into_iter()
-            .filter(|(pid, ppid, args)| *ppid == self.pid && args.contains("worker") && alive(*pid))
-            .map(|(pid, ..)| pid)
-            .collect();
-        self.seen_workers.borrow_mut().extend(&w);
-        w
-    }
-
-    /// `POST /shutdown`; waits for the service to exit (AG-SV-01).
-    fn shutdown(&mut self) -> bool {
-        self.workers();
-        let sent = self.try_request("POST", "/shutdown", Some(&json!({})), Duration::from_secs(2));
-        let pid = self.pid;
-        let gone = match self.child.as_mut() {
-            Some(c) => {
-                wait_until(Duration::from_secs(10), || c.try_wait().is_ok_and(|s| s.is_some()))
-            }
-            None => wait_until(Duration::from_secs(10), || !alive(pid)),
-        };
-        sent.is_ok() && gone
-    }
-}
-
-impl Drop for Service {
-    fn drop(&mut self) {
-        let clean = self.shutdown();
-        if !clean {
-            kill(self.pid, "KILL");
-        }
-        if let Some(c) = self.child.as_mut() {
-            c.kill().ok();
-            c.wait().ok();
-        }
-        for pid in self.seen_workers.borrow().iter() {
-            if alive(*pid) {
-                kill(*pid, "KILL");
-            }
         }
     }
 }
@@ -583,23 +214,11 @@ fn is_sha256_hex(key: &str) -> bool {
     key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn assert_rel(actual: f64, expected: f64, tol: f64, what: &str) {
-    let rel = (actual - expected).abs() / expected.abs();
-    assert!(rel < tol, "{what}: got {actual}, expected {expected} (rel {rel:e})");
-}
-
-fn assert_vec(v: &Value, expected: [f64; 3], tol: f64, what: &str) {
-    for (i, e) in expected.iter().enumerate() {
-        let a = v[i].as_f64().unwrap_or_else(|| panic!("{what}[{i}] missing: {v}"));
-        assert!((a - e).abs() < tol, "{what}: got {v}, expected {expected:?}");
-    }
-}
-
 /// A built part in a build result: state, volume, bbox, valid, duration (§3.1).
 fn assert_built(result: &Value, part: &str, state: &str, volume: f64, bbox: ([f64; 3], [f64; 3])) {
     let p = &result["parts"][part];
     assert_eq!(p["state"], json!(state), "{part}: {p}");
-    assert_rel(p["volume"].as_f64().unwrap_or(f64::NAN), volume, VOL, &format!("volume of {part}"));
+    assert_rel(&p["volume"], volume, VOL, &format!("volume of {part}"));
     assert_vec(&p["bbox"]["min"], bbox.0, 1e-6, &format!("bbox.min of {part}"));
     assert_vec(&p["bbox"]["max"], bbox.1, 1e-6, &format!("bbox.max of {part}"));
     let size = [bbox.1[0] - bbox.0[0], bbox.1[1] - bbox.0[1], bbox.1[2] - bbox.0[2]];
@@ -625,60 +244,6 @@ const B_BOX: ([f64; 3], [f64; 3]) = ([20.0, -5.0, 0.0], [40.0, 5.0, 10.0]);
 const C_BOX: ([f64; 3], [f64; 3]) = ([-2.0, -2.0, 0.0], [2.0, 2.0, 4.0]);
 const D_BOX: ([f64; 3], [f64; 3]) = ([-5.0, -5.0, 0.0], [5.0, 5.0, 5.0]);
 const D_VOLUME: f64 = 125.0 * std::f64::consts::PI;
-
-// ===========================================================================
-// CLI
-// ===========================================================================
-
-struct CliOut {
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
-}
-
-impl CliOut {
-    fn envelope(&self) -> Value {
-        serde_json::from_str(self.stdout.trim()).unwrap_or_else(|e| {
-            panic!("stdout is no JSON envelope ({e}):\n{}\nstderr:\n{}", self.stdout, self.stderr)
-        })
-    }
-}
-
-fn reader(mut r: impl std::io::Read + Send + 'static) -> Receiver<String> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut s = String::new();
-        r.read_to_string(&mut s).ok();
-        tx.send(s).ok();
-    });
-    rx
-}
-
-/// `qoob3d <args>` in the project folder (AG-SV-02), killed after `timeout`.
-fn cli(dir: &Path, args: &[&str], timeout: Duration) -> CliOut {
-    let mut child = Command::new(BIN)
-        .args(args)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn qoob3d CLI");
-    let out = reader(child.stdout.take().expect("stdout"));
-    let err = reader(child.stderr.take().expect("stderr"));
-    let exited = wait_until(timeout, || child.try_wait().is_ok_and(|s| s.is_some()));
-    if !exited {
-        child.kill().ok();
-        child.wait().ok();
-        panic!("qoob3d {args:?} did not finish within {timeout:?}");
-    }
-    let code = child.wait().expect("wait CLI").code();
-    // A service started on demand must not hold the CLI's pipes open.
-    let pipe = Duration::from_secs(3);
-    let stdout = out.recv_timeout(pipe).expect("stdout closed: the service must not inherit it");
-    let stderr = err.recv_timeout(pipe).expect("stderr closed: the service must not inherit it");
-    CliOut { code, stdout, stderr }
-}
 
 // ===========================================================================
 // Mesh and file checks
@@ -767,7 +332,7 @@ fn assert_normal_builds(s: &Service) {
     let p = &r["parts"]["Normal"];
     assert!(["built", "cached"].contains(&p["state"].as_str().unwrap_or_default()), "{r}");
     // box(10, 20, 30) = 6000 mm³.
-    assert_rel(p["volume"].as_f64().unwrap_or(f64::NAN), 6000.0, VOL, "volume of Normal");
+    assert_rel(&p["volume"], 6000.0, VOL, "volume of Normal");
 }
 
 #[test]
@@ -907,7 +472,7 @@ fn ag_pj_04_changes_rebuild_exactly_the_changed_parts_and_dependents() {
     assert_eq!(change_and_build(&s, &p, "parts/a.rhai", &a2), (set(&["A", "B"]), set(&["C", "D"])));
     // B = A' moved: 20·10·12 = 2400 mm³.
     let r = s.build(None);
-    assert_rel(r["parts"]["B"]["volume"].as_f64().unwrap_or(f64::NAN), 2400.0, VOL, "B after A");
+    assert_rel(&r["parts"]["B"]["volume"], 2400.0, VOL, "B after A");
     assert_eq!(key_of(&s.status(), "C"), key_of(&keys0, "C"));
     assert_ne!(key_of(&s.status(), "B"), key_of(&keys0, "B"));
 
@@ -971,7 +536,7 @@ fn ag_pj_02_several_parts_per_file_with_dependencies() {
          part(\"M2\", #{ depends: [\"M1\"] }, |deps| deps[\"M1\"].move(0, 0, 10) + box(2, 2, 2).move(0, 0, 20));\n",
     );
     let s = Service::start(&p);
-    // Discovery runs in a worker (ADR-0056): wait until M1 and M2 are known.
+    // Discovery runs in a worker (ADR-0055): wait until M1 and M2 are known.
     s.wait_discovery();
     let st = s.status();
     let parts = status_parts(&st);
@@ -1097,12 +662,7 @@ fn check_cache_files(p: &Project, st: &Value) {
         assert_box(qmesh_bbox(&qmsh), bbox, curved, &format!("cached mesh of {part}"));
         let text = std::fs::read_to_string(base.with_extension("json")).expect("cache .json");
         let j: Value = serde_json::from_str(&text).expect("cache json");
-        assert_rel(
-            j["volume"].as_f64().unwrap_or(f64::NAN),
-            volume,
-            VOL,
-            &format!("cached volume {part}"),
-        );
+        assert_rel(&j["volume"], volume, VOL, &format!("cached volume {part}"));
         for k in ["min", "max", "size"] {
             assert!(j["bbox"][k].is_array(), "{part}: bbox.{k} in {j}");
         }
@@ -1167,10 +727,10 @@ fn check_export(s: &Service, p: &Project) {
     s.post("/export", &json!({"parts": ["A", "C"], "format": "stl"})).ok();
     let (vol, lo, hi) = stl_volume_bbox(&std::fs::read(p.path("out/A.stl")).expect("out/A.stl"));
     // f32 vertices of a planar box: rel. error ~1e-7 per coordinate.
-    assert_rel(vol, 2000.0, 1e-5, "STL volume of A");
+    assert_rel_f64(vol, 2000.0, 1e-5, "STL volume of A");
     assert_box((lo, hi), A_BOX, FLAT, "STL bbox of A");
     let (vol, ..) = stl_volume_bbox(&std::fs::read(p.path("out/C.stl")).expect("out/C.stl"));
-    assert_rel(vol, 64.0, 1e-5, "STL volume of C");
+    assert_rel_f64(vol, 64.0, 1e-5, "STL volume of C");
 
     s.post("/export", &json!({"parts": ["A"], "format": "3mf"})).ok();
     let path = p.path("out/A.3mf");
@@ -1186,7 +746,7 @@ fn check_export(s: &Service, p: &Project) {
     assert_eq!(model.matches("<object ").count(), 1, "one object per part:\n{model}");
 
     s.post("/export", &json!({"parts": ["A"], "format": "step"})).ok();
-    let step = std::fs::read_to_string(p.path("out/A.step")).expect("out/A.step");
+    let step = p.read("out/A.step");
     assert!(step.starts_with("ISO-10303-21;"), "STEP header: {}", &step[..step.len().min(80)]);
 
     let r = s.post("/export", &json!({"parts": ["A"], "format": "obj"}));
@@ -1392,7 +952,7 @@ fn ag_sv_02_cli_starts_the_service_on_demand_and_prints_envelopes() {
     assert_eq!(out.code, Some(0), "{}{}", out.stdout, out.stderr);
     out.envelope();
     let (vol, ..) = stl_volume_bbox(&std::fs::read(p.path("out/A.stl")).expect("out/A.stl"));
-    assert_rel(vol, 2000.0, 1e-5, "CLI STL volume of A");
+    assert_rel_f64(vol, 2000.0, 1e-5, "CLI STL volume of A");
 
     let out = cli(&p.dir, &["values"], t);
     assert_eq!(out.code, Some(0), "{}", out.stdout);
@@ -1410,11 +970,6 @@ fn ag_sv_02_cli_starts_the_service_on_demand_and_prints_envelopes() {
 // ===========================================================================
 // R5 hardening (agent.md §6.1): AG-HD-01, 02, 03, 06, 10
 // ===========================================================================
-
-/// Rewrites `qoob3d.toml` of a project named `name` with `extra`.
-fn write_config(p: &Project, name: &str, extra: &str) {
-    p.write("qoob3d.toml", &format!("[project]\nname = \"{name}\"\nunits = \"mm\"\n{extra}"));
-}
 
 /// The kind of the load error in a `/status` answer, whichever way the
 /// envelope carries it (`result.error` as in §3.1 or the envelope's `error`).
@@ -1437,7 +992,7 @@ fn ag_hd_01_a_time_limit_out_of_range_never_hangs_the_job_queue() {
     p.write("parts/normal.rhai", NORMAL);
     let s = Service::start(&p);
     for value in ["inf", "1e20"] {
-        write_config(&p, "hd-01", &format!("[limits]\ntime_s = {value}\n[workers]\ncount = 1\n"));
+        p.config(&format!("[limits]\ntime_s = {value}\n[workers]\ncount = 1\n"));
         // The build must be refused or fail, at once: `wait_s` = 10 bounds
         // the answer, so a hanging job shows as a running job, not as a
         // hanging test.
@@ -1462,7 +1017,7 @@ fn ag_hd_01_a_time_limit_out_of_range_never_hangs_the_job_queue() {
         );
     }
     // With a valid file the same service builds: nothing is stuck.
-    write_config(&p, "hd-01", "[limits]\ntime_s = 60\n[workers]\ncount = 1\n");
+    p.config("[limits]\ntime_s = 60\n[workers]\ncount = 1\n");
     assert_normal_builds(&s);
     assert_eq!(s.status()["workers"]["busy"], json!(0));
 }
@@ -1490,7 +1045,7 @@ fn assert_bomb_is_a_load_error(tag: &str, rel: &str, source: &str) {
     p.write("parts/normal.rhai", NORMAL).write(rel, source);
     // `start_capped` already needs an answer to `/status`.
     let s = Service::start_capped(&p, BOMB_CAP_KIB);
-    // Discovery runs in a worker (ADR-0056): the first answers may come
+    // Discovery runs in a worker (ADR-0055): the first answers may come
     // before it has finished. Every poll stays within the 100 ms budget;
     // the load error naming the file follows within 10 s.
     wait_for_load_error(&s, rel, &["load"], Duration::from_secs(10));
@@ -1538,7 +1093,7 @@ fn ag_hd_02_a_string_bomb_in_a_check_file_is_a_load_error() {
 }
 
 /// The errors anywhere in a `/status` answer: every JSON object with a
-/// string `kind` and a `message`, as `(kind, text of the object)`. ADR-0056
+/// string `kind` and a `message`, as `(kind, text of the object)`. ADR-0055
 /// reports load errors per file; where in the answer is not specified.
 fn status_errors(v: &Value, out: &mut Vec<(String, String)>) {
     match v {
@@ -1563,7 +1118,7 @@ fn status_errors(v: &Value, out: &mut Vec<(String, String)>) {
 
 /// Polls `/status` every 50 ms until it reports an error of one of `kinds`
 /// that names the file `rel`, for at most `within`. Every poll must be
-/// answered within 100 ms (AG-SV-01; ADR-0056: "`/status` must not wait for
+/// answered within 100 ms (AG-SV-01; ADR-0055: "`/status` must not wait for
 /// discovery longer than its 100 ms budget"). Returns the kind found.
 fn wait_for_load_error(s: &Service, rel: &str, kinds: &[&str], within: Duration) -> String {
     load_error_within(s, rel, kinds, within, Duration::from_millis(100))
@@ -1612,7 +1167,7 @@ fn ag_hd_02_discovery_stops_after_a_million_operations() {
     // (at least one operation each) at the top level never reach the part
     // declaration; a worker run (50 000 000, AG-SC-02) would.
     //
-    // ADR-0056: discovery runs in a worker, so the service is up at once
+    // ADR-0055: discovery runs in a worker, so the service is up at once
     // (`Service::start` needs an answer to `/status` within a second) and
     // the load error follows; with linear measuring cost a million
     // operations take about a second in a debug build, 10 s is generous.
@@ -1747,7 +1302,7 @@ fn ag_hd_03_requests_need_the_token_and_a_local_host_and_no_origin() {
 
     // None of the refused requests reached a route: nothing was built, no
     // task was created, and the refused /shutdown did not stop the service.
-    // Discovery runs in a worker (ADR-0056): wait for it, so `states` lists
+    // Discovery runs in a worker (ADR-0055): wait for it, so `states` lists
     // A..D and the check below is not vacuously true on an empty list.
     s.wait_discovery();
     let st = s.status();
@@ -1836,12 +1391,12 @@ fn ag_hd_06_import_through_a_variable_is_a_script_error_never_a_stale_part() {
     let r = s.build(None);
     let v = &r["parts"]["V"];
     if let Some(volume) = v["volume"].as_f64() {
-        assert_rel(volume, 80.0, VOL, "V is served with stale geometry (the old module)");
+        assert_rel_f64(volume, 80.0, VOL, "V is served with stale geometry (the old module)");
     }
     if states(&st)["V"] == "current" {
         let measured = s.post("/measure", &json!({"a": "V"})).envelope();
         let volume = measured["result"]["volume"].as_f64().unwrap_or(f64::NAN);
-        assert_rel(volume, 80.0, VOL, "V is `current` with stale geometry (the old module)");
+        assert_rel_f64(volume, 80.0, VOL, "V is `current` with stale geometry (the old module)");
     }
 
     // The requirement itself: a script error at the import.
@@ -1867,7 +1422,7 @@ fn ag_hd_06_import_through_a_variable_at_the_top_level_is_a_load_error_with_posi
     )
     .write("lib/form.rhai", LIB_FORM);
     let s = Service::start(&p);
-    // Discovery runs in a worker (ADR-0056): poll until its answer is in.
+    // Discovery runs in a worker (ADR-0055): poll until its answer is in.
     wait_for_load_error(&s, "parts/top.rhai", &["load"], Duration::from_secs(10));
     let r = s.get("/status");
     let v = r.envelope();
@@ -1952,7 +1507,7 @@ fn ag_hd_10_status_lists_at_most_the_20_newest_jobs_with_their_kind() {
 }
 
 // ===========================================================================
-// ADR-0056: declaration discovery runs in a worker
+// ADR-0055: declaration discovery runs in a worker
 // ===========================================================================
 
 /// A top level that never ends. Rhai counts operations, so discovery stops
@@ -1965,7 +1520,7 @@ fn service_then_file(tag: &str, extra: &str, rel: &str, source: &str) -> (Projec
     let p = Project::new(tag, extra);
     p.write("parts/normal.rhai", NORMAL);
     let s = Service::start_capped(&p, BOMB_CAP_KIB);
-    // Discovery runs in a worker (ADR-0056): the first `/status` after the
+    // Discovery runs in a worker (ADR-0055): the first `/status` after the
     // start may not list `Normal` yet.
     s.wait_discovery();
     assert_eq!(states(&s.status())["Normal"], "never_built");
@@ -1974,8 +1529,8 @@ fn service_then_file(tag: &str, extra: &str, rel: &str, source: &str) -> (Projec
 }
 
 #[test]
-fn adr_0056_an_endless_top_level_never_blocks_the_service() {
-    // ADR-0056: "The service never evaluates user scripts. Declaration
+fn discovery_an_endless_top_level_never_blocks_the_service() {
+    // ADR-0055: "The service never evaluates user scripts. Declaration
     // discovery of part and check files is a worker request … under the
     // project's time limit". `/status` answers within 100 ms on every poll
     // from the moment the file exists, and reports the file's load error
@@ -1998,8 +1553,8 @@ fn adr_0056_an_endless_top_level_never_blocks_the_service() {
 }
 
 #[test]
-fn adr_0056_a_file_that_does_not_load_fails_only_itself() {
-    // ADR-0056: "A worker crash or limit during discovery fails only that
+fn discovery_a_file_that_does_not_load_fails_only_itself() {
+    // ADR-0055: "A worker crash or limit during discovery fails only that
     // file; the service stays up". The normal part next to the endless
     // file is listed and builds (box(10, 20, 30) = 6000 mm³). The latency
     // of `/status` is the subject of the test above, not of this one.
@@ -2034,8 +1589,8 @@ part(\"Late\", #{}, |deps| box(1, 1, 1));
 ";
 
 #[test]
-fn adr_0056_memory_grown_during_discovery_is_a_load_error_of_that_file() {
-    // ADR-0056: "memory that grows between two measurements is stopped by
+fn discovery_memory_grown_during_discovery_is_a_load_error_of_that_file() {
+    // ADR-0055: "memory that grows between two measurements is stopped by
     // the worker's memory limit and reported as that file's load error
     // (`memory_limit`)"; a measurement that still catches it gives `limit`.
     // Either way: the service process itself never holds that memory, it
@@ -2059,7 +1614,7 @@ fn adr_0056_memory_grown_during_discovery_is_a_load_error_of_that_file() {
 }
 
 // ===========================================================================
-// §3.1: `discovering` in /status and `POST /discover` (ADR-0056)
+// §3.1: `discovering` in /status and `POST /discover` (ADR-0055)
 // ===========================================================================
 
 /// M1 and M2 (depends on M1) in one file.

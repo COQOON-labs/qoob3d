@@ -4,10 +4,10 @@
 //! cargo xtask check [--fast]   definition of done
 //! cargo xtask arch             crate dependency rules (ADR-0036)
 //! cargo xtask docs [--fix]     documentation lint, regenerates the ADR index (ADR-0001)
-//! cargo xtask screenshot [dir] UI screenshot + scene renders for visual review (ADR-0018)
+//! cargo xtask screenshot [dir] UI screenshot + scene renders for visual review (ADR-0013)
 //! cargo xtask i18n             translation keys complete and used keys defined (ADR-0020)
 //! cargo xtask printers <dir>   regenerate the printer database from OrcaSlicer (ADR-0021)
-//! cargo xtask models           reference project: build, check, export (ADR-0033)
+//! cargo xtask models           reference project: build, check, export (ADR-0013)
 //! cargo xtask hygiene          source rules beyond clippy (ADR-0037)
 //! cargo xtask commits <revs>   commit policy for a revision range (ADR-0037)
 //! cargo xtask commits --message <file>  same for one message (commit-msg hook)
@@ -235,7 +235,7 @@ fn screenshot(root: &Path, dir: Option<PathBuf>) -> bool {
     if !ok {
         return false;
     }
-    // The reference project (ADR-0033) from three sides.
+    // The reference project (ADR-0013) from three sides.
     let out = dir.join("reference.png");
     let args = ["render-project", ".", "--out", &out.to_string_lossy(), "--views", "iso,front,top"];
     let rendered = models::Reference::start(root)

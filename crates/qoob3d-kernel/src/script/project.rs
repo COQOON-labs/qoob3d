@@ -4,7 +4,7 @@
 //!
 //! [`PartMode`] decides what `part` does: build every part in order (plain
 //! script runs), only record the declarations (discovery in a worker,
-//! without OCCT, ADR-0056), or build exactly one part from the BREP files of its dependencies
+//! without OCCT, ADR-0055), or build exactly one part from the BREP files of its dependencies
 //! (worker process).
 
 use std::cell::RefCell;

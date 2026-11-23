@@ -1,4 +1,4 @@
-# Inline test module on a single line (ADR-0039, gap found by the test author)
+# Inline test module on a single line (ADR-0037, gap found by the test author)
 command: cargo xtask hygiene
 expect: test code belongs in its own file
 --- patch

@@ -38,8 +38,8 @@ flowchart LR
 | Unit tests live in `<module>/tests.rs`, never inline | `xtask hygiene` | `policy`, `check (macOS)` |
 | Every crate inherits the workspace lints | `xtask hygiene` | `policy`, `check (macOS)` |
 | Crate boundaries (ADR-0036) | `xtask arch` | `policy`, `check (macOS)` |
-| ADRs are well-formed, the index is current, nothing refers to a superseded ADR | `xtask docs` | `policy`, `check (macOS)` |
-| The repository is English (ADR-0045) | `xtask hygiene` | `policy`, `check (macOS)` |
+| ADRs are well-formed, the index is current, nothing refers to an unknown or superseded ADR | `xtask docs` | `policy`, `check (macOS)` |
+| The repository is English (ADR-0001) | `xtask hygiene` | `policy`, `check (macOS)` |
 | No hard-coded UI texts, translations complete (ADR-0020) | `xtask i18n` | `policy`, `check (macOS)` |
 | Author and committer are the identity in `harness/identity.txt`; no commit names an AI as author, co-author or generator | commit-msg, pre-push (`xtask commits`) | `policy` |
 | No secrets in the history | pre-push (gitleaks) | `policy` |

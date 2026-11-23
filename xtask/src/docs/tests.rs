@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn finds_adr_references() {
-    assert_eq!(adr_refs("see ADR-0036 and ADR-0012."), ["ADR-0036", "ADR-0012"]);
+    assert_eq!(adr_refs("see ADR-0036 and ADR-0013."), ["ADR-0036", "ADR-0013"]);
     assert!(adr_refs("ADR-NNNN, ADR-12").is_empty());
 }
 

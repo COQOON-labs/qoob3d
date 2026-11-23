@@ -5,9 +5,9 @@
 >
 > **Note of 2026-11-22:** the Python probe scripts (`werft/m0/*.py`) and the raw JSON data
 > (`m0/*.json`) named below were removed from the working tree because the repository is
-> English (ADR-0045) and the architecture moved to Rust (ADR-0053). They remain in Git history
+> English (ADR-0001) and the architecture moved to Rust (ADR-0053). They remain in Git history
 > (last present in commit 82e4ec6). The analytic volume formulas live on in
-> `crates/qoob3d-kernel/tests/script_m0.rs`.
+> `crates/qoob3d-kernel/tests/script_examples.rs`.
 >
 > Translation notes: the concept is [`werft-concept.md`](werft-concept.md) (originally
 > `werft/docs/konzept.md`). The raw data and the image moved with this report and are linked
@@ -370,7 +370,7 @@ I need your decision on this point.
   real comparison (1.1).
 - Repetition of the measurement on the Mac.
 - Cause: iso render without the pocket; non-watertight STL of imported STEP bodies.
-- Repository rule ADR-0045 ("everything English"): `docs/konzept.md` and this
+- Repository rule ADR-0001 ("everything English"): `docs/konzept.md` and this
   report are German. `cargo xtask hygiene` reports 88 lines in
   `docs/konzept.md`. Remedy: a human enters `path: werft/docs/` in
   `harness/language-allowlist.txt`; I must not change that file. The

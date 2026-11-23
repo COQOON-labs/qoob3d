@@ -201,7 +201,7 @@ fn spawn_watchdog(frames: Arc<AtomicU64>) {
 
 // ----------------------------------------------------------------- script
 
-#[expect(clippy::too_many_lines, reason = "predates ADR-0040; split when next changed")]
+#[expect(clippy::too_many_lines, reason = "predates ADR-0037; split when next changed")]
 fn steps() -> Vec<Step> {
     vec![
         Step {

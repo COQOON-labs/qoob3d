@@ -1,4 +1,4 @@
-# More lint suppressions than allowed (ADR-0040)
+# More lint suppressions than allowed (ADR-0037)
 command: cargo xtask hygiene
 expect: lint suppressions (#[expect]),
 --- patch

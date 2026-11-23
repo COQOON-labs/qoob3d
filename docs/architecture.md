@@ -43,7 +43,7 @@ flowchart LR
    graph, cache key), the task inbox and the printer database (441 models generated from
    OrcaSlicer profiles, ADR-0021).
 2. **Kernel** (`qoob3d-kernel`): the only place with OCCT. Our own exception-safe C++ wrappers
-   (ADR-0014) on the `opencascade-sys` fork (ADR-0047). `script` runs model scripts (Rhai) on
+   (ADR-0004) on the `opencascade-sys` fork (ADR-0004). `script` runs model scripts (Rhai) on
    the calling thread: primitives, batched booleans with a plausibility rule, profiles and
    profile algebra, pipes, fillets, shells, measures, checks, STEP/STL/3MF export
    (ADR-0053). `tessellate` turns shapes into `ShapeMesh`.
@@ -51,7 +51,7 @@ flowchart LR
    service on 127.0.0.1 with a job queue, cache index and part states. `qoob3d worker` is the
    only process that runs OCCT for project builds (JSON lines on stdin/stdout, killed and
    replaced on time or memory limit or crash). Parts are declared without OCCT (`part()`
-   only records), and in a worker too: the service never evaluates a script (ADR-0056);
+   only records), and in a worker too: the service never evaluates a script (ADR-0055);
    `/status` answers from the last known declarations and lists files that do not load per
    file. Cache entries `.qoob3d/cache/<part>/<key>.{brep,qmsh,json}` are written by the
    worker and carry whether the mesh is watertight.
@@ -80,7 +80,7 @@ flowchart LR
    the service if needed, and a `Poller` thread polls `/status` and loads changed meshes
    (`docs/requirements/project-app.md`). Without a project it shows an empty state. Panels
    (toolbar, browser with the parts), navigation (Fusion, orbit around cursor pivot via
-   raycast, ADR-0017; left-drag orbit, ADR-0022), ViewCube and overlays in egui (ADR-0015),
+   raycast, ADR-0008; left-drag orbit, ADR-0008), ViewCube and overlays in egui (ADR-0019),
    camera animations. All texts via Fluent (English base, ADR-0020), saved `Settings`.
 6. **Renderer** (`qoob3d-render`): background, bodies, edges (pixel-wide quads), grid with
    print bed and axes (ADR-0021). Offscreen with MSAA, reverse-Z; egui gets a Unorm view
@@ -105,7 +105,7 @@ flowchart TD
     app --> render[qoob3d-render]
     kernel --> core
     render --> core
-    kernel --> occsys[third_party/opencascade-sys<br/>fork, ADR-0047]
+    kernel --> occsys[third_party/opencascade-sys<br/>fork, ADR-0004]
 ```
 
 ## Where do I find what?
@@ -144,4 +144,4 @@ flowchart TD
 | Reference project (gate) | `models/`, `xtask/src/models.rs` |
 | Checks, docs lint, architecture rules, screenshots | `xtask/src/` |
 | AI harness: write protection for harness files, commit policy, hygiene, self-test | `.claude/hooks/guard.sh`, `xtask/src/{commits,hygiene,selftest,paths}.rs`, `harness/`, `.claude/`, `.githooks/`, `.github/workflows/` – overview `docs/harness.md` |
-| Unit tests of a module | `<module>/tests.rs` next to `<module>.rs` (ADR-0039) |
+| Unit tests of a module | `<module>/tests.rs` next to `<module>.rs` (ADR-0037) |

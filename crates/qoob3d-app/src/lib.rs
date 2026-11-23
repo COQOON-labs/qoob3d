@@ -1,5 +1,5 @@
 //! QOOB3D desktop application. Library part of the `qoob3d` binary, so UI
-//! tests (egui_kittest, ADR-0018) can drive the real app.
+//! tests (egui_kittest, ADR-0013) can drive the real app.
 
 pub mod app;
 pub mod cli;

@@ -175,7 +175,7 @@ pub struct ViewportRenderer {
 }
 
 impl ViewportRenderer {
-    #[expect(clippy::too_many_lines, reason = "predates ADR-0040; split when next changed")]
+    #[expect(clippy::too_many_lines, reason = "predates ADR-0037; split when next changed")]
     pub fn new(device: &wgpu::Device) -> Self {
         use wgpu::CompareFunction::{Always, Greater, GreaterEqual};
         let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/scene.wgsl"));

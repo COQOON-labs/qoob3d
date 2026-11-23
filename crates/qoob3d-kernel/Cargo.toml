@@ -8,7 +8,7 @@ publish.workspace = true
 
 [dependencies]
 qoob3d-core.workspace = true
-# OCCT built from source (`builtin`) and its types for our own cxx bridge (ADR-0047).
+# OCCT built from source (`builtin`) and its types for our own cxx bridge (ADR-0004).
 opencascade-sys = { version = "0.3", features = ["builtin"] }
 cxx = "1"
 thiserror.workspace = true

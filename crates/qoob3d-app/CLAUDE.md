@@ -1,6 +1,6 @@
 # qoob3d-app
 
-Library + binary `qoob3d` (ADR-0018): the app that shows a script project live, the project
+Library + binary `qoob3d` (ADR-0013): the app that shows a script project live, the project
 service, its workers, the CLI and the MCP server (ADR-0053, ADR-0054).
 
 ## Rules
@@ -9,7 +9,7 @@ service, its workers, the CLI and the MCP server (ADR-0053, ADR-0054).
   `Response` methods and no other `ctx` accesses. Fetch the state into local
   variables beforehand.
 - Navigation exactly as in `docs/design/controls.md` (ADR-0008). When changing, adjust both.
-- egui draws the overlays (ViewCube, navigation bar, pivot), wgpu the scene (ADR-0015).
+- egui draws the overlays (ViewCube, navigation bar, pivot), wgpu the scene (ADR-0019).
 - **No visible texts in code** (ADR-0020): always `tr("key")` / `tr_args(…)`.
   Create new keys in **all** `locales/*/main.ftl` (English = base). `cargo xtask i18n`
   checks this. Numbers via `i18n::decimal`.
@@ -36,7 +36,7 @@ service, its workers, the CLI and the MCP server (ADR-0053, ADR-0054).
   routing (`Service::allowed`, AG-HD-03, ADR-0055); `http.rs` minimal server side HTTP; `jobs.rs` job
   queue and parallel part scheduling, cache hits; `pool.rs` warm workers, time/memory/crash
   limits, replacement, recycling above `[workers] recycle_mb` (AG-PF-03); `discovery.rs`
-  declaration discovery (ADR-0056): every changed part or check file goes to a worker
+  declaration discovery (ADR-0055): every changed part or check file goes to a worker
   (`Probe::Declare`) on a thread of its own, answers and load errors cached by file and
   literal-import bytes; `/status` and `/mesh` never wait for discovery and show the last
   known declarations (parts of a file under rediscovery `outdated`, of a broken file `failed`,
@@ -106,7 +106,7 @@ service, its workers, the CLI and the MCP server (ADR-0053, ADR-0054).
   state (WA-OP-04). Returns `UiAction`s, `app.rs` executes them.
 - `src/viewport.rs`: viewport widget, camera animation, overlays, navigation bar.
 - `src/viewcube.rs`: ViewCube (pure geometry + drawing), with unit tests.
-- `src/navigation.rs`: mouse/trackpad → `Camera`, orbit pivot via raycast (ADR-0017).
+- `src/navigation.rs`: mouse/trackpad → `Camera`, orbit pivot via raycast (ADR-0008).
 - `src/theme.rs`: colors and egui style.
 - `src/i18n.rs` + `locales/`: translations (Fluent). `src/settings.rs`: saved settings.
 - `src/smoke.rs`: smoke test script and watchdog. Discards real input (otherwise the
@@ -115,11 +115,15 @@ service, its workers, the CLI and the MCP server (ADR-0053, ADR-0054).
 - `tests/ui.rs`: UI tests of the real app (demo body, empty state), screenshots on request.
 - `tests/project.rs` (+ `tests/common/`): live project view against a fake service.
 - `tests/service.rs`: service, workers, cache and CLI against the real binary (R2/R3).
-- `tests/agent.rs`, `tests/mcp.rs` (+ `tests/common/agent.rs`): R4 against the real binary:
+- Shared test support in `tests/common/` (included with `#[path]`; every item in a file is used
+  by every test that includes it, which keeps dead-code warnings away): `agent.rs` (project,
+  processes, HTTP, envelope, `Service`, CLI), `inspect.rs`, `artifacts.rs` (PNG, Git),
+  `builds.rs`, `mcp.rs` (MCP stdio client); `mod.rs` is the fake service of `tests/project.rs`.
+- `tests/agent.rs`, `tests/mcp.rs`: the agent workflow against the real binary:
   checks, tasks, run, measure, save, init, render-project; the MCP server and the acceptance.
   `tests/mcp_guide.rs`: guide, served reference, contact sheet, `task_get` (R5).
 - `tests/perf.rs`: recycling, cache eviction, tessellation settings, bench (P1, AG-PF-03..06).
 
 ## Relevant ADRs
 
-ADR-0008, ADR-0013, ADR-0015, ADR-0017, ADR-0018, ADR-0019, ADR-0020, ADR-0021, ADR-0022, ADR-0023, ADR-0034, ADR-0053, ADR-0054, ADR-0055, ADR-0056
+ADR-0008, ADR-0013, ADR-0019, ADR-0008, ADR-0013, ADR-0019, ADR-0020, ADR-0021, ADR-0008, ADR-0021, ADR-0034, ADR-0053, ADR-0054, ADR-0055

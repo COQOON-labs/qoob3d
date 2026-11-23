@@ -1,7 +1,7 @@
 //! Worker jobs that write nothing (R4, agent.md §4.2–4.3): one check of a
 //! check file (AG-CK-01..03), a throwaway script (AG-SV-05), the measures
 //! of one or two parts (AG-SV-06), and what a part or check file declares
-//! (ADR-0056). `Request::deps` maps the built parts to their BREP files.
+//! (ADR-0055). `Request::deps` maps the built parts to their BREP files.
 
 use std::time::Instant;
 
