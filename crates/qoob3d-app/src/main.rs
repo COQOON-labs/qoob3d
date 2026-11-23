@@ -1,9 +1,8 @@
 //! QOOB3D – parametric CAD for FDM printing.
 
 use clap::Parser as _;
-use qoob3d_app::{
-    app, cli, client, init, mcp, project_render, service, service_cli, smoke, worker,
-};
+use qoob3d_app::{app, cli, project_render, service_cli, smoke};
+use qoob3d_project::{client, init, mcp, service, worker};
 
 fn main() -> anyhow::Result<()> {
     // Logs go to stderr: stdout carries the worker protocol and CLI envelopes.

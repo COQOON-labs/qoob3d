@@ -3,7 +3,7 @@ id: ADR-0055
 title: The project service runs once per folder under a file lock, talks to its workers in framed JSON lines, never evaluates user scripts itself and accepts only local requests with a per-start token
 status: accepted
 date: 2026-11-23
-crates: [qoob3d-core, qoob3d-kernel, qoob3d-app]
+crates: [qoob3d-core, qoob3d-kernel, qoob3d-project]
 tags: [service, workers, cache, security, performance, dependencies]
 supersedes: []
 superseded_by: null
@@ -121,10 +121,10 @@ pure Rust; a hand-written parser or hash would cost more to maintain. `rhai` in
 
 ## References
 
-- Code: `crates/qoob3d-app/src/service.rs`, `crates/qoob3d-app/src/service/`
+- Code: `crates/qoob3d-project/src/service.rs`, `crates/qoob3d-project/src/service/`
   (`pool.rs`, `jobs.rs`, `discovery.rs`, `snapshot.rs`, `http.rs`, `bench.rs`),
-  `crates/qoob3d-app/src/worker.rs`, `crates/qoob3d-app/src/worker/probe.rs`,
-  `crates/qoob3d-app/src/client.rs`, `crates/qoob3d-kernel/src/script/project.rs`,
+  `crates/qoob3d-project/src/worker.rs`, `crates/qoob3d-project/src/worker/probe.rs`,
+  `crates/qoob3d-project/src/client.rs`, `crates/qoob3d-kernel/src/script/project.rs`,
   `crates/qoob3d-kernel/src/script/limits.rs`, `crates/qoob3d-core/src/project/layout.rs`
 - Requirements: `docs/requirements/agent.md` (AG-HD-01 … AG-HD-09, AG-PJ-05, sections 2–6)
 - Related: ADR-0053, ADR-0054

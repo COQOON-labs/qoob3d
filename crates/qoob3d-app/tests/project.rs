@@ -20,9 +20,9 @@ use common::{FakePart, FakeService, Mode, TempProject, cube_qmesh, same_dir, tok
 use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable as _;
-use qoob3d_app::client::{self, Client, Part, PartState, ProjectDir};
 use qoob3d_app::live::{self, Live, Poller, Update};
 use qoob3d_app::{QoobApp, StartOptions};
+use qoob3d_project::client::{self, Client, Part, PartState, ProjectDir};
 
 /// Generous upper bound for waiting on background work; the tests normally
 /// finish in a fraction of it.

@@ -71,7 +71,7 @@ needed (rustup is installed keg-only via Homebrew).
    number is capped (ADR-0037). Never weaken assertions to get tests green.
 5. **Never accept golden files and snapshots without asking the user.**
 6. **Crate boundaries** (ADR-0036): `core` without OCCT/GPU/UI; kernel and renderer do not know
-   each other.
+   each other; `qoob3d-project` (service, worker, MCP) without GPU/UI.
 7. After every milestone: test list for the user, update the status below, adjust
    `docs/architecture.md` if the big picture has changed.
 8. Commits only on the user's instruction. **No AI attribution** (`Co-Authored-By: Claude`,
@@ -93,7 +93,8 @@ needed (rustup is installed keg-only via Homebrew).
   `crates/qoob3d-app/locales/de/` and in tests that assert German translations (ADR-0001).
 - **UI texts: English as base language, German as language pack** (ADR-0020). Never literals
   in UI code, always `tr("key")`, keys in all `crates/qoob3d-app/locales/*/main.ftl`.
-- Errors: `thiserror` in libraries, `anyhow` only in `qoob3d-app`. Logging with `tracing`.
+- Errors: `thiserror` in libraries, `anyhow` only in process code (`qoob3d-app`,
+  `qoob3d-project`; ADR-0036). Logging with `tracing`.
 - `unsafe_code = "deny"` in the whole workspace. FFI exclusively via cxx.
 - Units: mm, +Z up (ADR-0006).
 
@@ -147,13 +148,13 @@ Crate-specific pitfalls are in the respective `crates/<crate>/CLAUDE.md`.
 | R4 | Task inbox with roles and review gate, checks, MCP server with confined file tools and render, `init`, `save`. ADR-0054 | ✅ done |
 | P1 | Performance and memory: parallel booleans, profile algebra, worker recycling, cache eviction, tessellation settings, `bench` | ✅ done |
 | R5 | Findings of the first agent run and of the critic: task binding, guide, API helpers, service hardening | implemented, acceptance run open |
-| C1 | Cleanup 2026-11: lean harness, old interactive path removed, topic ADRs | in progress (branch `cleanup`) |
+| C1 | Cleanup 2026-11: lean harness, old interactive path removed, topic ADRs | ✅ done (PR #7) |
+| C2 | Own crate `qoob3d-project` for service, worker, client, MCP and `init` | in progress (branch `project-crate`) |
 
 ## Open items
 
-- **Own crate `qoob3d-project`** for service, worker and MCP, and a **typed service
-  protocol** instead of indexing `serde_json::Value`: agreed as separate PRs after the cleanup.
-  The crate rules live in `xtask/src/arch.rs` (harness).
+- **Typed service protocol** instead of indexing `serde_json::Value` on both sides: agreed as
+  a separate PR after the cleanup.
 - **App side of the agent workflow:** tasks and annotations in the app, mouse tools that write
   script lines (concept 7a), photo measurement (concept 6a), print analysis.
 - **OS sandbox for the harness** (agreed 2026-10-15): the guard only blocks the edit tools on

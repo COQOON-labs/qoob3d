@@ -48,7 +48,8 @@ flowchart LR
    algebra, pipes, fillets, shells, measures, checks, STEP export (ADR-0053). `tessellate`
    turns shapes into `ShapeMesh`. STL and 3MF are written by the service from the cached
    meshes (ADR-0034).
-3. **Service and workers** (`qoob3d-app`, binary `qoob3d`): `qoob3d serve <DIR>` is an HTTP
+3. **Service and workers** (`qoob3d-project`; the binary `qoob3d` of `qoob3d-app` dispatches
+   to it): `qoob3d serve <DIR>` is an HTTP
    service on 127.0.0.1 with a job queue, cache index and part states. `qoob3d worker` is the
    only process that runs OCCT for project builds (JSON lines on stdin/stdout, killed and
    replaced on time or memory limit or crash). Parts are declared without OCCT (`part()`
@@ -102,8 +103,11 @@ flowchart LR
 flowchart TD
     app[qoob3d-app] --> core[qoob3d-core]
     xtask[xtask] --> core
+    app --> project[qoob3d-project]
     app --> kernel[qoob3d-kernel]
     app --> render[qoob3d-render]
+    project --> core
+    project --> kernel
     kernel --> core
     render --> core
     kernel --> occsys[third_party/opencascade-sys<br/>fork, ADR-0004]
@@ -123,13 +127,14 @@ flowchart TD
 | Script kernel: Rhai CAD API, sandbox, errors, STEP export (ADR-0053) | `crates/qoob3d-kernel/src/script.rs`, `src/script/`, reference `docs/script-api.md` |
 | `check`/`expect…` in scripts, measures of shapes from Rust | `crates/qoob3d-kernel/src/script/{check,measure}.rs` |
 | Own OCCT wrappers (C++), tessellation | `crates/qoob3d-kernel/cpp/`, bridge `src/occt.rs`, `src/tessellate.rs` |
-| Project service, jobs, worker pool and limits, part states | `crates/qoob3d-app/src/service.rs`, `src/service/` |
-| Worker process (build a part, cache entry, STEP) | `crates/qoob3d-app/src/worker.rs` |
-| Checks, throwaway scripts, measure, save, task endpoints | `crates/qoob3d-app/src/service/{checks,probe,save,tasks}.rs`, `src/worker/probe.rs` |
-| Service client (project folder, token, HTTP) | `crates/qoob3d-app/src/client.rs` |
+| Project service, jobs, worker pool and limits, part states | `crates/qoob3d-project/src/service.rs`, `src/service/` |
+| Worker process (build a part, cache entry, STEP) | `crates/qoob3d-project/src/worker.rs` |
+| Checks, throwaway scripts, measure, save, task endpoints | `crates/qoob3d-project/src/service/{checks,probe,save,tasks}.rs`, `src/worker/probe.rs` |
+| Service client (project folder, token, HTTP) | `crates/qoob3d-project/src/client.rs` |
 | CLI clients `build`, `status`, `export`, `values`, `check`, `task` | `crates/qoob3d-app/src/service_cli.rs` |
-| MCP server (tools, confined files, render, embedded reference and guide) | `crates/qoob3d-app/src/mcp.rs`, `src/mcp/` |
-| `qoob3d init`, `qoob3d render-project`, contact sheet | `crates/qoob3d-app/src/{init,project_render}.rs`, `src/project_render/sheet.rs` |
+| MCP server (tools, confined files, render, embedded reference and guide) | `crates/qoob3d-project/src/mcp.rs`, `src/mcp/` |
+| `qoob3d init` | `crates/qoob3d-project/src/init.rs` |
+| `qoob3d render-project`, contact sheet | `crates/qoob3d-app/src/project_render.rs`, `src/project_render/sheet.rs` |
 | Script project shown live (poller, view model) | `crates/qoob3d-app/src/live.rs` |
 | App, panels (toolbar, browser, empty state) | `crates/qoob3d-app/src/{app,panels}.rs` |
 | Viewport widget, overlays, navigation bar | `crates/qoob3d-app/src/viewport.rs` |

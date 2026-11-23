@@ -31,8 +31,8 @@ use std::time::{Duration, Instant};
 
 use builds::WAIT_S;
 use inspect::assert_vec;
-use qoob3d_app::client;
 use qoob3d_core::qmesh;
+use qoob3d_project::client;
 use serde_json::{Value, json};
 use support::{
     BIN, Project, START, Service, VOL, alive, assert_rel, assert_rel_f64, cli, exchange, kill,

@@ -4,11 +4,11 @@
 
 use eframe::egui::{self, Align, Layout, RichText};
 
-use crate::client::PartState;
 use crate::i18n::{self, Language, tr};
 use crate::live::Live;
 use crate::settings::Settings;
 use crate::theme;
+use qoob3d_project::client::PartState;
 
 /// Something the user asked for in a panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

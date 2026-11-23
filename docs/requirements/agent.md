@@ -50,7 +50,7 @@ layer where OCCT has it.
 - Crate placement (ADR-0053): parsing `qoob3d.toml`, `values/*.toml`, part declarations
   discovery, build graph and cache keys are pure logic in `qoob3d-core` (module
   `project`, must not depend on OCCT); evaluating parts uses `qoob3d_kernel::script` inside
-  the worker; workers and the job runner live in `qoob3d-app`.
+  the worker; workers and the job runner live in `qoob3d-project`.
 - Part declaration is found without running OCCT: the script is evaluated with a stub
   `part()` that only records name, options and the closure; `deps` passed to the closure is
   a map name → shape of the built dependencies.

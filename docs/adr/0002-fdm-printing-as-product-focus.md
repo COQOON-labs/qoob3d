@@ -51,7 +51,7 @@ In trade-offs, whatever improves the path **design → slicer → print** wins. 
 
 ## References
 
-- `crates/qoob3d-core/src/project/mod.rs` (`Mesh`), `crates/qoob3d-app/src/worker.rs`
+- `crates/qoob3d-core/src/project/mod.rs` (`Mesh`), `crates/qoob3d-project/src/worker.rs`
   (`watertight`), `xtask/src/models.rs` (reference gate, Bambu Studio),
   `crates/qoob3d-core/src/mesh.rs` (`MeshReport`), `crates/qoob3d-core/src/export.rs`
 - `docs/script-api.md` (sections Print analysis, FDM helpers)

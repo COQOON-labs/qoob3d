@@ -1,0 +1,20 @@
+[package]
+name = "qoob3d-project"
+description = "QOOB3D script projects: the service, its workers, the service client and the MCP server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+qoob3d-core.workspace = true
+# Only the worker process runs the kernel; the service never does (ADR-0055).
+qoob3d-kernel.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Process code (service, worker, MCP server) reports errors with context (ADR-0036).
+anyhow.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

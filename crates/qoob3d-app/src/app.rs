@@ -12,7 +12,6 @@ use qoob3d_core::{Aabb, ShapeMesh};
 use qoob3d_kernel::VIEW_TESSELLATION_TOLERANCE_MM;
 use qoob3d_kernel::script::{self, RunOptions};
 
-use crate::client::{PartState, ProjectDir};
 use crate::i18n::{self, decimal, tr, tr_args};
 use crate::live::{Live, Poller};
 use crate::panels::{self, UiAction};
@@ -21,6 +20,7 @@ use crate::smoke::{Control, Observation, SmokeTest};
 use crate::theme;
 use crate::viewcube::CubeFace;
 use crate::viewport::Viewport;
+use qoob3d_project::client::{PartState, ProjectDir};
 
 /// The demo body: a block with a hole, something to navigate around.
 const DEMO_SCRIPT: &str = r#"show(box(40, 30, 15) - cylinder(14, 15), "demo");"#;
@@ -102,7 +102,7 @@ impl QoobApp {
             Ok(project) => {
                 let name = project.name();
                 let ctx = ctx.clone();
-                let cmd = crate::client::service_command_from_env();
+                let cmd = qoob3d_project::client::service_command_from_env();
                 let poller = Poller::open(project, cmd, move || ctx.request_repaint());
                 self.project = Some(Open { name, live: Live::default(), poller, shown: 0 });
                 self.demo = false;

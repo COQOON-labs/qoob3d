@@ -7,13 +7,15 @@ use std::process::Command;
 use serde_json::Value;
 
 const WORKSPACE_CRATES: &[&str] =
-    &["qoob3d-core", "qoob3d-kernel", "qoob3d-render", "qoob3d-app", "xtask"];
+    &["qoob3d-core", "qoob3d-kernel", "qoob3d-render", "qoob3d-project", "qoob3d-app", "xtask"];
 
 /// Allowed direct dependencies on other workspace crates.
 fn allowed_workspace_deps(krate: &str) -> &'static [&'static str] {
     match krate {
         "qoob3d-kernel" | "qoob3d-render" => &["qoob3d-core"],
-        "qoob3d-app" => &["qoob3d-core", "qoob3d-kernel", "qoob3d-render"],
+        // Service, workers and MCP: the kernel runs only in the worker process.
+        "qoob3d-project" => &["qoob3d-core", "qoob3d-kernel"],
+        "qoob3d-app" => &["qoob3d-core", "qoob3d-kernel", "qoob3d-render", "qoob3d-project"],
         // Gates read models and exports; geometry is checked via the binary.
         "xtask" => &["qoob3d-core"],
         _ => &[],
@@ -29,7 +31,8 @@ fn forbidden_transitive(krate: &str) -> &'static [&'static str] {
         "qoob3d-core" => {
             &["opencascade-sys", "occt-sys", "wgpu", "eframe", "egui", "egui-wgpu", "winit"]
         }
-        "qoob3d-kernel" => &GPU_UI,
+        // The service side runs headless: no GPU or UI, not even transitively.
+        "qoob3d-kernel" | "qoob3d-project" => &GPU_UI,
         "qoob3d-render" => &OCCT,
         _ => &[],
     }

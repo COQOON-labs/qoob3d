@@ -99,7 +99,7 @@ pub(super) fn render(dir: &Path, args: &Value) -> Result<(Value, String), String
     }
     let exe = std::env::current_exe().map_err(io)?;
     let mut command = Command::new(exe);
-    command.arg(crate::cli::RENDER_PROJECT).arg(dir).arg("--out").arg(&out);
+    command.arg(crate::RENDER_PROJECT).arg(dir).arg("--out").arg(&out);
     command.args(["--views", &names.join(","), "--size", &format!("{width}x{height}")]);
     if !parts.is_empty() {
         command.arg(format!("--parts={}", parts.join(",")));

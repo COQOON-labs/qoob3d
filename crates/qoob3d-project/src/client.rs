@@ -81,7 +81,7 @@ struct ServiceJson {
 
 /// `text` as one segment of a request path (AG-HD-04): everything but
 /// unreserved characters is percent-encoded, so a name never changes the path.
-pub(crate) fn segment(text: &str) -> String {
+pub fn segment(text: &str) -> String {
     let mut out = String::new();
     for b in text.bytes() {
         if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
@@ -170,7 +170,7 @@ impl Client {
     }
 
     /// The service from `service.json`, if it answers in time.
-    pub(crate) fn probe(project: &ProjectDir) -> Option<Self> {
+    pub fn probe(project: &ProjectDir) -> Option<Self> {
         let client = Self { project: project.clone(), service: project.service()? };
         let response = client.request("GET", "/status", None, STATUS_TIMEOUT).ok()?;
         envelope::<StatusResult>(&response).ok().map(|_| client)
@@ -178,7 +178,7 @@ impl Client {
 
     /// Reads `service.json` again (AG-HD-05): a restarted service has
     /// another port and token.
-    pub(crate) fn reload(&mut self) {
+    pub fn reload(&mut self) {
         if let Some(service) = self.project.service().filter(|s| *s != self.service) {
             tracing::info!(port = service.port, "project service restarted, reconnecting");
             self.service = service;

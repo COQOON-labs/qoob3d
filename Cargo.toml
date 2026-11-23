@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 qoob3d-core = { path = "crates/qoob3d-core" }
 qoob3d-kernel = { path = "crates/qoob3d-kernel" }
+qoob3d-project = { path = "crates/qoob3d-project" }
 qoob3d-render = { path = "crates/qoob3d-render" }
 
 eframe = "0.36.2"

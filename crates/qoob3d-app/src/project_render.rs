@@ -14,8 +14,10 @@ use qoob3d_core::ShapeMesh;
 use qoob3d_render::ViewPreset;
 use serde_json::{Value, json};
 
-use crate::client::{BUILD_TIMEOUT, Client, ProjectDir, START_TIMEOUT, service_command_from_env};
 use crate::headless_render;
+use qoob3d_project::client::{
+    BUILD_TIMEOUT, Client, ProjectDir, START_TIMEOUT, service_command_from_env,
+};
 
 /// Margin over the build wait for the answer of the build request.
 const ANSWER_MARGIN: Duration = Duration::from_secs(30);

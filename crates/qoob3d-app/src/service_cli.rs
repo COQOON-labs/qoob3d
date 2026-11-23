@@ -9,7 +9,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::cli::{ProjectCommand as Command, TaskCommand};
-use crate::client::{Client, ProjectDir, START_TIMEOUT, segment, service_command_from_env};
+use qoob3d_project::client::{
+    Client, ProjectDir, START_TIMEOUT, segment, service_command_from_env,
+};
 
 /// Requests that do not wait for builds.
 const QUICK: Duration = Duration::from_secs(30);

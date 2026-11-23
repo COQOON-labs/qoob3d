@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use qoob3d_project::RENDER_PROJECT;
 use qoob3d_render::ViewPreset;
 
 #[derive(Debug, Parser)]
@@ -24,10 +25,6 @@ pub struct Cli {
     #[arg(long)]
     pub smoke_test: bool,
 }
-
-/// Name of [`Command::RenderProject`] on the command line, for callers that
-/// start it as a child process (the MCP tool `render`).
-pub const RENDER_PROJECT: &str = "render-project";
 
 /// Script project commands (ADR-0053, docs/requirements/agent.md §2–3).
 #[derive(Debug, Subcommand)]

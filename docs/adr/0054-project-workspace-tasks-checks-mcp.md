@@ -3,7 +3,7 @@ id: ADR-0054
 title: The project folder is the shared workspace of human and agent, with a task inbox, checks as the review gate and MCP as the agent's main interface
 status: accepted
 date: 2026-11-23
-crates: [qoob3d-core, qoob3d-kernel, qoob3d-app]
+crates: [qoob3d-core, qoob3d-kernel, qoob3d-project, qoob3d-app]
 tags: [architecture, ai-first, mcp, tasks, checks]
 supersedes: []
 superseded_by: null
@@ -94,9 +94,9 @@ examples import.
 ## References
 
 - Code: `crates/qoob3d-core/src/tasks/`, `crates/qoob3d-kernel/src/script/check.rs`,
-  `crates/qoob3d-app/src/service/{checks,probe,save,tasks}.rs`, `crates/qoob3d-app/src/mcp.rs`,
-  `crates/qoob3d-app/src/mcp/{tools,files,render,resources}.rs`,
-  `crates/qoob3d-app/src/mcp/guide.md`, `crates/qoob3d-app/src/{init,project_render,service_cli}.rs`
+  `crates/qoob3d-project/src/service/{checks,probe,save,tasks}.rs`, `crates/qoob3d-project/src/mcp.rs`,
+  `crates/qoob3d-project/src/mcp/{tools,files,render,resources}.rs`,
+  `crates/qoob3d-project/src/mcp/guide.md`, `crates/qoob3d-project/src/init.rs`, `crates/qoob3d-app/src/{project_render,service_cli}.rs`
 - `docs/requirements/agent.md` (section 4), `docs/script-api.md`,
   `docs/concept/werft-concept.md` (sections 2, 5, 6, 7)
 - Related: ADR-0053, ADR-0055
