@@ -1,6 +1,6 @@
 ---
 name: harness-auditor
-description: Checks whether the quality harness is still fit for purpose and reliable (ADR-0042) – self-test, rule coverage, gaps, false alarms, run time. For the regular harness audit. Changes nothing, proposes changes.
+description: Checks whether the quality harness is still fit for purpose and reliable (ADR-0037) – self-test, gaps, false alarms, run time. For a harness audit. Changes nothing, proposes changes.
 tools: Read, Grep, Glob, Bash
 disallowedTools: Edit, Write, NotebookEdit
 model: inherit

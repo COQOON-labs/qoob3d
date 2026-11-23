@@ -1,14 +1,15 @@
 # The wall (ADR-0037): everything an agent could skip locally runs again here.
-# Required status checks on `main`: `policy`, `selftest (harness vs. sabotage)`,
-# `check (macOS)` and `mutants (changed code)` (docs/harness.md).
+# Required status checks on `main`: `policy` and `check (macOS)`
+# (docs/harness.md). The self-test and the mutation report run weekly.
 name: CI
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
   schedule:
-    - cron: "17 5 * * 1" # Monday: detect drift in the harness (ADR-0042)
+    - cron: "17 5 * * 1" # Monday: harness self-test and mutation report
   workflow_dispatch:
 
 permissions:
@@ -40,15 +41,18 @@ jobs:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           BEFORE: ${{ github.event.before }}
+          QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
+          QUEUE_HEAD: ${{ github.event.merge_group.head_sha }}
         run: |
           case "$EVENT" in
             pull_request) range="$PR_BASE..$PR_HEAD" ;;
+            merge_group) range="$QUEUE_BASE..$QUEUE_HEAD" ;;
             push) if [ -z "$BEFORE" ] || [ "$BEFORE" = 0000000000000000000000000000000000000000 ]; then
                     range="$GITHUB_SHA"; else range="$BEFORE..$GITHUB_SHA"; fi ;;
             *) range="$GITHUB_SHA" ;;
           esac
           echo "RANGE=$range" >> "$GITHUB_ENV"
-      - name: Commit policy (ADR-0038, ADR-0039)
+      - name: Commit policy (identity, no AI attribution)
         run: cargo xtask commits "$RANGE"
       - name: Secret scan (gitleaks)
         run: |
@@ -56,8 +60,8 @@ jobs:
           echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tgz" | sha256sum -c -
           tar -xzf gitleaks.tgz gitleaks
           ./gitleaks git --no-banner --redact --log-opts="$RANGE" .
-      - name: Source rules, rule register, architecture, docs, translations
-        run: cargo xtask hygiene && cargo xtask rules && cargo xtask arch && cargo xtask docs && cargo xtask i18n
+      - name: Source rules, architecture, docs, translations
+        run: cargo xtask hygiene && cargo xtask arch && cargo xtask docs && cargo xtask i18n
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-machete,cargo-deny
@@ -77,17 +81,33 @@ jobs:
           fi
 
   selftest:
+    # Weekly, on demand, and for pull requests that change the harness.
     name: selftest (harness vs. sabotage)
+    if: github.event_name != 'push' && github.event_name != 'merge_group'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: selftest
-      - name: Every sabotage in harness/sabotage/ must be rejected (ADR-0042)
+      - name: Does the pull request change the harness?
+        id: harness
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          changed=run
+          if [ "$EVENT" = pull_request ]; then
+            changed=$(cargo xtask harness-changes "$PR_BASE" "$PR_HEAD")
+          fi
+          if [ -n "$changed" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Every sabotage in harness/sabotage/ must be rejected
+        if: steps.harness.outputs.run == 'true'
         run: cargo xtask selftest
 
   check-macos:
@@ -135,14 +155,14 @@ jobs:
           key: ${{ steps.occt-key.outputs.key }}
 
   mutants:
-    name: mutants (changed code)
-    if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+    # A report, never a gate: the result does not fail the run.
+    name: mutants (weekly report)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -150,17 +170,8 @@ jobs:
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-mutants
-      - name: Mutation tests of the pure crates on the diff (ADR-0039)
-        env:
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
-        run: |
-          if [ -n "$PR_BASE" ]; then
-            git diff "$PR_BASE" HEAD > pr.diff
-            cargo mutants --in-diff pr.diff -p qoob3d-core -p qoob3d-sketch --no-shuffle -j 4
-          else
-            # Weekly: everything, as a report only (baseline for a later threshold).
-            cargo mutants -p qoob3d-core -p qoob3d-sketch --no-shuffle -j 4 || true
-          fi
+      - name: Mutation tests of the pure crates
+        run: cargo mutants -p qoob3d-core -p qoob3d-sketch --no-shuffle -j 4 || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

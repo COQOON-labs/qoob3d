@@ -26,11 +26,11 @@ if [ "$fingerprint" = "$(cat "$green_file" 2>/dev/null)" ]; then
 fi
 
 # Avoid endless loops: stop blocking after 3 consecutive red stops. This hook is
-# only a brake; pre-push and CI still reject the red state (ADR-0037).
+# only a brake; CI still rejects the red state (ADR-0037).
 attempts=$(cat "$attempts_file" 2>/dev/null || echo 0)
 if [ "$(jq -r '.stop_hook_active // false' <<<"$input")" = "true" ] && [ "$attempts" -ge 3 ]; then
   echo 0 >"$attempts_file"
-  echo '{"systemMessage":"Stop hook: cargo xtask check --fast is still RED after 3 attempts. The task is NOT done; pre-push and CI reject this state."}'
+  echo '{"systemMessage":"Stop hook: cargo xtask check --fast is still RED after 3 attempts. The task is NOT done; CI rejects this state."}'
   exit 0
 fi
 

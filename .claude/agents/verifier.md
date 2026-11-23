@@ -1,6 +1,6 @@
 ---
 name: verifier
-description: Checks a single critic finding independently and tries to refute it. For every finding with severity blocker or major, before it counts as confirmed (ADR-0041). Changes nothing.
+description: Checks a single critic finding independently and tries to refute it. For findings with severity blocker or major, before they count as confirmed. Changes nothing.
 tools: Read, Grep, Glob, Bash
 disallowedTools: Edit, Write, NotebookEdit
 model: inherit

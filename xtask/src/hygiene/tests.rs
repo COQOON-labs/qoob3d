@@ -32,7 +32,7 @@ fn rejects_inline_test_module() {
     for line in [3, 5] {
         let expected = format!(
             "crates/qoob3d-core/src/expr.rs:{line}: test code belongs in its own file: \
-             `#[cfg(test)] mod tests;` + tests.rs (ADR-0039)"
+             `#[cfg(test)] mod tests;` + tests.rs"
         );
         assert!(problems.iter().any(|p| p.contains(&expected)), "{line}: {problems:?}");
     }
@@ -40,10 +40,7 @@ fn rejects_inline_test_module() {
 
 /// The check_source message for one line (spec section 4.3).
 fn test_code_message(line: usize) -> String {
-    format!(
-        "{REL}:{line}: test code belongs in its own file: `#[cfg(test)] mod tests;` + tests.rs \
-         (ADR-0039)"
-    )
+    format!("{REL}:{line}: test code belongs in its own file: `#[cfg(test)] mod tests;` + tests.rs")
 }
 
 // ADR-0039 (addendum F4): a bare test attribute in production code is a
@@ -99,16 +96,16 @@ fn f4_lookalikes_pass() {
 }
 
 // ADR-0039 (addendum F4): `check_source` itself flags test attributes in any
-// text; it is the caller (`check`) that only passes Code files, and a
-// `tests.rs` or `tests/` file is not Code.
+// text; it is the caller (`check`) that skips test files (`tests.rs`,
+// `tests/`).
 #[test]
 fn f4_check_source_flags_regardless_of_path_and_caller_filters() {
     let text = "#[test]\nfn t() {}\n";
     for rel in ["crates/qoob3d-core/src/expr/tests.rs", "crates/qoob3d-core/tests/expr.rs"] {
         assert_eq!(check_source(rel, text).len(), 1, "{rel}");
-        assert_eq!(paths::kind(rel), Kind::Test, "{rel}");
+        assert!(paths::is_test(rel), "{rel}");
     }
-    assert_eq!(paths::kind(REL), Kind::Code);
+    assert!(!paths::is_test(REL));
 }
 
 // ADR-0039: anything other than exactly `mod tests;` after the cfg line is a
@@ -416,7 +413,7 @@ fn ratchet_message_is_english() {
     assert!(
         problem.contains(
             "3 lint suppressions (#[expect]), 2 allowed (harness/ratchet.txt). \
-             Fix the cause instead of suppressing it (ADR-0040)."
+             Fix the cause instead of suppressing it."
         ),
         "{problem}"
     );
@@ -555,18 +552,18 @@ fn allowlisted_words_pass() {
 /// A CODEOWNERS text with an owner line for every required harness entry.
 fn complete_codeowners() -> String {
     let mut text = String::from("# Code owners\n* @owner\n\n");
-    for entry in paths::HARNESS.iter().filter(|e| !e.starts_with("target/")) {
+    for entry in paths::HARNESS {
         text.push_str(&format!("/{entry} @owner\n"));
     }
     text
 }
 
 fn codeowners_message(entry: &str) -> String {
-    format!(".github/CODEOWNERS has no owner line for harness path `{entry}` (ADR-0044)")
+    format!(".github/CODEOWNERS has no owner line for harness path `{entry}`")
 }
 
 // ADR-0044 (spec section 4.2): a file with an owner line for every harness
-// entry passes; `target/` entries are not required.
+// entry passes.
 #[test]
 fn complete_codeowners_passes() {
     assert!(check_codeowners(&complete_codeowners()).is_empty());
@@ -575,7 +572,6 @@ fn complete_codeowners_passes() {
                    /Cargo.toml @Ben-Gee\n/clippy.toml @Ben-Gee\n/deny.toml @Ben-Gee\n\
                    /rustfmt.toml @Ben-Gee\n/rust-toolchain.toml @Ben-Gee\n";
     assert!(check_codeowners(literal).is_empty(), "{:?}", check_codeowners(literal));
-    assert!(paths::HARNESS.contains(&"target/debug/xtask"));
 }
 
 // ADR-0044 (spec section 4.2): a missing line, a commented-out line, a line
@@ -595,7 +591,7 @@ fn incomplete_codeowners_is_flagged() {
         let text = complete.replace("/xtask/ @owner\n", replacement);
         assert_eq!(check_codeowners(&text), [codeowners_message("xtask/")], "{replacement:?}");
     }
-    let required = paths::HARNESS.iter().filter(|e| !e.starts_with("target/")).count();
+    let required = paths::HARNESS.len();
     assert_eq!(check_codeowners("").len(), required);
     assert_eq!(check_codeowners("* @owner\n").len(), required);
 }
@@ -659,9 +655,6 @@ fn check_reports_missing_codeowners() {
     put(&root, "harness/ratchet.txt", b"suppressions = 0\n");
     put(&root, "harness/language-allowlist.txt", b"");
     let problems = check(&root).unwrap_err();
-    assert!(
-        problems.iter().any(|p| p.contains(".github/CODEOWNERS is missing (ADR-0044)")),
-        "{problems:?}"
-    );
+    assert!(problems.iter().any(|p| p.contains(".github/CODEOWNERS is missing")), "{problems:?}");
     fs::remove_dir_all(&root).unwrap();
 }

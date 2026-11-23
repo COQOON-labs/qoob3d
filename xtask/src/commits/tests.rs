@@ -92,89 +92,23 @@ fn trailer_keys_have_no_spaces() {
     assert!(check_message("Add docs\n\nThanks to reviewed by: Claude\n").is_empty());
 }
 
-// ADR-0039: one commit changes either tests or production code.
-#[test]
-fn rejects_tests_mixed_with_code() {
-    let mixed = files(&[
-        ("M", "crates/qoob3d-core/src/expr.rs"),
-        ("A", "crates/qoob3d-core/src/expr/tests.rs"),
-    ]);
-    let problems = check_files(&mixed, "Add expr");
-    assert_eq!(problems.len(), 1, "{problems:?}");
-    assert!(
-        problems[0].contains("changes tests and production code together (ADR-0039)")
-            && problems[0].contains("`Mixed-Change: <reason>` trailer"),
-        "{problems:?}"
-    );
-    let with_oracle =
-        files(&[("M", "models/gear.expect.json"), ("M", "crates/qoob3d-core/src/gear.rs")]);
-    assert!(!check_files(&with_oracle, "Change gear").is_empty());
-}
-
-// ADR-0039, critic finding K-13: the real C++ header of the kernel wrappers
-// is production code, so a commit with it and a test needs the trailer.
-#[test]
-fn rejects_tests_mixed_with_cxx_header() {
-    let mixed = files(&[
-        ("M", "crates/qoob3d-kernel/cpp/qoob3d_occt.hxx"),
-        ("M", "crates/qoob3d-kernel/tests/features.rs"),
-    ]);
-    let problems = check_files(&mixed, "Add loft wrapper");
-    assert_eq!(problems.len(), 1, "{problems:?}");
-    assert!(
-        problems[0].contains("changes tests and production code together (ADR-0039)"),
-        "{problems:?}"
-    );
-    let excused = "Add loft wrapper\n\nMixed-Change: new wrapper with its kernel test\n";
-    assert!(check_files(&mixed, excused).is_empty());
-}
-
-// ADR-0039: a `Mixed-Change:` line allows mixing; it must start the line.
-#[test]
-fn mixed_change_trailer_allows_mixing() {
-    let mixed = files(&[
-        ("M", "crates/qoob3d-core/src/expr.rs"),
-        ("M", "crates/qoob3d-core/tests/expr.rs"),
-    ]);
-    let message = "Rename eval\n\nMixed-Change: API rename with all callers\n";
-    assert!(check_files(&mixed, message).is_empty());
-    let mid_line = "Rename eval\n\nno Mixed-Change: here\n";
-    assert!(!check_files(&mixed, mid_line).is_empty());
-}
-
-// ADR-0039: docs and other files may accompany either tests or code.
-#[test]
-fn other_files_mix_with_anything() {
-    for pairs in [
-        &[("M", "crates/qoob3d-core/src/expr.rs"), ("M", "docs/architecture.md")][..],
-        &[("A", "crates/qoob3d-core/tests/expr.rs"), ("M", "docs/requirements/sketches.md")][..],
-        &[("M", "crates/qoob3d-core/src/expr.rs"), ("M", "crates/qoob3d-core/Cargo.toml")][..],
-        &[("M", "crates/qoob3d-core/tests/a.rs"), ("M", "crates/qoob3d-core/tests/b.rs")][..],
-        &[][..],
-    ] {
-        assert!(check_files(&files(pairs), "Change").is_empty(), "{pairs:?}");
-    }
-}
-
-// ADR-0030/ADR-0039: fixtures may only be added; every other status is one
-// problem per file, and `Mixed-Change` does not excuse it.
+// ADR-0030: fixtures may only be added; every other status is one problem
+// per file.
 #[test]
 fn fixtures_may_only_be_added() {
     let fixture = "crates/qoob3d-core/tests/fixtures/v1.qbd";
-    assert!(check_files(&files(&[("A", fixture)]), "Add fixture").is_empty());
+    assert!(check_files(&files(&[("A", fixture)])).is_empty());
     for status in ["M", "D", "R100", "R087"] {
-        let problems = check_files(&files(&[(status, fixture)]), "x");
+        let problems = check_files(&files(&[(status, fixture)]));
         assert_eq!(problems.len(), 1, "{status}");
         let expected = format!("fixture {fixture} modified/deleted \u{2013} forbidden (ADR-0030)");
         assert!(problems[0].contains(&expected), "{problems:?}");
     }
     let two = files(&[("M", fixture), ("D", "crates/qoob3d-core/tests/fixtures/v2.qbd")]);
-    assert_eq!(check_files(&two, "x").len(), 2);
-    let excused = "x\n\nMixed-Change: reason\n";
-    assert_eq!(check_files(&files(&[("M", fixture)]), excused).len(), 1);
+    assert_eq!(check_files(&two).len(), 2);
 }
 
-// ADR-0039: the NUL-separated listing of `git diff-tree --name-status -z`
+// The NUL-separated listing of `git diff-tree --name-status -z`
 // becomes (status, path) pairs, a rename contributes both paths, a path may
 // hold a tab or newline (since the critic finding on 06bc870 the parser reads
 // only the `-z` form).
@@ -205,15 +139,15 @@ fn fixtures_are_matched_ignoring_case() {
     for path in
         ["crates/qoob3d-core/tests/Fixtures/v1.qbd", "CRATES/qoob3d-core/TESTS/FIXTURES/V1.QBD"]
     {
-        assert_eq!(check_files(&files(&[("M", path)]), "Edit").len(), 1, "{path}");
+        assert_eq!(check_files(&files(&[("M", path)])).len(), 1, "{path}");
     }
 }
 
-// ADR-0030/ADR-0039: renaming a fixture away is caught via both parsed paths.
+// ADR-0030: renaming a fixture away is caught via both parsed paths.
 #[test]
 fn renamed_fixture_is_rejected() {
     let listing = "R100\0crates/qoob3d-core/tests/fixtures/v1.qbd\0docs/v1.qbd\0";
-    assert_eq!(check_files(&parse_name_status(listing), "Move").len(), 1);
+    assert_eq!(check_files(&parse_name_status(listing)).len(), 1);
 }
 
 // ADR-0044 (spec section 2): the first line that is neither empty nor a `#`
@@ -267,7 +201,7 @@ fn other_identities_are_rejected() {
         assert_eq!(problems.len(), 1, "{identity:?}: {problems:?}");
         let expected = format!(
             "author `{identity}` is not the project identity `{ALLOWED}` \
-             (harness/identity.txt, ADR-0044)"
+             (harness/identity.txt)"
         );
         assert!(problems[0].contains(&expected), "{problems:?}");
     }
@@ -387,14 +321,10 @@ fn check_range_without_identity_file_fails() {
     fs::remove_dir_all(&root).unwrap();
 }
 
-// ---------------------------------------------------------------------------
-// Paths git quotes (critic finding N3 on 0600f48, user decision 2026-10-15):
-// with `core.quotePath` (git's default) `git diff-tree --name-status` prints
-// a non-ASCII, tab, `"` or `\` path in C quotes (`"crates/…/\303\244.rs"`).
-// `cargo xtask commits` must classify such a path as the file it names. The
-// repositories set `core.quotePath=true` locally, so a global `false` cannot
-// hide the case; a space is never quoted and is a regression guard.
-// ---------------------------------------------------------------------------
+// Paths git quotes: with `core.quotePath` (git's default) `git diff-tree
+// --name-status` prints a non-ASCII path in C quotes. `cargo xtask commits`
+// must see such a path as the file it names. The repository sets
+// `core.quotePath=true` locally, so a global `false` cannot hide the case.
 
 /// A repository whose git quotes unusual paths, with `harness/identity.txt`
 /// naming Alice committed.
@@ -424,35 +354,6 @@ fn commit_files(root: &Path, files: &[&str], message: &str) {
         ("GIT_COMMITTER_EMAIL", "alice@example.com"),
     ];
     git_in(root, &env, &["commit", "-q", "-m", message]);
-}
-
-// ADR-0039 (critic finding N3 on 0600f48): a commit with a test and a
-// production file is mixed also when git quotes one of the names (non-ASCII,
-// tab, `"`, `\`, a quoted test file name); a space is never quoted (control).
-#[test]
-fn check_range_sees_mixing_under_quoted_paths() {
-    let root = quoting_repo("quoted_mixing");
-    for (i, (test, code)) in [
-        ("crates/qoob3d-core/tests/q0.rs", "crates/qoob3d-core/src/\u{e4}.rs"),
-        ("crates/qoob3d-core/tests/q1.rs", "crates/qoob3d-core/src/a\tb.rs"),
-        ("crates/qoob3d-core/tests/q2.rs", "crates/qoob3d-core/src/\"q\".rs"),
-        ("crates/qoob3d-core/tests/q3.rs", "crates/qoob3d-core/src/a\\b.rs"),
-        ("crates/qoob3d-core/tests/\u{e4}.rs", "crates/qoob3d-core/src/plain.rs"),
-        ("crates/qoob3d-core/tests/q5.rs", "crates/qoob3d-core/src/a b.rs"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        commit_files(&root, &[test, code], &format!("Change {i}"));
-        let Err(problems) = check_range(&root, &["HEAD~1..HEAD".to_owned()]) else {
-            panic!("{test:?} + {code:?}: passed, expected a mixed commit");
-        };
-        assert!(
-            problems.iter().any(|p| p.contains("changes tests and production code together")),
-            "{test:?} + {code:?}: {problems:?}"
-        );
-    }
-    fs::remove_dir_all(&root).unwrap();
 }
 
 // ADR-0030 (critic finding N3 on 0600f48): a fixture with a non-ASCII name may

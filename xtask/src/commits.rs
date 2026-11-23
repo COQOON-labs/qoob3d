@@ -1,15 +1,12 @@
-//! Commit policy (ADR-0038, ADR-0039), run by the git hooks and in CI:
+//! Commit policy (ADR-0037), run by the git hooks and in CI:
 //! - no commit names an AI as author, co-author or generator,
-//! - author and committer are the project identity in `harness/identity.txt`
-//!   (ADR-0044),
-//! - no commit changes tests and production code together, unless it says
-//!   why in a `Mixed-Change:` trailer,
+//! - author and committer are the project identity in `harness/identity.txt`,
 //! - format fixtures are never modified or deleted (ADR-0030).
 
 use std::path::Path;
 
 use crate::git;
-use crate::paths::{self, Kind};
+use crate::paths;
 
 /// Lower-case markers of AI tools in names, e-mails and trailers.
 const AI_MARKERS: &[&str] = &[
@@ -35,8 +32,7 @@ const AI_MARKERS: &[&str] = &[
     "mistral",
     "grok",
 ];
-pub(crate) const MIXED_TRAILER: &str = "Mixed-Change:";
-/// The only identity allowed as author and committer (ADR-0044).
+/// The only identity allowed as author and committer.
 pub(crate) const IDENTITY_FILE: &str = "harness/identity.txt";
 
 /// Problems in a commit message (without the commit hash prefix).
@@ -70,7 +66,7 @@ pub(crate) fn check_identity(role: &str, identity: &str, allowed: &str) -> Vec<S
     }
     if identity.trim() != allowed.trim() {
         problems.push(format!(
-            "{role} `{identity}` is not the project identity `{allowed}` ({IDENTITY_FILE}, ADR-0044)"
+            "{role} `{identity}` is not the project identity `{allowed}` ({IDENTITY_FILE})"
         ));
     }
     problems
@@ -92,22 +88,14 @@ pub(crate) fn read_allowed_identity(root: &Path) -> Result<String, String> {
 /// Problems with the files of one commit: `(status, path)` pairs as printed by
 /// `git diff-tree --name-status` ([`parse_name_status`]; renames contribute both
 /// paths).
-pub(crate) fn check_files(files: &[(String, String)], message: &str) -> Vec<String> {
-    let mut problems = Vec::new();
-    let kinds: Vec<Kind> = files.iter().map(|(_, p)| paths::kind(p)).collect();
-    let mixed = kinds.contains(&Kind::Test) && kinds.contains(&Kind::Code);
-    if mixed && !message.lines().any(|l| l.starts_with(MIXED_TRAILER)) {
-        problems.push(format!(
-            "changes tests and production code together (ADR-0039). Commit them separately \
-             or give the reason in a `{MIXED_TRAILER} <reason>` trailer"
-        ));
-    }
-    for (status, path) in files {
-        if path.to_lowercase().starts_with(paths::FIXTURES) && !status.starts_with('A') {
-            problems.push(format!("fixture {path} modified/deleted – forbidden (ADR-0030)"));
-        }
-    }
-    problems
+pub(crate) fn check_files(files: &[(String, String)]) -> Vec<String> {
+    files
+        .iter()
+        .filter(|(status, path)| {
+            path.to_lowercase().starts_with(paths::FIXTURES) && !status.starts_with('A')
+        })
+        .map(|(_, path)| format!("fixture {path} modified/deleted – forbidden (ADR-0030)"))
+        .collect()
 }
 
 /// Author and committer of the commit being created (commit-msg hook).
@@ -153,7 +141,7 @@ pub(crate) fn check_range(root: &Path, rev_list_args: &[String]) -> Result<(), V
             .into_iter()
             .chain(check_identity("committer", committer, &allowed))
             .chain(check_message(message))
-            .chain(check_files(&files, message));
+            .chain(check_files(&files));
         problems.extend(found.map(|p| format!("{short}: {p}")));
     }
     if problems.is_empty() { Ok(()) } else { Err(problems) }

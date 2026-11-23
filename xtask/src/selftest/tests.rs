@@ -58,7 +58,7 @@ fn defaults_without_optional_keys() {
 // ADR-0042: a colon inside the value belongs to the value.
 #[test]
 fn colon_in_value_belongs_to_value() {
-    let case = parse("command: cargo xtask guard\nexpect: a: b\n").unwrap();
+    let case = parse("command: cargo xtask hygiene\nexpect: a: b\n").unwrap();
     assert_eq!(case.expect, "a: b");
 }
 
@@ -110,7 +110,7 @@ fn parses_env_and_identity() {
 #[test]
 fn env_without_equals_fails() {
     for line in ["env: QOOB3D_HARNESS_UNLOCK", "env: ", "env: KEY:VALUE"] {
-        let text = format!("command: cargo xtask guard\nexpect: x\n{line}\n");
+        let text = format!("command: cargo xtask hygiene\nexpect: x\n{line}\n");
         assert!(parse(&text).is_err(), "{line:?}");
     }
 }

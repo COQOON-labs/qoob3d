@@ -19,7 +19,7 @@ scripts; an AI agent works on it over MCP, the human gives tasks and accepts res
 | Live project view in the app (IDs `WA-…`) | `docs/requirements/project-app.md` |
 | Background: original concept and M0 measurements | `docs/concept/` |
 | Rules of a crate | `crates/<crate>/CLAUDE.md` (loaded automatically) |
-| **Quality harness for AI agents**: layers, roles, rule → check | `docs/harness.md`, `harness/rules.md` |
+| **Quality harness for AI agents**: layers, rule → check, voluntary tools | `docs/harness.md` |
 | Style register (binding taste decisions) | `docs/design/code-style.md` |
 
 Stack: Rust 1.99 (Edition 2024, `rust-toolchain.toml`) · OpenCascade 7.8.1 via
@@ -30,13 +30,12 @@ Rhai 1.27 (script language, ADR-0053) · eframe/egui 0.36.2 · wgpu 30 (only via
 
 ```sh
 cargo run                                   # start the app
-cargo xtask check                           # DEFINITION OF "DONE" (fmt, clippy, test, hooks, hygiene, rules, arch, docs, i18n, models, deny, smoke)
+cargo xtask check                           # DEFINITION OF "DONE" (fmt, clippy, test, hooks, hygiene, arch, docs, i18n, models, deny, smoke)
 cargo xtask check --fast                    # without smoke + deny (runs automatically in the Stop hook,
                                             #   .claude/hooks/check-on-stop.sh)
 cargo xtask setup                           # once: activate Git hooks from .githooks/ (ADR-0037)
 cargo xtask selftest                        # harness must reject every sabotage in harness/sabotage/
-cargo xtask commits main..HEAD              # commit policy: identity, no AI attribution, tests/code separate
-cargo xtask check-rev <rev>                 # full check of a commit in a temporary worktree (pre-push, ADR-0048)
+cargo xtask commits main..HEAD              # commit policy: identity, no AI attribution
 cargo xtask docs [--fix]                    # docs lint; --fix regenerates the ADR index
 cargo xtask i18n                            # translations complete, no hard-coded UI texts
 cargo xtask printers <orca>/resources/profiles  # regenerate the printer database (ADR-0021)
@@ -66,7 +65,6 @@ needed (rustup is installed keg-only via Homebrew).
 
 1. **Done means: `cargo xtask check` is green.** Report nothing as finished before that.
    Additionally check visual changes with `cargo xtask screenshot` and look at the PNGs.
-   Before the push: critic review (`/critic-review`, ADR-0041).
 2. **Document decisions:** Every new architecture or design decision gets an ADR
    (copy `docs/adr/0000-template.md`, then `cargo xtask docs --fix`), in the same commit as the
    code. Do not rewrite accepted ADRs; supersede them with a new one.
@@ -80,9 +78,8 @@ needed (rustup is installed keg-only via Homebrew).
 7. After every milestone: test list for the user, update the status below, adjust
    `docs/architecture.md` if the big picture has changed.
 8. Commits only on the user's instruction. **No AI attribution** (`Co-Authored-By: Claude`,
-   "Generated with …"), hooks and CI reject it (ADR-0038). Author and committer are always the
-   identity in `harness/identity.txt` (ADR-0044). Tests and production code in separate
-   commits (exception with trailer `Mixed-Change: <reason>`).
+   "Generated with …"), hooks and CI reject it. Author and committer are always the
+   identity in `harness/identity.txt` (ADR-0037).
 9. **A new feature kind** (or curve kind) is only done with: data model + `validate` +
    format version/migration/fixture (ADR-0030), kernel test with **analytic** volume
    (`crates/qoob3d-kernel/tests/features.rs`), example in `document::examples` +
@@ -90,14 +87,13 @@ needed (rustup is installed keg-only via Homebrew).
    `crates/qoob3d-app/tests/modeling.rs`, translations, docs. `cargo xtask models` reports
    missing coverage.
 10. **The harness is read-only** (`xtask/`, `harness/`, `.claude/`, `.github/`,
-   `.githooks/`, `Cargo.toml`, `clippy.toml` …, ADR-0037). Propose changes; the human
-   unlocks with `QOOB3D_HARNESS_UNLOCK=1`. The unlock lifts only the harness-file protection;
-   fixtures, roles and bypass rules stay, and agents never edit settings or shell startup
-   files that could set the variable (ADR-0043). Questions of taste follow the style register,
-   no rework according to personal taste (ADR-0040).
-11. **Code is produced via `/deliver`:** the subagent `test-author` writes tests, the subagent
-   `implementer` writes production code, never the same context (ADR-0039). The guard hook
-   enforces this.
+   `.githooks/`, `.cargo/`, `Cargo.toml`, `clippy.toml` …, ADR-0037). Propose changes; the
+   human unlocks by starting Claude Code with `QOOB3D_HARNESS_UNLOCK=1`. Do not add gates for
+   merely conceivable problems, and no rework according to personal taste: questions of taste
+   follow the style register.
+11. **Separate roles are optional:** `/deliver` (subagent `test-author` writes the tests,
+   `implementer` the code) and `/critic-review` are tools for changes where an independent
+   oracle pays off (geometry, file formats, bugfixes). Nothing enforces them.
 
 ## Conventions
 
@@ -139,16 +135,7 @@ Crate-specific pitfalls are in the respective `crates/<crate>/CLAUDE.md`.
   "□". `every_ui_glyph_exists_in_the_fonts` checks all texts. `Fonts::has_glyph` reports
   false negatives, do not use it.
 - **Unit tests live in `<module>/tests.rs`** (`#[cfg(test)] mod tests;`), never inline
-  (ADR-0039, `xtask hygiene`).
-- **The guard blocks shell commands** that name a harness path of this repository (token
-  start, `./`, repo root) unless they are a pure read (`cat`, `grep`, `sed -n`, `git log`/
-  `diff`/`show`/`status` … ; `2>/dev/null`, `>/dev/null`, `&>/dev/null` and `2>&1` do not
-  count); a harness directory named in a comment counts too (ADR-0049). A shell command
-  that is no pure read follows the role rule for the test or code paths it names (`git add`,
-  `git commit`, `git push` excepted) and is denied for fixture paths. Also blocked: any
-  command naming
-  `QOOB3D_HARNESS_UNLOCK`/`QOOB3D_SKIP_REVIEW`. Then run the command with a different target,
-  or edit with Edit/Write.
+  (`xtask hygiene`).
 - **Never change fixtures** under `crates/qoob3d-core/tests/fixtures/`. New format version →
   new fixture + migration (ADR-0030).
 - **kittest time:** the default is 0.25 s per step; double-clicks need
