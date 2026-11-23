@@ -24,7 +24,6 @@ use std::time::{Duration, Instant};
 
 use common::{POS, VOL, assert_bbox, assert_rel, printed, run_err, run_ok, shape, src};
 use qoob3d_core::export::{self, ExportObject};
-use qoob3d_kernel::EXPORT_TESSELLATION_TOLERANCE_MM;
 use qoob3d_kernel::script::{RunOptions, ScriptError, Shape, export_step, run};
 use solid::{assert_size, assert_volume, expect_geometry};
 
@@ -916,16 +915,20 @@ fn mesh_volume_and_closed(tris: &[[[f32; 3]; 3]]) -> (f64, bool) {
     (volume, closed)
 }
 
-/// Writes `shapes` like the service's STL/3MF export: meshes at the export
-/// tolerance (ADR-0034), encoded by `qoob3d_core::export`.
+/// Writes `shapes` like the service's STL/3MF export: meshed with the default
+/// `[mesh]` settings of a project, encoded by `qoob3d_core::export` (ADR-0034).
 fn write_export(
     shapes: &[(String, Shape)],
     path: &Path,
     encode: fn(&[ExportObject<'_>]) -> Vec<u8>,
 ) {
+    let settings = qoob3d_core::project::Mesh::default();
     let meshes: Vec<_> = shapes
         .iter()
-        .map(|(name, s)| (name.clone(), s.mesh(EXPORT_TESSELLATION_TOLERANCE_MM).expect("mesh")))
+        .map(|(name, s)| {
+            let mesh = s.mesh_with_angle(settings.deflection_mm, settings.angle_deg);
+            (name.clone(), mesh.expect("mesh"))
+        })
         .collect();
     let objects: Vec<ExportObject<'_>> = meshes
         .iter()

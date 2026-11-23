@@ -23,7 +23,6 @@ pub enum KernelError {
     Io(String),
 }
 
-/// Chordal deviation used for viewport meshes (mm).
+/// Chordal deviation (mm) for meshes outside a project, such as the app's demo
+/// body. Project parts use the `[mesh]` settings of `qoob3d.toml` (ADR-0034).
 pub const VIEW_TESSELLATION_TOLERANCE_MM: f64 = 0.05;
-/// Chordal deviation for STL/3MF export (mm): well below an FDM nozzle.
-pub const EXPORT_TESSELLATION_TOLERANCE_MM: f64 = 0.01;

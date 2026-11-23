@@ -1046,3 +1046,49 @@ fn ui_first_meshes_fit_the_camera_later_updates_do_not() {
     wait_until(&mut h, "camera settled", |a| !a.viewport().is_animating());
     assert_eq!(h.state().viewport().camera, fitted, "a later update moved the camera");
 }
+
+/// WA-OP-04: from the empty state, `open_project` (what the folder dialog,
+/// the toolbar button and Cmd/Ctrl+O call) shows the project live.
+#[test]
+fn ui_opens_a_project_from_the_empty_state() {
+    let project = TempProject::new("ui-open");
+    let fake = FakeService::start(ui_parts());
+    project.write_service_json(fake.port);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1440.0, 860.0))
+        .wgpu()
+        .build_eframe(|cc| QoobApp::new(cc, StartOptions::default()).expect("app starts"));
+    h.run_steps(3);
+    assert!(h.state().live().is_none());
+    assert!(has_text(&h, "Open project folder"), "no empty state");
+
+    let ctx = h.ctx.clone();
+    h.state_mut().open_project(&project.dir, &ctx);
+    wait_until(&mut h, "parts listed and meshes loaded", |a| {
+        a.live().is_some_and(|l| l.parts().len() == 4) && meshes_loaded(a, 2)
+    });
+    h.run_steps(2);
+    assert!(row(&h, "shaft", "up to date").is_some(), "parts not listed");
+    assert!(!has_text(&h, "Open project folder"), "the empty state is still shown");
+    assert!(fake.count("GET /status") >= 1, "the service was not asked");
+}
+
+/// WA-OP-04: a folder without `qoob3d.toml` gives the error dialog naming the
+/// folder, the project that was open stays; Escape closes the dialog.
+#[test]
+fn ui_opening_a_folder_that_is_no_project_keeps_the_open_one() {
+    let (project, _fake, mut h) = opened("ui-open-bad");
+    let bad = project.not_a_project();
+    let ctx = h.ctx.clone();
+    h.state_mut().open_project(&bad, &ctx);
+    h.run_steps(3);
+    assert!(has_text(&h, "Could not open"), "no error dialog");
+    assert!(has_text(&h, &bad.display().to_string()), "the dialog does not name the folder");
+    assert_eq!(h.state().live().map(|l| l.parts().len()), Some(4), "the open project was dropped");
+    assert!(row(&h, "shaft", "up to date").is_some(), "parts of the open project gone");
+
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(!has_text(&h, "Could not open"), "Escape did not close the dialog");
+    assert_eq!(h.state().live().map(|l| l.parts().len()), Some(4));
+}

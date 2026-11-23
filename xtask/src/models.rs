@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use qoob3d_core::project::layout;
 use serde_json::Value;
 
 /// The reference project, relative to the repository root.
@@ -53,7 +54,7 @@ impl Reference {
             .env("RUST_LOG", "warn")
             .spawn()
             .map_err(|e| format!("cannot run {}: {e}", binary.display()))?;
-        let ready = dir.join(".qoob3d/service.json");
+        let ready = layout::service_json(&dir);
         let deadline = Instant::now() + START_TIMEOUT;
         while !ready.exists() {
             let exited = service.try_wait().ok().flatten();
@@ -109,7 +110,7 @@ fn copy_project(from: &Path, to: &Path) -> Result<(), String> {
     for entry in entries.flatten() {
         let (source, name) = (entry.path(), entry.file_name());
         if source.is_dir() {
-            if name != ".qoob3d" && name != "out" {
+            if name != layout::DATA_DIR && name != layout::OUT_DIR {
                 copy_project(&source, &to.join(&name))?;
             }
         } else {
@@ -182,7 +183,7 @@ pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
     }
     for (name, part) in &parts {
         let volume = part["volume"].as_f64().unwrap_or(f64::NAN);
-        let found = check_exports(&reference.dir.join("out"), name, volume);
+        let found = check_exports(&reference.dir.join(layout::OUT_DIR), name, volume);
         if found.is_empty() {
             println!("models: ok    {name}");
         }

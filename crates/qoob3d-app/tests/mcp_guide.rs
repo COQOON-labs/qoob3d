@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use artifacts::{git, git_init, git_tracked, png_colors, png_size};
 use inspect::assert_vec;
-use mcp_client::{Mcp, short};
+use mcp_client::{Mcp, base64_decode, short};
 use serde_json::{Value, json};
 use support::{Project, Service, VOL, assert_rel, cli};
 
@@ -432,31 +432,6 @@ fn small_project(name: &str) -> Project {
         .write("checks/geometry.rhai", CHECK_A)
         .write("tasks/0001-first.md", TASK);
     p
-}
-
-/// Standard base64 (RFC 4648 §4), decoded independently of the server.
-fn base64_decode(text: &str) -> Vec<u8> {
-    let value = |c: u8| -> u32 {
-        match c {
-            b'A'..=b'Z' => u32::from(c - b'A'),
-            b'a'..=b'z' => u32::from(c - b'a') + 26,
-            b'0'..=b'9' => u32::from(c - b'0') + 52,
-            b'+' => 62,
-            b'/' => 63,
-            other => panic!("not standard base64: byte {other:#x}"),
-        }
-    };
-    let bytes = text.as_bytes();
-    assert!(bytes.len().is_multiple_of(4), "base64 length {} is no multiple of 4", bytes.len());
-    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-    for quad in bytes.as_chunks::<4>().0 {
-        let pad = quad.iter().rev().take_while(|c| **c == b'=').count();
-        assert!(pad <= 2, "at most two padding characters");
-        let n = quad[..4 - pad].iter().fold(0u32, |n, c| (n << 6) | value(*c)) << (6 * pad);
-        let triple = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
-        out.extend_from_slice(&triple[..3 - pad]);
-    }
-    out
 }
 
 /// A successful `render`: the result and the PNG, which is the only image

@@ -17,7 +17,7 @@ Severities:
 | --- | --- |
 | K-01 | **Minimality:** Every line is needed. No duplicates of what exists (search first!), no speculative generality, no unused parameters, options or configuration. |
 | K-02 | **Single responsibility:** Every function, type and module has exactly one reason to change. No mixing of UI, logic and IO. The name describes everything it does. |
-| K-03 | **Open-closed in the Rust sense:** The compiler forces a new variant (feature, curve, command kind) into every relevant place: exhaustive `match` without `_ =>` over these enums. Extend via the intended points (`Request`/`Response`, `FeatureKind`) instead of special cases. |
+| K-03 | **Open-closed in the Rust sense:** The compiler forces a new variant (probe, job kind, error kind, part state) into every relevant place: exhaustive `match` without `_ =>` over these enums. Extend via the intended points (`worker::Probe`, `service::jobs::Work`, `ErrorKind`, `PartState`) instead of special cases. |
 | K-04 | **Abstraction only when needed (YAGNI beats OCP/DIP):** A trait, generic or indirection needs at least two real implementations or a crate boundary that enforces it (ST-07). |
 | K-05 | **Liskov:** Every implementation of a trait keeps the documented contract (pre- and postconditions, errors, panics). If there are several implementations, shared contract tests run against all of them. |
 | K-06 | **Interface segregation:** Interfaces only demand what they need. No large structs as parameters when two fields suffice, no traits with methods that implementers cannot fill meaningfully. |

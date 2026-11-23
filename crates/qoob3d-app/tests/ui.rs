@@ -4,7 +4,7 @@
 //! `cargo xtask screenshot`) additionally writes `<dir>/ui.png`, so humans
 //! and the coding agent can look at the complete UI.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use eframe::egui::{self, CursorIcon, Event, Modifiers, PointerButton, Pos2};
 use egui_kittest::Harness;
@@ -23,12 +23,8 @@ fn harness(demo: bool) -> Harness<'static, QoobApp> {
 /// The app with the demo body loaded (navigation tests need geometry).
 fn app() -> Harness<'static, QoobApp> {
     let mut harness = harness(true);
-    let start = Instant::now();
-    while !harness.state().has_model() {
-        assert!(start.elapsed() < Duration::from_secs(60), "kernel did not deliver a model");
-        harness.step();
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    // The demo body is built while the app starts.
+    assert!(harness.state().has_model(), "no demo body");
     // Let the first fit and layout settle.
     harness.run_steps(4);
     harness
@@ -296,10 +292,7 @@ fn screenshot_when_requested() {
         return; // only on demand: `cargo xtask screenshot`
     };
     let mut harness = app();
-    let image = harness.render().expect("render UI");
-    let path = std::path::Path::new(&dir).join("ui.png");
-    image.save(&path).expect("write screenshot");
-    println!("screenshot: {}", path.display());
+    save_screenshot(&mut harness, &dir, "ui.png");
 
     // Printer list with one favourite pinned on top.
     open_printer_picker(&mut harness);
@@ -310,10 +303,7 @@ fn screenshot_when_requested() {
     harness.key_press(egui::Key::Escape);
     harness.run_steps(2);
     open_printer_picker(&mut harness);
-    let image = harness.render().expect("render printer list");
-    let path = std::path::Path::new(&dir).join("printer-list.png");
-    image.save(&path).expect("write screenshot");
-    println!("screenshot: {}", path.display());
+    save_screenshot(&mut harness, &dir, "printer-list.png");
 
     // No project open: the empty state with the way to open one (WA-OP-04).
     let mut harness = harness_empty();

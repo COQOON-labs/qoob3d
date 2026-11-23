@@ -43,10 +43,11 @@ flowchart LR
    graph, cache key), the task inbox and the printer database (441 models generated from
    OrcaSlicer profiles, ADR-0021).
 2. **Kernel** (`qoob3d-kernel`): the only place with OCCT. Our own exception-safe C++ wrappers
-   (ADR-0004) on the `opencascade-sys` fork (ADR-0004). `script` runs model scripts (Rhai) on
-   the calling thread: primitives, batched booleans with a plausibility rule, profiles and
-   profile algebra, pipes, fillets, shells, measures, checks, STEP/STL/3MF export
-   (ADR-0053). `tessellate` turns shapes into `ShapeMesh`.
+   on the `opencascade-sys` fork (ADR-0004). `script` runs model scripts (Rhai) on the calling
+   thread: primitives, batched booleans with a plausibility rule, profiles and profile
+   algebra, pipes, fillets, shells, measures, checks, STEP export (ADR-0053). `tessellate`
+   turns shapes into `ShapeMesh`. STL and 3MF are written by the service from the cached
+   meshes (ADR-0034).
 3. **Service and workers** (`qoob3d-app`, binary `qoob3d`): `qoob3d serve <DIR>` is an HTTP
    service on 127.0.0.1 with a job queue, cache index and part states. `qoob3d worker` is the
    only process that runs OCCT for project builds (JSON lines on stdin/stdout, killed and
@@ -80,7 +81,7 @@ flowchart LR
    the service if needed, and a `Poller` thread polls `/status` and loads changed meshes
    (`docs/requirements/project-app.md`). Without a project it shows an empty state. Panels
    (toolbar, browser with the parts), navigation (Fusion, orbit around cursor pivot via
-   raycast, ADR-0008; left-drag orbit, ADR-0008), ViewCube and overlays in egui (ADR-0019),
+   raycast, left-drag orbit; ADR-0008), ViewCube and overlays in egui (ADR-0019),
    camera animations. All texts via Fluent (English base, ADR-0020), saved `Settings`.
 6. **Renderer** (`qoob3d-render`): background, bodies, edges (pixel-wide quads), grid with
    print bed and axes (ADR-0021). Offscreen with MSAA, reverse-Z; egui gets a Unorm view
@@ -113,13 +114,13 @@ flowchart TD
 | Topic | Location |
 | --- | --- |
 | Mesh types, mesh check, raycast | `crates/qoob3d-core/src/mesh.rs` |
-| STL/3MF writer, ZIP | `crates/qoob3d-core/src/export.rs` |
+| STL/3MF writer, ZIP (used by the service's export, ADR-0034) | `crates/qoob3d-core/src/export.rs` |
 | Mesh transfer format | `crates/qoob3d-core/src/qmesh.rs` |
 | Project folder, values, build graph, cache key | `crates/qoob3d-core/src/project/` |
 | Task inbox (files, roles, binding, review gate) | `crates/qoob3d-core/src/tasks/` |
 | Atomic file write (temp file + rename) | `crates/qoob3d-core/src/fs.rs` |
 | Printer profiles (generated) | `crates/qoob3d-core/src/printer/{mod,data}.rs`, generator `xtask/src/printers.rs` |
-| Script kernel: Rhai CAD API, sandbox, errors, STEP/STL/3MF export (ADR-0053) | `crates/qoob3d-kernel/src/script.rs`, `src/script/`, reference `docs/script-api.md` |
+| Script kernel: Rhai CAD API, sandbox, errors, STEP export (ADR-0053) | `crates/qoob3d-kernel/src/script.rs`, `src/script/`, reference `docs/script-api.md` |
 | `check`/`expect…` in scripts, measures of shapes from Rust | `crates/qoob3d-kernel/src/script/{check,measure}.rs` |
 | Own OCCT wrappers (C++), tessellation | `crates/qoob3d-kernel/cpp/`, bridge `src/occt.rs`, `src/tessellate.rs` |
 | Project service, jobs, worker pool and limits, part states | `crates/qoob3d-app/src/service.rs`, `src/service/` |

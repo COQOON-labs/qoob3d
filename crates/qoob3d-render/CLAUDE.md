@@ -43,4 +43,4 @@ wgpu viewport: camera, pipelines, offscreen targets, headless helpers.
 
 ## Relevant ADRs
 
-ADR-0036, ADR-0006, ADR-0008, ADR-0021, ADR-0008, ADR-0019
+ADR-0006, ADR-0008, ADR-0019, ADR-0021, ADR-0036

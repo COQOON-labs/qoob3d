@@ -101,4 +101,4 @@ shapes on the thread that called `script::run`; the app runs scripts in worker p
 
 ## Relevant ADRs
 
-ADR-0004, ADR-0034, ADR-0036, ADR-0004, ADR-0053, ADR-0055
+ADR-0004, ADR-0034, ADR-0036, ADR-0053, ADR-0055

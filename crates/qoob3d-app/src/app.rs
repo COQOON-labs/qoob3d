@@ -1,3 +1,8 @@
+//! The desktop app (`eframe::App`): opens a script project (`--project`, the folder dialog,
+//! Cmd/Ctrl+O; WA-OP-01..04) and shows its parts live in the viewport (ADR-0053,
+//! docs/requirements/project-app.md). Without a project it shows the empty state; the demo
+//! body serves the UI tests and the smoke test. Rendering per ADR-0019.
+
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -222,12 +227,13 @@ impl QoobApp {
     fn error_dialog(&mut self, ctx: &egui::Context) {
         let Some(message) = self.error.clone() else { return };
         let mut close = false;
-        egui::Modal::new(egui::Id::new("qoob3d-error")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::new("qoob3d-error")).show(ctx, |ui| {
             ui.heading(tr("dialog-error-title"));
             ui.label(message);
             close = ui.button(tr("dialog-ok")).clicked();
         });
-        if close {
+        // OK, Escape or a click next to the dialog close it.
+        if close || modal.should_close() {
             self.error = None;
         }
     }

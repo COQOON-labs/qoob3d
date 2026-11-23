@@ -23,7 +23,7 @@ scripts; an AI agent works on it over MCP, the human gives tasks and accepts res
 | Style register (binding taste decisions) | `docs/design/code-style.md` |
 
 Stack: Rust 1.99 (Edition 2024, `rust-toolchain.toml`) · OpenCascade 7.8.1 via a fork of
-`opencascade-sys` 0.3.0 in `third_party/` (ADR-0004) + own cxx wrappers (ADR-0004) ·
+`opencascade-sys` 0.3.0 in `third_party/` + own cxx wrappers (ADR-0004) ·
 Rhai 1.27 (script language, ADR-0053) · eframe/egui 0.36.2 · wgpu 30 (only via `qoob3d_render::wgpu`) · glam 0.34 · egui_kittest (tests).
 
 ## Commands
