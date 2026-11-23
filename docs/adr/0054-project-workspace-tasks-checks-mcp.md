@@ -3,7 +3,7 @@ id: ADR-0054
 title: The project folder is the shared workspace of human and agent, with a task inbox, checks as the review gate and MCP as the agent's main interface
 status: accepted
 date: 2026-11-23
-crates: [qoob3d-core, qoob3d-kernel, qoob3d-app]
+crates: [qoob3d-core, qoob3d-kernel, qoob3d-project, qoob3d-app]
 tags: [architecture, ai-first, mcp, tasks, checks]
 supersedes: []
 superseded_by: null

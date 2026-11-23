@@ -1,7 +1,8 @@
 # qoob3d-app
 
-Library + binary `qoob3d` (ADR-0013): the app that shows a script project live, the project
-service, its workers, the CLI and the MCP server (ADR-0053, ADR-0054).
+Library + binary `qoob3d` (ADR-0013): the app that shows a script project live, the CLI and
+`render-project`. The service, its workers, the service client, MCP and `init` live in
+`qoob3d-project` (ADR-0036); `main.rs` dispatches to them.
 
 ## Rules
 

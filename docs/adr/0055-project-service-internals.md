@@ -3,7 +3,7 @@ id: ADR-0055
 title: The project service runs once per folder under a file lock, talks to its workers in framed JSON lines, never evaluates user scripts itself and accepts only local requests with a per-start token
 status: accepted
 date: 2026-11-23
-crates: [qoob3d-core, qoob3d-kernel, qoob3d-app]
+crates: [qoob3d-core, qoob3d-kernel, qoob3d-project]
 tags: [service, workers, cache, security, performance, dependencies]
 supersedes: []
 superseded_by: null

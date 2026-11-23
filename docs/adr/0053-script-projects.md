@@ -3,7 +3,7 @@ id: ADR-0053
 title: A model is a project folder of Rhai scripts on our own OCCT kernel, built by a local service in worker processes with limits and an exact cache
 status: accepted
 date: 2026-11-23
-crates: [qoob3d-core, qoob3d-kernel, qoob3d-app]
+crates: [qoob3d-core, qoob3d-kernel, qoob3d-project, qoob3d-app]
 tags: [architecture, ai-first, scripting, performance, process-isolation]
 supersedes: []
 superseded_by: null

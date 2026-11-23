@@ -3,7 +3,7 @@ id: ADR-0034
 title: Parts are exported as binary STL and 3MF by the service from the cached mesh with our own dependency-free writers, and as STEP by OCCT in a worker
 status: accepted
 date: 2026-11-23
-crates: [qoob3d-core, qoob3d-kernel, qoob3d-app]
+crates: [qoob3d-core, qoob3d-kernel, qoob3d-project, qoob3d-app]
 tags: [export, fdm, file-formats]
 supersedes: []
 superseded_by: null
