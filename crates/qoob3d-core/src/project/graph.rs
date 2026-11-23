@@ -97,9 +97,9 @@ fn topological_order(deps: &[Vec<usize>]) -> Result<Vec<usize>, Vec<usize>> {
         }
     }
     let mut order: Vec<usize> = (0..deps.len()).filter(|&i| missing[i] == 0).collect();
-    let mut next = 0;
-    while let Some(&i) = order.get(next) {
-        next += 1;
+    // Every node enters `order` at most once, so `deps.len()` steps suffice.
+    for next in 0..deps.len() {
+        let Some(&i) = order.get(next) else { break };
         for &j in &dependents[i] {
             missing[j] -= 1;
             if missing[j] == 0 {
@@ -112,8 +112,9 @@ fn topological_order(deps: &[Vec<usize>]) -> Result<Vec<usize>, Vec<usize>> {
     };
     // Every unfinished node waits for an unfinished dependency, so following
     // those must revisit a node; the path from that node on is the cycle.
+    // A path of `deps.len() + 1` nodes must repeat one, which bounds the walk.
     let mut path = vec![start];
-    loop {
+    for _ in 0..=deps.len() {
         let last = path[path.len() - 1];
         let d = *deps[last]
             .iter()
@@ -126,4 +127,6 @@ fn topological_order(deps: &[Vec<usize>]) -> Result<Vec<usize>, Vec<usize>> {
         }
         path.push(d);
     }
+    // Unreachable for a valid walk (see above); returns the path instead of panicking.
+    Err(path)
 }
