@@ -41,7 +41,6 @@ flowchart LR
 | ADRs are well-formed, the index is current, nothing refers to a superseded ADR | `xtask docs` | `policy`, `check (macOS)` |
 | The repository is English (ADR-0045) | `xtask hygiene` | `policy`, `check (macOS)` |
 | No hard-coded UI texts, translations complete (ADR-0020) | `xtask i18n` | `policy`, `check (macOS)` |
-| Format fixtures are never modified or deleted (ADR-0030) | pre-push (`xtask commits`) | `policy` |
 | Author and committer are the identity in `harness/identity.txt`; no commit names an AI as author, co-author or generator | commit-msg, pre-push (`xtask commits`) | `policy` |
 | No secrets in the history | pre-push (gitleaks) | `policy` |
 | Vetted supply chain and licences, no unused dependencies | `xtask check` (cargo-deny) | `policy` (cargo-deny, cargo-machete) |

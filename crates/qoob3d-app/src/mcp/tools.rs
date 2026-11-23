@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 
 use super::resources::{GUIDE, api_reference};
 use super::{INVALID_PARAMS, RpcError, Server, files, render};
-use crate::live::{Client, START_TIMEOUT, segment, service_command_from_env};
+use crate::client::{Client, START_TIMEOUT, segment, service_command_from_env};
 
 /// Requests that do not wait for workers.
 const QUICK: Duration = Duration::from_secs(30);

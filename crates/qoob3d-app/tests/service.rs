@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use qoob3d_app::live;
+use qoob3d_app::client;
 use qoob3d_core::qmesh;
 use serde_json::{Value, json};
 
@@ -1139,12 +1139,12 @@ fn check_mesh_endpoint(s: &Service, st: &Value) {
     }
 }
 
-/// The W1 client (live.rs) talks to the real service.
+/// The W1 client (client.rs) talks to the real service.
 fn check_live_client(p: &Project, st: &Value) {
-    let dir = live::ProjectDir::open(&p.dir).expect("project dir");
-    let client = live::Client::connect(&dir, &[BIN.to_owned()], START).expect("connect");
+    let dir = client::ProjectDir::open(&p.dir).expect("project dir");
+    let client = client::Client::connect(&dir, &[BIN.to_owned()], START).expect("connect");
     let parts = client.status().expect("status via the W1 client");
-    assert!(parts.iter().all(|part| part.state == live::PartState::Current), "{parts:?}");
+    assert!(parts.iter().all(|part| part.state == client::PartState::Current), "{parts:?}");
     let mesh = client.mesh("B").expect("mesh via the W1 client");
     assert_eq!(mesh.key, key_of(st, "B"));
 }

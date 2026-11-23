@@ -14,7 +14,6 @@
 #include "rust/cxx.h"
 
 struct Qoob3dMesh;
-struct Qoob3dRegions;
 
 Qoob3dMesh qoob3d_tessellate(const TopoDS_Shape &shape, double linear_deflection,
                              double angular_deflection);
@@ -22,9 +21,6 @@ Qoob3dMesh qoob3d_tessellate(const TopoDS_Shape &shape, double linear_deflection
 // Sketch curves for region computations (ADR-0028), all in the local plane
 // z = 0: lines (x0 y0 x1 y1), circles (cx cy r), arcs (cx cy r a0 a1, CCW).
 struct Qoob3dCurves;
-
-// Profiles of a sketch in its local plane z = 0 (ADR-0028).
-Qoob3dRegions qoob3d_sketch_regions(const Qoob3dCurves &curves, double deflection);
 
 // Solid modelling (ADR-0031). Shapes are owned by the kernel worker thread.
 // Faces of the given profiles (keys are concatenated, `key_starts` has a
@@ -62,24 +58,6 @@ double qoob3d_volume(const TopoDS_Shape &shape);
 bool qoob3d_is_valid(const TopoDS_Shape &shape);
 // The solids of a shape (compounds are flattened).
 uint32_t qoob3d_solid_count(const TopoDS_Shape &shape);
-std::unique_ptr<TopoDS_Shape> qoob3d_solid(const TopoDS_Shape &shape, uint32_t index);
-// Compound of the children of `a` followed by those of `b` (order kept;
-// a null `a` counts as empty).
-std::unique_ptr<TopoDS_Shape> qoob3d_append(const TopoDS_Shape &a, const TopoDS_Shape &b);
-// Planar outline in 3D (closed): pieces `starts[i]..starts[i+1]` of
-// `points` (x y z), kind 0 = straight segments, 1 = interpolating spline.
-// Optional holes: circles (cx cy cz r) in the same plane with normal `n`.
-// The face is extruded by `vector`.
-std::unique_ptr<TopoDS_Shape> qoob3d_outline_prism(rust::Slice<const double> points,
-                                                   rust::Slice<const uint32_t> starts,
-                                                   rust::Slice<const uint32_t> kinds,
-                                                   rust::Slice<const double> holes,
-                                                   rust::Slice<const double> normal,
-                                                   rust::Slice<const double> vector);
-// Round wire of `radius` swept along the spline through `path` (x y z).
-// `binormal`: empty = corrected Frenet, else a fixed binormal direction.
-std::unique_ptr<TopoDS_Shape> qoob3d_sweep_circle(rust::Slice<const double> path, double radius,
-                                                  rust::Slice<const double> binormal);
 
 // ---- Script kernel (ADR-0053). Placement and validation live in Rust.
 

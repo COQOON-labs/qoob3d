@@ -1,13 +1,19 @@
-use super::*;
-use occt_glam::{DVec3, dvec3};
+use crate::script::{RunOptions, Shape, run};
 
+/// The shape a one-line script shows as "s".
+fn shape(expr: &str) -> Shape {
+    let out = run(&format!("show({expr}, \"s\");"), &RunOptions::default()).unwrap();
+    out.shapes.into_iter().next().unwrap().1
+}
+
+/// Cube with edge `size`, centred in x/y, from z = 0 to `size`.
 fn cube(size: f64) -> Shape {
-    Shape::box_from_corners(DVec3::ZERO, dvec3(size, size, size))
+    shape(&format!("box({size}, {size}, {size})"))
 }
 
 #[test]
 fn cube_is_watertight_with_six_faces_and_twelve_edges() {
-    let mesh = tessellate(&cube(20.0), 0.05).unwrap();
+    let mesh = cube(20.0).mesh(0.05).unwrap();
     assert_eq!(mesh.faces.triangle_count(), 12);
 
     // Slicer-readiness (ADR-0002): closed, manifold, outward winding.
@@ -26,8 +32,8 @@ fn cube_is_watertight_with_six_faces_and_twelve_edges() {
 
 #[test]
 fn normals_point_outwards_and_agree_with_winding() {
-    let mesh = tessellate(&cube(10.0), 0.05).unwrap().faces;
-    let c = [5.0f32; 3];
+    let mesh = cube(10.0).mesh(0.05).unwrap().faces;
+    let c = [0.0, 0.0, 5.0f32];
     for tri in mesh.indices.as_chunks::<3>().0 {
         let [a, b, d] = tri.map(|i| mesh.positions[i as usize]);
         let n = mesh.normals[tri[0] as usize];
@@ -38,8 +44,7 @@ fn normals_point_outwards_and_agree_with_winding() {
 
 #[test]
 fn cylinder_seam_is_not_an_edge() {
-    let cylinder = Shape::cylinder(DVec3::ZERO, 5.0, DVec3::Z, 10.0);
-    let mesh = tessellate(&cylinder, 0.01).unwrap();
+    let mesh = shape("cylinder(10, 10)").mesh(0.01).unwrap();
     // Top and bottom circle only – the seam line must not be drawn.
     assert_eq!(mesh.edges.len(), 2, "{:?}", mesh.edges.starts);
     let report = mesh.faces.analyze();
@@ -49,8 +54,9 @@ fn cylinder_seam_is_not_an_edge() {
 }
 
 #[test]
-fn demo_part_has_hole_and_correct_volume() {
-    let mesh = tessellate(&demo_part(), 0.01).unwrap();
+fn block_with_hole_is_watertight_with_correct_volume() {
+    let part = shape("cut(box(40, 30, 15), move(cylinder(14, 17), 0, 0, -1))");
+    let mesh = part.mesh(0.01).unwrap();
     let report = mesh.faces.analyze();
     assert!(report.is_watertight(), "{report:?}");
     let exact = 40.0 * 30.0 * 15.0 - std::f64::consts::PI * 49.0 * 15.0;

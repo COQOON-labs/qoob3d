@@ -2,12 +2,12 @@
 command: cargo xtask hygiene
 expect: is not English
 --- patch
-diff --git a/crates/qoob3d-core/src/profile.rs b/crates/qoob3d-core/src/profile.rs
---- a/crates/qoob3d-core/src/profile.rs
-+++ b/crates/qoob3d-core/src/profile.rs
-@@ -33,3 +33,5 @@
+diff --git a/crates/qoob3d-core/src/mesh.rs b/crates/qoob3d-core/src/mesh.rs
+--- a/crates/qoob3d-core/src/mesh.rs
++++ b/crates/qoob3d-core/src/mesh.rs
+@@ -295,3 +295,5 @@
  
  #[cfg(test)]
  mod tests;
 +
-+// Fläche des Profils in mm².
++// Fläche des Netzes in mm².

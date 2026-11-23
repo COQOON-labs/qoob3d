@@ -170,8 +170,8 @@ jobs:
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-mutants
-      - name: Mutation tests of the pure crates
-        run: cargo mutants -p qoob3d-core -p qoob3d-sketch --no-shuffle -j 4 || true
+      - name: Mutation tests of the pure crate
+        run: cargo mutants -p qoob3d-core --no-shuffle -j 4 || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

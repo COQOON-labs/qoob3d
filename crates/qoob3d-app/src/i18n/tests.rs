@@ -20,7 +20,7 @@ fn translations_and_formatting() {
     set_language(Language::German);
     assert_eq!(tr("nav-grid"), "Raster");
     assert_eq!(decimal(15.7, 2), "15,70");
-    assert_eq!(tr_args("coming-in", &[("milestone", "M3".into())]), "Kommt mit M3");
+    assert_eq!(tr_args("viewcube-face-tip", &[("face", "OBEN".into())]), "Ansicht OBEN");
     assert_eq!(tr("does-not-exist"), "«does-not-exist»");
     set_language(Language::English);
 }

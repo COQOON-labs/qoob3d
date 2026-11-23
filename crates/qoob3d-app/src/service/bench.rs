@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use super::pool::Pool;
 use super::snapshot::{FileDecl, Snapshot};
 use super::{Answer, Failure};
-use crate::live::ProjectDir;
+use crate::client::ProjectDir;
 use crate::worker::{ErrorKind, PartError, Request};
 
 /// Builds per part; the faster one is reported.

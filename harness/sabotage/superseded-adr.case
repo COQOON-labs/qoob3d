@@ -2,10 +2,10 @@
 command: cargo xtask docs
 expect: refers to ADR-0003 (status superseded)
 --- patch
-diff --git a/crates/qoob3d-core/src/profile.rs b/crates/qoob3d-core/src/profile.rs
---- a/crates/qoob3d-core/src/profile.rs
-+++ b/crates/qoob3d-core/src/profile.rs
-@@ -33,3 +33,5 @@
+diff --git a/crates/qoob3d-core/src/mesh.rs b/crates/qoob3d-core/src/mesh.rs
+--- a/crates/qoob3d-core/src/mesh.rs
++++ b/crates/qoob3d-core/src/mesh.rs
+@@ -295,3 +295,5 @@
  
  #[cfg(test)]
  mod tests;

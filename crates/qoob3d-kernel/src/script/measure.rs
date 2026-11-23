@@ -5,8 +5,8 @@
 use super::Shape;
 use super::api::COMMON;
 use crate::KernelError;
-use crate::model::{self, occ};
 use crate::occt::ffi;
+use crate::occt::{self, occ};
 
 impl Shape {
     /// Surface area in mm² (NaN if OCCT cannot compute it).
@@ -38,7 +38,7 @@ pub fn distance(a: &Shape, b: &Shape) -> Result<f64, KernelError> {
 /// # Errors
 /// The boolean operation failed.
 pub fn common_volume(a: &Shape, b: &Shape) -> Result<f64, KernelError> {
-    let common = model::shape(ffi::qoob3d_boolean(a.get(), b.get(), COMMON))?;
+    let common = occt::shape(ffi::qoob3d_boolean(a.get(), b.get(), COMMON))?;
     let volume = occ(ffi::qoob3d_volume(common.get()))?;
     Ok(if volume.is_finite() { volume.max(0.0) } else { 0.0 })
 }

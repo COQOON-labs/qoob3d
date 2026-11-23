@@ -18,9 +18,6 @@ pub(crate) const HARNESS: &[&str] = &[
     "rust-toolchain.toml",
 ];
 
-/// Format fixtures may be added, never modified or deleted (ADR-0030).
-pub(crate) const FIXTURES: &str = "crates/qoob3d-core/tests/fixtures/";
-
 /// Ignores case, as macOS file systems do.
 pub(crate) fn is_harness(path: &str) -> bool {
     let path = path.to_lowercase();

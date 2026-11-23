@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use qoob3d_app::live;
+use qoob3d_app::client;
 use serde_json::{Value, json};
 use support::{
     BIN, Project, Service, VOL, assert_rel, assert_vec, cli, git, git_init, git_tracked,
@@ -1348,8 +1348,8 @@ fn ag_hd_04_parts_with_awkward_names_build_load_in_the_app_client_and_render() {
     let keys = by_name(&st["parts"]);
 
     // The app client (W1): every mesh arrives and is the mesh of that part.
-    let dir = live::ProjectDir::open(&p.dir).expect("project dir");
-    let client = live::Client::connect(&dir, &[BIN.to_owned()], Duration::from_secs(20))
+    let dir = client::ProjectDir::open(&p.dir).expect("project dir");
+    let client = client::Client::connect(&dir, &[BIN.to_owned()], Duration::from_secs(20))
         .expect("connect to the running service");
     let listed: BTreeSet<String> =
         client.status().expect("status").into_iter().map(|part| part.name).collect();

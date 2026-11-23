@@ -20,7 +20,8 @@ use common::{FakePart, FakeService, Mode, TempProject, cube_qmesh, same_dir, tok
 use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable as _;
-use qoob3d_app::live::{self, Client, Live, Part, PartState, Poller, ProjectDir, Update};
+use qoob3d_app::client::{self, Client, Part, PartState, ProjectDir};
+use qoob3d_app::live::{self, Live, Poller, Update};
 use qoob3d_app::{QoobApp, StartOptions};
 
 /// Generous upper bound for waiting on background work; the tests normally
@@ -88,23 +89,23 @@ fn project_in_missing_folder_is_an_error() {
 #[test]
 fn service_command_comes_from_the_environment_value() {
     let own = std::env::current_exe().expect("current exe").display().to_string();
-    assert_eq!(live::service_command(None), std::slice::from_ref(&own));
+    assert_eq!(client::service_command(None), std::slice::from_ref(&own));
     assert_eq!(
-        live::service_command(Some("/opt/q/qoob3d --log debug")),
+        client::service_command(Some("/opt/q/qoob3d --log debug")),
         ["/opt/q/qoob3d", "--log", "debug"]
     );
     // Repeated and surrounding spaces do not produce empty arguments.
-    assert_eq!(live::service_command(Some("  sh  /x/start.sh ")), ["sh", "/x/start.sh"]);
+    assert_eq!(client::service_command(Some("  sh  /x/start.sh ")), ["sh", "/x/start.sh"]);
     // An empty value is treated like an unset one.
-    assert_eq!(live::service_command(Some("")), std::slice::from_ref(&own));
-    assert_eq!(live::service_command(Some("   ")), [own]);
+    assert_eq!(client::service_command(Some("")), std::slice::from_ref(&own));
+    assert_eq!(client::service_command(Some("   ")), [own]);
 }
 
 /// WA-OP-02 / WA-LV-01: the timing constants of the specification.
 #[test]
 fn timing_constants_match_the_specification() {
-    assert_eq!(live::STATUS_TIMEOUT, Duration::from_secs(1));
-    assert_eq!(live::START_TIMEOUT, Duration::from_secs(20));
+    assert_eq!(client::STATUS_TIMEOUT, Duration::from_secs(1));
+    assert_eq!(client::START_TIMEOUT, Duration::from_secs(20));
 }
 
 /// WA-LV-01: polling every 0.5 s.
@@ -770,20 +771,6 @@ fn cli_without_qoob3d_toml_exits_with_code_2() {
     assert!(stderr.contains(&dir.display().to_string()), "folder not named: {stderr}");
 }
 
-/// WA-OP-01 + WA-HL-01: same for the headless render; no PNG is written.
-#[test]
-fn cli_render_without_qoob3d_toml_exits_with_code_2() {
-    let project = TempProject::new("cli-no-toml-render");
-    let dir = project.not_a_project();
-    let png = project.root.join("out.png");
-    let args = [os("--project"), dir.as_os_str(), os("--render"), png.as_os_str()];
-    let out = run_qoob3d(&args, None, Duration::from_secs(30));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
-    assert!(stderr.contains(&dir.display().to_string()), "folder not named: {stderr}");
-    assert!(!png.exists());
-}
-
 /// WA-OP-01: a folder that does not exist → exit 2, folder named.
 #[test]
 fn cli_with_a_missing_folder_exits_with_code_2() {
@@ -793,95 +780,6 @@ fn cli_with_a_missing_folder_exits_with_code_2() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
     assert!(stderr.contains(&dir.display().to_string()), "folder not named: {stderr}");
-}
-
-/// Width and height of a valid PNG.
-fn png_size(path: &Path) -> (u32, u32) {
-    let bytes = std::fs::read(path).expect("PNG written");
-    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    let reader = decoder.read_info().expect("valid PNG");
-    (reader.info().width, reader.info().height)
-}
-
-/// WA-HL-01 + WA-OP-02 end to end: no `service.json`, the service is started
-/// via `QOOB3D_SERVICE_CMD` (with an argument: `sh <script>`), a build of all
-/// parts is requested, the app waits until nothing is `outdated` /
-/// `never_built` (the fake switches 3 status polls after `POST /build`),
-/// loads the meshes, renders and exits 0. The image differs from the demo
-/// render, so the project parts – not the demo body – were drawn.
-#[test]
-fn headless_render_builds_waits_and_writes_png() {
-    let project = TempProject::new("hl-ok");
-    let fake = FakeService::start(vec![
-        FakePart::unbuilt("shaft", "never_built"),
-        FakePart::built("lid", "outdated", "k-lid-0", cube_qmesh([0.0; 3], 5.0)),
-    ]);
-    fake.on_build(
-        3,
-        vec![
-            FakePart::built("shaft", "current", "k-shaft-1", cube_qmesh([0.0; 3], 40.0)),
-            FakePart::built("lid", "current", "k-lid-1", cube_qmesh([50.0, 0.0, 0.0], 20.0)),
-        ],
-    );
-    let env_cmd = project.start_script(fake.port).join(" ");
-    let png = project.root.join("project.png");
-    let args = [
-        os("--project"),
-        project.dir.as_os_str(),
-        os("--render"),
-        png.as_os_str(),
-        os("--size"),
-        os("320x240"),
-    ];
-    let out = run_qoob3d(&args, Some(&env_cmd), Duration::from_secs(120));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
-    assert_started(&project);
-    assert_eq!(fake.builds().len(), 1, "one build of all parts: {:?}", fake.log());
-    assert!(fake.count("GET /status") >= 4, "did not wait for the build: {:?}", fake.log());
-    assert!(fake.count("GET /mesh/shaft") >= 1, "shaft not loaded: {:?}", fake.log());
-    assert!(fake.count("GET /mesh/lid") >= 1, "lid not loaded: {:?}", fake.log());
-    assert_eq!(png_size(&png), (320, 240));
-
-    let demo = project.root.join("demo.png");
-    let args = [os("--render"), demo.as_os_str(), os("--size"), os("320x240")];
-    let out = run_qoob3d(&args, None, Duration::from_secs(120));
-    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
-    assert_ne!(
-        std::fs::read(&png).expect("project png"),
-        std::fs::read(&demo).expect("demo png"),
-        "the project render shows the demo body"
-    );
-}
-
-/// WA-HL-01: a part in state `failed` → named on stderr, PNG still
-/// written, exit 1. The service runs already (`service.json`), so the start
-/// command (a dud) must not be needed.
-#[test]
-fn headless_render_with_a_failed_part_exits_1_after_rendering() {
-    let project = TempProject::new("hl-fail");
-    let fake = FakeService::start(vec![
-        FakePart::built("shaft", "current", "k-shaft-1", cube_qmesh([0.0; 3], 10.0)),
-        FakePart::unbuilt("bracket", "failed"),
-    ]);
-    project.write_service_json(fake.port);
-    let env_cmd = project.dud_script().join(" ");
-    let png = project.root.join("failed.png");
-    let args = [
-        os("--project"),
-        project.dir.as_os_str(),
-        os("--render"),
-        png.as_os_str(),
-        os("--size"),
-        os("320x240"),
-    ];
-    let out = run_qoob3d(&args, Some(&env_cmd), Duration::from_secs(120));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
-    assert!(stderr.contains("bracket"), "failed part not reported: {stderr}");
-    assert_eq!(png_size(&png), (320, 240));
-    assert_eq!(project.script_call(), None, "service started although it was running");
-    assert_eq!(fake.builds().len(), 1, "one build of all parts: {:?}", fake.log());
 }
 
 // ================================================================== UI (egui_kittest)

@@ -231,9 +231,7 @@ fn screenshot(root: &Path, dir: Option<PathBuf>) -> bool {
             .status()
             .is_ok_and(|s| s.success())
     };
-    let ok = shoot("ui")
-        && shoot("modeling")
-        && run(root, "cargo", &["build", "--quiet", "--package", "qoob3d-app"]);
+    let ok = shoot("ui") && run(root, "cargo", &["build", "--quiet", "--package", "qoob3d-app"]);
     if !ok {
         return false;
     }

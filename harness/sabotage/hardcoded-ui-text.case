@@ -5,11 +5,11 @@ expect: hard-coded UI text "Hello"
 diff --git a/crates/qoob3d-app/src/panels.rs b/crates/qoob3d-app/src/panels.rs
 --- a/crates/qoob3d-app/src/panels.rs
 +++ b/crates/qoob3d-app/src/panels.rs
-@@ -105,6 +105,7 @@
+@@ -33,6 +33,7 @@
          ui.label(RichText::new("QOOB3D").strong().size(17.0).color(theme::ACCENT));
          ui.add_space(6.0);
          ui.label(theme::caption(&tr("workspace-design")));
 +        ui.label("Hello");
          ui.separator();
-         group(ui, "group-file", |ui| {
-             button(ui, "file-new", "file-new-tip", &mut out, UiAction::NewDocument);
+         group(ui, "group-project", |ui| {
+             if ui.button(tr("project-open")).on_hover_text(tr("project-open-tip")).clicked() {

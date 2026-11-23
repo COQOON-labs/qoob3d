@@ -7,13 +7,13 @@ use std::process::Command;
 use serde_json::Value;
 
 const WORKSPACE_CRATES: &[&str] =
-    &["qoob3d-core", "qoob3d-sketch", "qoob3d-kernel", "qoob3d-render", "qoob3d-app", "xtask"];
+    &["qoob3d-core", "qoob3d-kernel", "qoob3d-render", "qoob3d-app", "xtask"];
 
 /// Allowed direct dependencies on other workspace crates.
 fn allowed_workspace_deps(krate: &str) -> &'static [&'static str] {
     match krate {
-        "qoob3d-sketch" | "qoob3d-kernel" | "qoob3d-render" => &["qoob3d-core"],
-        "qoob3d-app" => &["qoob3d-core", "qoob3d-sketch", "qoob3d-kernel", "qoob3d-render"],
+        "qoob3d-kernel" | "qoob3d-render" => &["qoob3d-core"],
+        "qoob3d-app" => &["qoob3d-core", "qoob3d-kernel", "qoob3d-render"],
         // Gates read models and exports; geometry is checked via the binary.
         "xtask" => &["qoob3d-core"],
         _ => &[],
@@ -22,20 +22,13 @@ fn allowed_workspace_deps(krate: &str) -> &'static [&'static str] {
 
 /// Packages that must not appear in the (non-dev) transitive dependency tree.
 fn forbidden_transitive(krate: &str) -> &'static [&'static str] {
-    const OCCT: [&str; 3] = ["opencascade", "opencascade-sys", "occt-sys"];
+    const OCCT: [&str; 2] = ["opencascade-sys", "occt-sys"];
     const GPU_UI: [&str; 5] = ["wgpu", "eframe", "egui", "egui-wgpu", "winit"];
     match krate {
-        // Pure crates: no kernel, GPU or UI, not even transitively.
-        "qoob3d-core" | "qoob3d-sketch" => &[
-            "opencascade",
-            "opencascade-sys",
-            "occt-sys",
-            "wgpu",
-            "eframe",
-            "egui",
-            "egui-wgpu",
-            "winit",
-        ],
+        // Pure crate: no kernel, GPU or UI, not even transitively.
+        "qoob3d-core" => {
+            &["opencascade-sys", "occt-sys", "wgpu", "eframe", "egui", "egui-wgpu", "winit"]
+        }
         "qoob3d-kernel" => &GPU_UI,
         "qoob3d-render" => &OCCT,
         _ => &[],

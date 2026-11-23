@@ -41,7 +41,7 @@ use self::http::Reply;
 use self::jobs::Job;
 use self::pool::Pool;
 use self::snapshot::{Record, Snapshot, cache_dir, views};
-use crate::live::ProjectDir;
+use crate::client::ProjectDir;
 use crate::worker::{ErrorKind, PartError, Request};
 
 /// How long shutdown waits for busy workers to be killed.

@@ -1,5 +1,6 @@
-//! Command-line interface. Besides the normal GUI start, the app offers
-//! machine-checkable modes for the quality harness (ADR-0013).
+//! Command-line interface: the app (optionally with `--project`), the
+//! project commands for agents and scripts (ADR-0053) and the smoke test of
+//! the quality harness (ADR-0013).
 
 use std::path::PathBuf;
 
@@ -13,59 +14,14 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// `.qbd` file to open.
-    pub file: Option<PathBuf>,
-
     /// Open the script project in this folder (with `qoob3d.toml`) and show
-    /// its parts live; with --render, build and render them headless
-    /// (WA-OP-01, WA-HL-01).
-    #[arg(long, value_name = "DIR", conflicts_with_all = ["file", "export", "report", "smoke_test"])]
+    /// its parts live (WA-OP-01).
+    #[arg(long, value_name = "DIR", conflicts_with = "smoke_test")]
     pub project: Option<PathBuf>,
-
-    /// Show the demo body (block with a hole) in addition to the document.
-    #[arg(long)]
-    pub demo: bool,
-
-    /// Render headless (no window) into this PNG file and exit.
-    #[arg(long, value_name = "PNG")]
-    pub render: Option<PathBuf>,
-
-    /// View for --render.
-    #[arg(long, value_enum, default_value_t = View::Iso)]
-    pub view: View,
-
-    /// Image size for --render, e.g. 1280x800.
-    #[arg(long, value_parser = parse_size, default_value = "1280x800")]
-    pub size: [u32; 2],
-
-    /// Orthographic instead of perspective projection for --render.
-    #[arg(long)]
-    pub ortho: bool,
-
-    /// Camera distance factor for --render after fitting (>1 zooms out).
-    #[arg(long, default_value_t = 1.0)]
-    pub zoom: f32,
-
-    /// Printer whose build plate --render shows (id, e.g. bambu-lab-h2d).
-    #[arg(long)]
-    pub printer: Option<String>,
-
-    /// Show the build volume wireframe in --render.
-    #[arg(long)]
-    pub volume: bool,
-
-    /// Export the bodies of FILE headless to this .stl or .3mf and exit.
-    #[arg(long, value_name = "STL|3MF", requires = "file")]
-    pub export: Option<PathBuf>,
-
-    /// Rebuild FILE headless and print a JSON report (bodies, volumes,
-    /// validity, feature errors). Exit code 1 if anything is not printable.
-    #[arg(long, requires = "file")]
-    pub report: bool,
 
     /// Start the real app, drive it with synthetic input, verify the effect
     /// and exit with code 0 (ok) or 1 (failure). A watchdog catches hangs.
-    #[arg(long, conflicts_with = "render")]
+    #[arg(long)]
     pub smoke_test: bool,
 }
 

@@ -26,8 +26,8 @@ use qoob3d_core::export::{self, ExportObject};
 use rhai::module_resolvers::{DummyModuleResolver, FileModuleResolver};
 use rhai::{Engine, EvalAltResult, Module, ModuleResolver, Position, Scope, Shared};
 
-use crate::model::{self, occ};
 use crate::occt::ffi;
+use crate::occt::{self, occ};
 use crate::tessellate::{tessellate_angle, tessellate_raw};
 use crate::{EXPORT_TESSELLATION_TOLERANCE_MM, KernelError};
 
@@ -132,12 +132,12 @@ impl ScriptError {
 pub struct Shape(Rc<ShapeData>);
 
 struct ShapeData {
-    occt: model::Shape,
+    occt: occt::Shape,
     volume: OnceCell<f64>,
 }
 
 impl Shape {
-    fn new(occt: model::Shape) -> Self {
+    fn new(occt: occt::Shape) -> Self {
         Self(Rc::new(ShapeData { occt, volume: OnceCell::new() }))
     }
 
@@ -206,7 +206,7 @@ impl fmt::Debug for Shape {
 
 /// Reads a BREP file written by [`Shape::write_brep`].
 pub fn read_brep(path: &Path) -> Result<Shape, KernelError> {
-    model::shape(ffi::qoob3d_read_brep(utf8(path)?)).map(Shape::new)
+    occt::shape(ffi::qoob3d_read_brep(utf8(path)?)).map(Shape::new)
 }
 
 fn utf8(path: &Path) -> Result<&str, KernelError> {
@@ -223,7 +223,7 @@ fn compound<'a>(parts: impl IntoIterator<Item = &'a Shape>) -> Result<Shape, Ker
     for p in parts {
         occ(ffi::qoob3d_compound_add(c.pin_mut(), p.get()))?;
     }
-    model::shape(Ok(c)).map(Shape::new)
+    occt::shape(Ok(c)).map(Shape::new)
 }
 
 /// Evaluates a script (AG-SC-01). Declaration discovery

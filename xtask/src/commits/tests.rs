@@ -7,10 +7,6 @@ use super::*;
 /// The identity in `harness/identity.txt` (spec section 2, ADR-0044).
 const ALLOWED: &str = "Benjamin Gr\u{f6}ner <bgroener@coqoon.com>";
 
-fn files(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-    pairs.iter().map(|(s, p)| ((*s).to_owned(), (*p).to_owned())).collect()
-}
-
 // ADR-0038: a `…-by:` trailer naming an AI tool is rejected, case-insensitively.
 #[test]
 fn rejects_ai_trailers() {
@@ -90,64 +86,6 @@ fn accepts_normal_messages() {
 #[test]
 fn trailer_keys_have_no_spaces() {
     assert!(check_message("Add docs\n\nThanks to reviewed by: Claude\n").is_empty());
-}
-
-// ADR-0030: fixtures may only be added; every other status is one problem
-// per file.
-#[test]
-fn fixtures_may_only_be_added() {
-    let fixture = "crates/qoob3d-core/tests/fixtures/v1.qbd";
-    assert!(check_files(&files(&[("A", fixture)])).is_empty());
-    for status in ["M", "D", "R100", "R087"] {
-        let problems = check_files(&files(&[(status, fixture)]));
-        assert_eq!(problems.len(), 1, "{status}");
-        let expected = format!("fixture {fixture} modified/deleted \u{2013} forbidden (ADR-0030)");
-        assert!(problems[0].contains(&expected), "{problems:?}");
-    }
-    let two = files(&[("M", fixture), ("D", "crates/qoob3d-core/tests/fixtures/v2.qbd")]);
-    assert_eq!(check_files(&two).len(), 2);
-}
-
-// The NUL-separated listing of `git diff-tree --name-status -z`
-// becomes (status, path) pairs, a rename contributes both paths, a path may
-// hold a tab or newline (since the critic finding on 06bc870 the parser reads
-// only the `-z` form).
-#[test]
-fn parses_name_status() {
-    let listing = "M\0crates/a.rs\0A\0docs/b.md\0D\0c.rs\0R100\0old.rs\0new.rs\0";
-    assert_eq!(
-        parse_name_status(listing),
-        files(&[
-            ("M", "crates/a.rs"),
-            ("A", "docs/b.md"),
-            ("D", "c.rs"),
-            ("R100", "old.rs"),
-            ("R100", "new.rs")
-        ])
-    );
-    assert_eq!(
-        parse_name_status("M\0crates/a\tb.rs\0A\0docs/x\ny.md\0"),
-        files(&[("M", "crates/a\tb.rs"), ("A", "docs/x\ny.md")])
-    );
-    assert!(parse_name_status("").is_empty());
-}
-
-// ADR-0030 (critic finding P2 on 0b27154, user decision 2026-10-15): the
-// fixture directory is matched ignoring case, as macOS file systems do.
-#[test]
-fn fixtures_are_matched_ignoring_case() {
-    for path in
-        ["crates/qoob3d-core/tests/Fixtures/v1.qbd", "CRATES/qoob3d-core/TESTS/FIXTURES/V1.QBD"]
-    {
-        assert_eq!(check_files(&files(&[("M", path)])).len(), 1, "{path}");
-    }
-}
-
-// ADR-0030: renaming a fixture away is caught via both parsed paths.
-#[test]
-fn renamed_fixture_is_rejected() {
-    let listing = "R100\0crates/qoob3d-core/tests/fixtures/v1.qbd\0docs/v1.qbd\0";
-    assert_eq!(check_files(&parse_name_status(listing)).len(), 1);
 }
 
 // ADR-0044 (spec section 2): the first line that is neither empty nor a `#`
@@ -316,60 +254,6 @@ fn check_range_without_identity_file_fails() {
     let problems = check_range(&root, &["HEAD".to_owned()]).unwrap_err();
     assert!(
         problems.iter().any(|p| p.contains("harness/identity.txt: no allowed identity")),
-        "{problems:?}"
-    );
-    fs::remove_dir_all(&root).unwrap();
-}
-
-// Paths git quotes: with `core.quotePath` (git's default) `git diff-tree
-// --name-status` prints a non-ASCII path in C quotes. `cargo xtask commits`
-// must see such a path as the file it names. The repository sets
-// `core.quotePath=true` locally, so a global `false` cannot hide the case.
-
-/// A repository whose git quotes unusual paths, with `harness/identity.txt`
-/// naming Alice committed.
-fn quoting_repo(test: &str) -> PathBuf {
-    let root = git_repo(test);
-    git_in(&root, &[], &["config", "core.quotePath", "true"]);
-    fs::create_dir_all(root.join("harness")).unwrap();
-    fs::write(root.join(IDENTITY_FILE), "Alice <alice@example.com>\n").unwrap();
-    commit_files(&root, &[], "Add the identity");
-    root
-}
-
-/// Appends a line to each of `files` (creating parent directories) and
-/// commits everything as Alice.
-fn commit_files(root: &Path, files: &[&str], message: &str) {
-    for file in files {
-        let path = root.join(file);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let old = fs::read_to_string(&path).unwrap_or_default();
-        fs::write(&path, format!("{old}{file}\n")).unwrap();
-    }
-    git_in(root, &[], &["add", "-A"]);
-    let env = [
-        ("GIT_AUTHOR_NAME", "Alice"),
-        ("GIT_AUTHOR_EMAIL", "alice@example.com"),
-        ("GIT_COMMITTER_NAME", "Alice"),
-        ("GIT_COMMITTER_EMAIL", "alice@example.com"),
-    ];
-    git_in(root, &env, &["commit", "-q", "-m", message]);
-}
-
-// ADR-0030 (critic finding N3 on 0600f48): a fixture with a non-ASCII name may
-// be added but not modified; the problem names the real path.
-#[test]
-fn check_range_sees_modified_fixtures_under_quoted_paths() {
-    let root = quoting_repo("quoted_fixture");
-    let fixture = "crates/qoob3d-core/tests/fixtures/\u{e4}.qbd";
-    commit_files(&root, &[fixture], "Add a fixture");
-    assert_eq!(check_range(&root, &["HEAD~1..HEAD".to_owned()]), Ok(()));
-    commit_files(&root, &[fixture], "Modify the fixture");
-    let Err(problems) = check_range(&root, &["HEAD~1..HEAD".to_owned()]) else {
-        panic!("{fixture:?}: modified fixture passed");
-    };
-    assert!(
-        problems.iter().any(|p| p.contains(&format!("fixture {fixture} modified/deleted"))),
         "{problems:?}"
     );
     fs::remove_dir_all(&root).unwrap();

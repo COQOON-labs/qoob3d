@@ -6,7 +6,6 @@
 use std::f64::consts::{FRAC_PI_2, PI};
 use std::rc::Rc;
 
-use qoob3d_core::document::{OriginPlane, PlaneFrame};
 use rhai::{Array, Dynamic, Engine};
 
 use super::api::{
@@ -14,19 +13,49 @@ use super::api::{
     runtime,
 };
 use super::{Shape, compound};
-use crate::model::occ;
-use crate::occt::ffi;
+use crate::occt::{ffi, occ};
 
 /// `qoob3d_transform`: from the XY plane into a plane frame.
 const PLACE: u32 = 4;
 /// Profiles with less area are empty, mm².
 const MIN_AREA_MM2: f64 = 1e-9;
 
+/// Right-handed local frame of a profile plane: `n = u × v`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Frame {
+    origin: [f64; 3],
+    u: [f64; 3],
+    v: [f64; 3],
+    n: [f64; 3],
+}
+
+impl Frame {
+    // The origin planes, with the local axes of the ViewCube faces TOP,
+    // FRONT and RIGHT, so a profile is never mirrored in its standard view
+    // (ADR-0006).
+    const XY: Self = Self::axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
+    const XZ: Self = Self::axes([1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]);
+    const YZ: Self = Self::axes([0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
+
+    const fn axes(u: [f64; 3], v: [f64; 3], n: [f64; 3]) -> Self {
+        Self { origin: [0.0; 3], u, v, n }
+    }
+
+    /// Flat form for FFI: origin, u, v, n.
+    fn to_array(self) -> [f64; 12] {
+        let mut out = [0.0; 12];
+        for (i, v) in [self.origin, self.u, self.v, self.n].iter().enumerate() {
+            out[3 * i..3 * i + 3].copy_from_slice(v);
+        }
+        out
+    }
+}
+
 /// A region in the local XY plane of `frame`.
 #[derive(Clone)]
 pub(super) struct Profile {
     source: Source,
-    frame: PlaneFrame,
+    frame: Frame,
 }
 
 #[derive(Clone)]
@@ -53,7 +82,7 @@ impl Profile {
             arcs,
         };
         let source = Source::Outline { curves: Rc::new(curves), simple };
-        Self { source, frame: OriginPlane::XY.frame() }
+        Self { source, frame: Frame::XY }
     }
 
     /// The faces of the profile in the plane z = 0.
@@ -67,12 +96,7 @@ impl Profile {
         };
         let keys: Vec<u32> =
             c.line_ids.iter().chain(&c.circle_ids).chain(&c.arc_ids).copied().collect();
-        let r = ffi::qoob3d_profile_faces(
-            c,
-            &keys,
-            &[0, keys.len() as u32],
-            &OriginPlane::XY.frame().to_array(),
-        );
+        let r = ffi::qoob3d_profile_faces(c, &keys, &[0, keys.len() as u32], &Frame::XY.to_array());
         if r.as_ref().is_err_and(|e| e.what().contains("profile not found")) {
             return Err(geometry(function, "the profile is not one simple closed outline"));
         }
@@ -80,7 +104,7 @@ impl Profile {
     }
 
     /// The faces of the profile, placed by `frame`.
-    fn face(&self, function: &'static str, frame: &PlaneFrame) -> Rr<Shape> {
+    fn face(&self, function: &'static str, frame: &Frame) -> Rr<Shape> {
         let local = self.local(function)?;
         made(function, ffi::qoob3d_transform(local.get(), PLACE, &frame.to_array()))
     }
@@ -165,7 +189,7 @@ fn offset(p: &Profile, d: f64) -> Rr<Profile> {
 /// The cut of `s` with an origin plane moved to the world coordinate `at`
 /// along the axis the plane name leaves out (AG-SC-21).
 fn section(s: &Shape, name: &str, at: f64) -> Rr<Profile> {
-    let mut frame = plane(name)?.frame();
+    let mut frame = plane(name)?;
     frame.origin = frame.n.map(|c| c.abs() * at);
     let faces = made("section", ffi::qoob3d_section(s.get(), &frame.to_array()))?;
     Ok(Profile { source: Source::Faces(faces), frame })
@@ -271,11 +295,11 @@ fn polygon(points: &Array) -> Rr<Profile> {
     Ok(Profile::new(outline(&corners), Vec::new(), Vec::new(), false))
 }
 
-fn plane(name: &str) -> Rr<OriginPlane> {
+fn plane(name: &str) -> Rr<Frame> {
     match name {
-        "xy" => Ok(OriginPlane::XY),
-        "xz" => Ok(OriginPlane::XZ),
-        "yz" => Ok(OriginPlane::YZ),
+        "xy" => Ok(Frame::XY),
+        "xz" => Ok(Frame::XZ),
+        "yz" => Ok(Frame::YZ),
         other => Err(runtime(format!("plane must be \"xy\", \"xz\" or \"yz\", got {other:?}"))),
     }
 }
@@ -288,7 +312,7 @@ fn extrude(p: &Profile, h: f64) -> Rr<Shape> {
 
 /// The profile's (x, y) become (radius, height): drawn in XZ, turned about Z.
 fn revolve(function: &'static str, p: &Profile, deg: f64) -> Rr<Shape> {
-    let face = p.face(function, &OriginPlane::XZ.frame())?;
+    let face = p.face(function, &Frame::XZ)?;
     let angle = if deg >= 360.0 { 2.0 * PI } else { deg.to_radians() };
     made(function, ffi::qoob3d_revolve(face.get(), &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0], angle))
 }
@@ -357,7 +381,7 @@ pub(super) fn register(engine: &mut Engine) {
         Ok(slot(l, w))
     });
     engine.register_fn("on", |name: &str, p: Profile| -> Rr<Profile> {
-        Ok(Profile { frame: plane(name)?.frame(), ..p })
+        Ok(Profile { frame: plane(name)?, ..p })
     });
     engine.register_fn("at_z", |p: Profile, z: Dynamic| -> Rr<Profile> {
         let mut frame = p.frame;

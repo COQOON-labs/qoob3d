@@ -1,12 +1,10 @@
 //! Commit policy (ADR-0037), run by the git hooks and in CI:
 //! - no commit names an AI as author, co-author or generator,
-//! - author and committer are the project identity in `harness/identity.txt`,
-//! - format fixtures are never modified or deleted (ADR-0030).
+//! - author and committer are the project identity in `harness/identity.txt`.
 
 use std::path::Path;
 
 use crate::git;
-use crate::paths;
 
 /// Lower-case markers of AI tools in names, e-mails and trailers.
 const AI_MARKERS: &[&str] = &[
@@ -85,19 +83,6 @@ pub(crate) fn read_allowed_identity(root: &Path) -> Result<String, String> {
         .ok_or_else(|| format!("{IDENTITY_FILE}: no allowed identity"))
 }
 
-/// Problems with the files of one commit: `(status, path)` pairs as printed by
-/// `git diff-tree --name-status` ([`parse_name_status`]; renames contribute both
-/// paths).
-pub(crate) fn check_files(files: &[(String, String)]) -> Vec<String> {
-    files
-        .iter()
-        .filter(|(status, path)| {
-            path.to_lowercase().starts_with(paths::FIXTURES) && !status.starts_with('A')
-        })
-        .map(|(_, path)| format!("fixture {path} modified/deleted – forbidden (ADR-0030)"))
-        .collect()
-}
-
 /// Author and committer of the commit being created (commit-msg hook).
 pub(crate) fn check_current_identity(root: &Path) -> Vec<String> {
     let allowed = match read_allowed_identity(root) {
@@ -131,33 +116,13 @@ pub(crate) fn check_range(root: &Path, rev_list_args: &[String]) -> Result<(), V
         let author = lines.next().unwrap_or_default();
         let committer = lines.next().unwrap_or_default();
         let message = lines.next().unwrap_or_default();
-        // `-z`: paths unquoted, as they are (git quotes non-ASCII, tab, `"`, `\`).
-        let args =
-            ["diff-tree", "--root", "--no-commit-id", "-r", "--name-status", "-M", "-z", sha];
-        let listing = git(root, &args).map_err(|e| vec![e])?;
-        let files = parse_name_status(&listing);
-
         let found = check_identity("author", author, &allowed)
             .into_iter()
             .chain(check_identity("committer", committer, &allowed))
-            .chain(check_message(message))
-            .chain(check_files(&files));
+            .chain(check_message(message));
         problems.extend(found.map(|p| format!("{short}: {p}")));
     }
     if problems.is_empty() { Ok(()) } else { Err(problems) }
-}
-
-/// `(status, path)` per path of a `--name-status -z` listing, where every field
-/// ends with a NUL (`M\0path\0R100\0old\0new\0`) and paths may hold tabs and
-/// newlines; a rename or copy (`R100`, `C75`) contributes both paths.
-pub(crate) fn parse_name_status(listing: &str) -> Vec<(String, String)> {
-    let mut fields = listing.split('\0').filter(|f| !f.is_empty());
-    let mut files = Vec::new();
-    while let Some(status) = fields.next() {
-        let paths = if status.starts_with(['R', 'C']) { 2 } else { 1 };
-        files.extend(fields.by_ref().take(paths).map(|p| (status.to_owned(), p.to_owned())));
-    }
-    files
 }
 
 #[cfg(test)]

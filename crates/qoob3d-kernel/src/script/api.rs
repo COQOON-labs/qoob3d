@@ -12,8 +12,8 @@ use rhai::{Array, Dynamic, Engine, EvalAltResult, Map, Position};
 
 use super::{RunOutput, Shape, compound, inside_project, profile, select};
 use crate::KernelError;
-use crate::model::{self, occ};
 use crate::occt::ffi;
+use crate::occt::{self, occ};
 
 pub(super) type Rr<T> = Result<T, Box<EvalAltResult>>;
 
@@ -60,7 +60,7 @@ pub(super) fn made(
     function: &'static str,
     r: Result<UniquePtr<ffi::TopoDS_Shape>, cxx::Exception>,
 ) -> Rr<Shape> {
-    model::shape(r).map(Shape::new).map_err(|e| geometry(function, e))
+    occt::shape(r).map(Shape::new).map_err(|e| geometry(function, e))
 }
 
 pub(super) fn occt<T>(function: &'static str, r: Result<T, KernelError>) -> Rr<T> {

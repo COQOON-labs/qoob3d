@@ -17,7 +17,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::live::ProjectDir;
+use crate::client::ProjectDir;
 
 /// Protocol versions this server speaks; the last one is offered to
 /// clients that ask for anything else.

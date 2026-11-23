@@ -96,9 +96,3 @@ fn guard_script_lists_every_harness_path() {
         assert!(guard.contains(&quoted), "guard.sh does not list {quoted}");
     }
 }
-
-// ADR-0030: the fixture directory constant.
-#[test]
-fn fixture_directory() {
-    assert_eq!(FIXTURES, "crates/qoob3d-core/tests/fixtures/");
-}

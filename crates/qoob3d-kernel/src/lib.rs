@@ -1,22 +1,16 @@
-//! QOOB3D geometry kernel (ADR-0004, ADR-0005).
+//! QOOB3D geometry kernel (ADR-0004, ADR-0053): the script API on
+//! OpenCascade.
 //!
-//! All OpenCascade objects live exclusively on one dedicated worker thread
-//! (OCCT handles are not `Send`). The rest of the application talks to it via
-//! [`Kernel`] using plain-data requests and responses, so the UI never blocks
-//! on geometry work and no OCCT type ever crosses this crate's API.
+//! OCCT shapes are not `Send`: a script runs, builds and measures its shapes
+//! on the thread that called [`script::run`]. The application runs scripts in
+//! worker processes, so a crash or an endless script never takes the service
+//! or the app down. No OCCT type crosses this crate's API.
 
-mod model;
 mod occt;
-mod profiles;
 pub mod script;
 mod tessellate;
-mod worker;
 
-pub use model::{BodyId, BodyResult, ExportBody, RebuildResult, RebuildStats, SketchResult};
-pub use worker::{Kernel, Request, RequestId, Response};
-
-/// Errors reported by the kernel. They are plain data so they can be sent
-/// back to the UI thread.
+/// Errors reported by the kernel, as plain data.
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum KernelError {
     #[error("tessellation failed: {0}")]
@@ -24,11 +18,6 @@ pub enum KernelError {
     /// An OCCT exception, caught in our C++ wrappers (ADR-0004).
     #[error("OpenCascade: {0}")]
     Occt(String),
-    #[error("kernel worker thread is not running")]
-    WorkerGone,
-    /// A modelling problem the user can fix (missing profile, nothing to cut …).
-    #[error("{0}")]
-    Model(String),
     /// Reading or writing a file failed.
     #[error("file: {0}")]
     Io(String),
