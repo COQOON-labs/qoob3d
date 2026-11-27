@@ -370,7 +370,7 @@ fn build(request: &Request, name: &str) -> Result<(String, Value), PartError> {
         .modules_read
         .iter()
         .chain(&output.files_read)
-        .map(|m| std::fs::read(dir.join(m)).map(|b| file_digest(&b)).map_err(|e| io_error(m, e)))
+        .map(|m| project::read_digest(&dir.join(m)).map_err(|e| io_error(m, e)))
         .collect::<Result<Vec<_>, _>>()?;
     let key = project::cache_key(&KeyInputs {
         program_version: key_version(&request.mesh),

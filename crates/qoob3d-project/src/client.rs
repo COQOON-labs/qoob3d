@@ -19,6 +19,9 @@ use qoob3d_core::project::layout;
 use qoob3d_core::{ShapeMesh, qmesh};
 use serde::Deserialize;
 
+#[cfg(test)]
+mod tests;
+
 /// A running service answers `GET /status` within this time (WA-OP-02).
 pub const STATUS_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long to wait for a freshly started service (WA-OP-02).
@@ -87,15 +90,16 @@ impl ProjectDir {
     }
 }
 
-/// The process `pid` exists (`kill -0`, POSIX; `unsafe` is denied here).
+/// The process `pid` exists (`kill(pid, 0)`; a process of another user
+/// exists too, and the lock check after this tells it from a service).
 fn alive(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    let Some(pid) = i32::try_from(pid).ok().and_then(rustix::process::Pid::from_raw) else {
+        return false;
+    };
+    match rustix::process::test_kill_process(pid) {
+        Ok(()) => true,
+        Err(e) => e == rustix::io::Errno::PERM,
+    }
 }
 
 /// The service of a folder runs but did not answer `/status` within the

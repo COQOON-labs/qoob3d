@@ -62,8 +62,8 @@ subcommands here.
   `summary.rs` `.qoob3d/summary.json` every 0.5 s when a count changed, and once more at
   shutdown (WS-PRE-04); `Service::watch_idle` stops the service after `[service] idle_min`
   without allowed requests and unfinished jobs (WS-PRE-05); `slots.rs` the machine-wide worker
-  budget (WS-PRE-06): runtime folder, `budget.json`, `slot-<i>.lock` file locks, default
-  physical cores − 1; `Service::work` holds a slot around `Pool::run`, `Service::shown` shows a
+  budget (WS-PRE-06): runtime folder (used only when it is a folder of the user, not a symlink), `budget.json`,
+  `slot-<i>.lock` file locks, default physical cores − 1; `Service::work` holds a slot around `Pool::run`, `Service::shown` shows a
   running job that only waits as `queued` with `reason`.
   `bench.rs` `qoob3d bench <DIR>` (AG-PF-06): a fresh worker per build, entries in
   `.qoob3d/bench-<pid>/` (removed afterwards), never the project cache; it discovers in its own

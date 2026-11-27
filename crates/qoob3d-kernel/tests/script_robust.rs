@@ -458,9 +458,14 @@ fn ag_pj_06_the_pose_option_declares_how_a_part_is_printed() {
     assert_eq!(b.rotate, [([0.0, 0.0, 1.0], 90.0), ([0.0, 1.0, 0.0], 45.0)]);
     assert_eq!(b.count, 1);
     assert_eq!(out.parts[2].print, None);
+    let most = declare("part(\"A\", #{ pose: #{ count: 1000 } }, |deps| box(1, 1, 1));");
+    assert_eq!(most.expect("1000 copies").parts[0].print.as_ref().map(|p| p.count), Some(1000));
     for (bad, message) in [
         ("#{ pose: 1 }", "pose must be a map"),
-        ("#{ pose: #{ count: 0 } }", "count must be a whole number >= 1"),
+        ("#{ pose: #{ count: 0 } }", "count must be a whole number from 1 to 1000"),
+        // The service copies the mesh once per piece when it exports.
+        ("#{ pose: #{ count: 1001 } }", "count must be a whole number from 1 to 1000"),
+        ("#{ pose: #{ count: 4000000000 } }", "count must be a whole number from 1 to 1000"),
         ("#{ pose: #{ rotate: [\"q\", 1] } }", "axis must be"),
         ("#{ pose: #{ spin: 1 } }", "unknown key \"spin\""),
     ] {

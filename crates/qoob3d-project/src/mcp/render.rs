@@ -135,8 +135,7 @@ pub(super) fn render(dir: &Path, args: &Value) -> Result<(Value, String), String
 
     let source = match &args["source"] {
         Value::Null => None,
-        Value::String(s) if !parts.is_empty() => {
-            let _ = s;
+        Value::String(_) if !parts.is_empty() => {
             return Err("render takes parts or source, not both".to_owned());
         }
         Value::String(s) => Some(s.clone()),
@@ -178,7 +177,10 @@ pub(super) fn render(dir: &Path, args: &Value) -> Result<(Value, String), String
     }
     let done = command.stdin(Stdio::null()).stdout(Stdio::null()).output();
     if source.is_some() {
-        let _ = std::fs::remove_file(&script);
+        // The picture is made either way; a script left behind is only noise.
+        if let Err(e) = std::fs::remove_file(&script) {
+            tracing::warn!("removing {}: {e}", script.display());
+        }
     }
     let done = done.map_err(io)?;
     if !done.status.success() {

@@ -9,12 +9,19 @@
 //!
 //! Declaration discovery takes no slot: it is bounded (AG-HD-02), and
 //! builds wait for it.
+//!
+//! The runtime folder must be a folder of the user (not a symlink): in a
+//! shared temporary folder another user could make it first and hold every
+//! slot. Otherwise the service runs without a budget and logs why.
 
 use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde::Deserialize;
+
+#[cfg(test)]
+mod tests;
 
 /// Overrides the runtime folder (tests, several users of one account).
 pub(crate) const RUNTIME_ENV: &str = "QOOB3D_RUNTIME_DIR";
@@ -93,12 +100,31 @@ impl Slots {
         use std::os::unix::fs::DirBuilderExt as _;
         let dir = runtime_dir();
         let made = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir);
-        if let Err(e) = &made {
-            tracing::warn!("no worker budget, {} cannot be made: {e}", dir.display());
+        let checked = made
+            .map_err(|e| format!("cannot be made: {e}"))
+            .and_then(|()| usable(&dir, rustix::process::geteuid().as_raw()));
+        if let Err(e) = &checked {
+            tracing::warn!("no worker budget, {} {e}", dir.display());
         }
-        Self { dir: made.ok().map(|()| dir) }
+        Self { dir: checked.ok().map(|()| dir) }
     }
+}
 
+/// Whether `dir` is a folder (no symlink) owned by the user `uid`: in a
+/// shared temporary folder another user could have made it first.
+fn usable(dir: &Path, uid: u32) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = std::fs::symlink_metadata(dir).map_err(|e| format!("cannot be read: {e}"))?;
+    if !meta.file_type().is_dir() {
+        return Err("is not a folder".to_owned());
+    }
+    if meta.uid() != uid {
+        return Err(format!("is owned by user {}, not by {uid}", meta.uid()));
+    }
+    Ok(())
+}
+
+impl Slots {
     /// The budget now: `budget.json`, else [`default_budget`].
     pub(crate) fn budget(&self) -> usize {
         let file = self.dir.as_deref().map(|d| d.join(BUDGET_FILE));

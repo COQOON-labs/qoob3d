@@ -98,6 +98,10 @@ fn depends(name: &str, options: &Map) -> Rr<Vec<String>> {
     list.iter().map(|d| d.clone().into_string().map_err(|_| invalid())).collect()
 }
 
+/// Most copies of one part: the service copies the mesh once per piece when
+/// it exports a kit or a slicer project, outside the limits of a worker.
+const MAX_COPIES: i64 = 1000;
+
 /// `options.pose`: `#{ rotate: ["x", 180], count: 2 }`, where `rotate` is
 /// one `[axis, degrees]` or an array of them (applied in order) and both
 /// keys are optional (AG-PJ-06).
@@ -115,9 +119,11 @@ fn print_pose(name: &str, options: &Map) -> Rr<Option<PrintPose>> {
         pose.count = count
             .as_int()
             .ok()
+            .filter(|n| (1..=MAX_COPIES).contains(n))
             .and_then(|n| u32::try_from(n).ok())
-            .filter(|&n| n >= 1)
-            .ok_or_else(|| error("count must be a whole number >= 1"))?;
+            .ok_or_else(|| {
+                error(&format!("count must be a whole number from 1 to {MAX_COPIES}"))
+            })?;
     }
     if let Some(rotate) = map.get("rotate") {
         let Some(list) = rotate.read_lock::<Array>() else {

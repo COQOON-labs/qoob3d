@@ -16,18 +16,24 @@ use serde_json::{Map, Value, json};
 use super::Service;
 use super::tasks::utc_now;
 
+#[cfg(test)]
+mod tests;
+
 /// How often the state is looked at, and so the shortest time between two
 /// writes.
 const INTERVAL: Duration = Duration::from_millis(500);
 /// How often the thread looks whether the service stops.
 const STEP: Duration = Duration::from_millis(50);
 
-/// `{state: count}` of the `state` fields in `list` for every one of `states`.
-fn counts(list: &Value, states: &[&str]) -> Value {
-    let mut out = Map::new();
-    for state in states {
-        let n = list.as_array().into_iter().flatten().filter(|e| e["state"] == *state).count();
-        out.insert((*state).to_owned(), json!(n));
+/// `{state: count}` of the `state` fields in `list`: every one of `known`
+/// (0 when absent), and any other state that occurs, so the counts always
+/// add up to the entries.
+fn counts(list: &Value, known: &[&str]) -> Value {
+    let mut out: Map<String, Value> = known.iter().map(|s| ((*s).to_owned(), json!(0))).collect();
+    for entry in list.as_array().into_iter().flatten() {
+        let state = entry["state"].as_str().unwrap_or("unknown").to_owned();
+        let n = out.get(&state).and_then(Value::as_u64).unwrap_or(0);
+        out.insert(state, json!(n + 1));
     }
     Value::Object(out)
 }

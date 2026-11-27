@@ -30,7 +30,7 @@ shapes on the thread that called `script::run`; the app runs scripts in worker p
   `profile.rs` profiles, profile algebra (AG-PF-02), `rounded_rect`, `rotate`, `offset`,
   `area`, `section`, extrude/revolve/loft, pipe; `select.rs` edge/face selectors incl.
   `in_box`/`near`/`length`/`area`, fillet, chamfer, shell; `project.rs` `part()`/`value()` (part
-  options `depends`, `pose`, `color`, `print_with`; AG-PJ-06/07) with
+  options `depends`, `pose` with at most 1000 copies, `color`, `print_with`; AG-PJ-06/07) with
   `PartMode` (all, declare without the CAD API, one part from dependency BREPs); `check.rs`
   `check()`/`expect…` (incl. `expect_eq`) and `part(name)`; `limits.rs` the size limits of
   declaration discovery (AG-HD-02: runs in doubling stages that measure the variables, then a search for

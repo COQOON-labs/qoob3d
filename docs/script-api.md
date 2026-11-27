@@ -919,7 +919,7 @@ part("Peg", #{ depends: ["Base"] }, |deps| {
 
 Model a part where it belongs in the assembly and give it a print pose: `pose: #{ rotate:
 [axis, degrees], count: n }` turns it (`rotate` may be a list of turns, applied in order),
-stands it on the bed centred, and prints `count` copies. Export writes STL and 3MF in the
+stands it on the bed centred, and prints `count` copies (1 to 1000). Export writes STL and 3MF in the
 print pose; render shows the part where it is modelled.
 
 ```rhai

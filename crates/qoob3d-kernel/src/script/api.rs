@@ -469,27 +469,29 @@ fn register_screw_holes(engine: &mut Engine) {
 }
 
 fn register_booleans(engine: &mut Engine) {
-    let exact = BoolOptions::default();
-    engine.register_fn("+", move |a: Shape, b: Shape| fuse("union", &[a, b], exact));
-    engine.register_fn("-", move |a: Shape, b: Shape| cut(&a, &[b], exact));
-    engine.register_fn("&", move |a: Shape, b: Shape| common(&a, &b, exact));
+    // No `fuzzy` given: automatic for cut and common of freeform bodies,
+    // exact unions (AG-SC-25).
+    let auto = BoolOptions::default();
+    engine.register_fn("+", move |a: Shape, b: Shape| fuse("union", &[a, b], auto));
+    engine.register_fn("-", move |a: Shape, b: Shape| cut(&a, &[b], auto));
+    engine.register_fn("&", move |a: Shape, b: Shape| common(&a, &b, auto));
     engine.register_fn("union", move |parts: Array| {
-        fuse("union", &shapes_of(&parts, "union: element")?, exact)
+        fuse("union", &shapes_of(&parts, "union: element")?, auto)
     });
     engine.register_fn("union", |parts: Array, o: Map| -> Rr<Shape> {
         fuse("union", &shapes_of(&parts, "union: element")?, BoolOptions::of(&o, "union")?)
     });
     engine.register_fn("cut", move |a: Shape, tools: Array| {
-        cut(&a, &shapes_of(&tools, "cut: tool")?, exact)
+        cut(&a, &shapes_of(&tools, "cut: tool")?, auto)
     });
-    engine.register_fn("cut", move |a: Shape, tool: Shape| cut(&a, &[tool], exact));
+    engine.register_fn("cut", move |a: Shape, tool: Shape| cut(&a, &[tool], auto));
     engine.register_fn("cut", |a: Shape, tools: Array, o: Map| -> Rr<Shape> {
         cut(&a, &shapes_of(&tools, "cut: tool")?, BoolOptions::of(&o, "cut")?)
     });
     engine.register_fn("cut", |a: Shape, tool: Shape, o: Map| -> Rr<Shape> {
         cut(&a, &[tool], BoolOptions::of(&o, "cut")?)
     });
-    engine.register_fn("common", move |a: Shape, b: Shape| common(&a, &b, exact));
+    engine.register_fn("common", move |a: Shape, b: Shape| common(&a, &b, auto));
     engine.register_fn("common", |a: Shape, b: Shape, o: Map| -> Rr<Shape> {
         common(&a, &b, BoolOptions::of(&o, "common")?)
     });
