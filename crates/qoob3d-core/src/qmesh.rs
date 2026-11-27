@@ -111,6 +111,7 @@ pub fn read(bytes: &[u8]) -> Result<ShapeMesh, QmeshError> {
     Ok(ShapeMesh {
         faces: TriMesh { positions, normals, indices, face_ids: Vec::new() },
         edges: Polylines { points, starts },
+        tints: Vec::new(),
     })
 }
 

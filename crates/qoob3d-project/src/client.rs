@@ -128,6 +128,9 @@ pub struct Part {
     pub state: PartState,
     /// Cache key of the last successful build.
     pub key: Option<String>,
+    /// `#RRGGBB`, if the part declares a colour (AG-PJ-07).
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 /// A part's mesh with the cache key it belongs to (`X-Qoob3d-Key`, WA-PR-02).

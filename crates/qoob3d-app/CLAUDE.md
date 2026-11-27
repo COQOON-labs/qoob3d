@@ -34,10 +34,12 @@ Library + binary `qoob3d` (ADR-0013): the app that shows a script project live, 
 - `src/service_cli.rs`: CLI clients against the service of the working directory (AG-SV-02),
   `check` (exit 1 if a check failed) and `task …` as role human.
 - `src/project_render.rs`: `qoob3d render-project` (AG-RD-01): build through the service, load
-  meshes, render orthographic;
+  meshes (or `--source FILE`: the shapes of a throwaway script via `/run {meshes}`), render
+  orthographic, framed tightly (`Camera::fit_tight`) or on `--region` (AG-MC-12);
   `--views a,b` gives a contact sheet (`project_render/sheet.rs`, built-in 5x7 label font).
 - `src/live.rs`: script project shown live (W1, docs/requirements/project-app.md): `Poller`
-  thread (retries a failed first connection every interval), view model `Live`.
+  thread (retries a failed first connection every interval), view model `Live` (parts keep
+  their `color` and are tinted in `scene`, WA-LV-07; `render-project` does the same).
 - `src/app.rs`: `QoobApp` (eframe::App): open project (`--project`, folder dialog, Cmd/Ctrl+O),
   live meshes into the viewport, error dialog, status line, the demo body for tests and the
   smoke test.
@@ -64,6 +66,8 @@ Library + binary `qoob3d` (ADR-0013): the app that shows a script project live, 
   checks, tasks, run, measure, save, init, render-project; the MCP server and the acceptance.
   `tests/mcp_guide.rs`: guide, served reference, contact sheet, `task_get` (R5).
 - `tests/perf.rs`: recycling, cache eviction, tessellation settings, bench (P1, AG-PF-03..06).
+- `tests/acceptance.rs`: opt-in real projects (`QOOB3D_ACCEPTANCE_PROJECTS`, paths separated
+  by `:`): cold build, checks, kit export loaded by Bambu Studio if installed (agent.md §7).
 
 ## Relevant ADRs
 

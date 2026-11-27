@@ -3,6 +3,7 @@
 //! of one or two parts (AG-SV-06), and what a part or check file declares
 //! (ADR-0055). `Request::deps` maps the built parts to their BREP files.
 
+use std::path::Path;
 use std::time::Instant;
 
 use qoob3d_core::project::Values;
@@ -17,8 +18,14 @@ use super::{PartError, Request, io_error, load_error};
 pub(crate) enum Probe {
     /// Runs the check `name` of `Request::file`.
     Check { name: String },
-    /// Runs `source`; `part("Name")` returns the built parts.
-    Run { source: String },
+    /// Runs `source`; `part("Name")` returns the built parts. With
+    /// `meshes`, the shown shapes are also written there as `<i>.qmsh`
+    /// (AG-MC-12: pictures of throwaway shapes).
+    Run {
+        source: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meshes: Option<std::path::PathBuf>,
+    },
     /// Measures the first part, and against the second if there is one.
     Measure { parts: Vec<String> },
     /// What `Request::file` declares: a [`super::Declaration`].
@@ -28,7 +35,7 @@ pub(crate) enum Probe {
 pub(super) fn answer(request: &Request, probe: &Probe) -> Result<Value, PartError> {
     match probe {
         Probe::Check { name } => check(request, name),
-        Probe::Run { source } => run(request, source),
+        Probe::Run { source, meshes } => run(request, source, meshes.as_deref()),
         Probe::Measure { parts } => measure(request, parts),
         Probe::Declare => declare(request),
     }
@@ -65,6 +72,7 @@ fn options(request: &Request, only: Option<Vec<String>>) -> Result<RunOptions, P
         project_dir: Some(request.dir.clone()),
         values: values.iter().map(|v| (v.id.clone(), v.value.clone())).collect(),
         check: CheckOptions { built, only },
+        mesh: request.mesh,
         ..RunOptions::default()
     })
 }
@@ -75,7 +83,9 @@ fn check(request: &Request, name: &str) -> Result<Value, PartError> {
     let file = request.file.as_deref().ok_or_else(|| load_error("check without a file"))?;
     let text = std::fs::read_to_string(request.dir.join(file)).map_err(|e| io_error(file, e))?;
     let options = options(request, Some(vec![name.to_owned()]))?;
-    let output = script::run(&text, &options).map_err(|e| PartError::script(Some(file), &e))?;
+    let output = script::run_keeping_prints(&text, &options)
+        .map_err(|f| PartError::failed_run(Some(file), f))?;
+    let printed = output.printed;
     let Some(check) = output.checks.into_iter().find(|c| c.name == name) else {
         return Err(load_error(format!("{}: no check {name:?}", file.display())));
     };
@@ -96,23 +106,45 @@ fn check(request: &Request, name: &str) -> Result<Value, PartError> {
         "expectations": expectations,
         "error": check.error.as_ref().map(|e| PartError::script(Some(file), e)),
         "parts_read": check.parts_read,
+        "printed": printed,
         "duration_s": start.elapsed().as_secs_f64(),
     }))
 }
 
-/// `{shapes: [{name, …measures}], printed}` of a throwaway script.
-fn run(request: &Request, source: &str) -> Result<Value, PartError> {
-    let output =
-        script::run(source, &options(request, None)?).map_err(|e| PartError::script(None, &e))?;
-    let shapes: Vec<Value> = output
+/// `{shapes: [{name, …measures, mesh?}], printed}` of a throwaway script;
+/// with `meshes` each shape's mesh is written to `<meshes>/<i>.qmsh`.
+fn run(request: &Request, source: &str, meshes: Option<&Path>) -> Result<Value, PartError> {
+    let output = script::run_keeping_prints(source, &options(request, None)?)
+        .map_err(|f| PartError::failed_run(None, f))?;
+    if let Some(folder) = meshes {
+        let full = request.dir.join(folder);
+        std::fs::create_dir_all(&full).map_err(|e| io_error(&full, e))?;
+    }
+    let shapes = output
         .shapes
         .iter()
-        .map(|(name, shape)| {
+        .enumerate()
+        .map(|(i, (name, shape))| {
             let mut m = measures(shape);
             m["name"] = json!(name);
-            m
+            if let Some(folder) = meshes {
+                let relative = folder.join(format!("{i}.qmsh"));
+                let mesh = request.mesh;
+                let tessellated =
+                    shape.mesh_with_angle(mesh.deflection_mm, mesh.angle_deg).map_err(|e| {
+                        PartError::new(
+                            super::ErrorKind::Script,
+                            format!("{name}: meshing failed: {e}"),
+                        )
+                    })?;
+                let path = request.dir.join(&relative);
+                std::fs::write(&path, qoob3d_core::qmesh::write(&tessellated))
+                    .map_err(|e| io_error(&path, e))?;
+                m["mesh"] = json!(relative);
+            }
+            Ok(m)
         })
-        .collect();
+        .collect::<Result<Vec<Value>, PartError>>()?;
     Ok(json!({"shapes": shapes, "printed": output.printed}))
 }
 

@@ -3,6 +3,7 @@
 //! functions `area`, `center` and `distance`.
 
 use super::Shape;
+use super::VOLUME_RELATIVE_ERROR;
 use super::api::COMMON;
 use crate::KernelError;
 use crate::occt::ffi;
@@ -38,7 +39,7 @@ pub fn distance(a: &Shape, b: &Shape) -> Result<f64, KernelError> {
 /// # Errors
 /// The boolean operation failed.
 pub fn common_volume(a: &Shape, b: &Shape) -> Result<f64, KernelError> {
-    let common = occt::shape(ffi::qoob3d_boolean(a.get(), b.get(), COMMON))?;
-    let volume = occ(ffi::qoob3d_volume(common.get()))?;
+    let common = occt::shape(ffi::qoob3d_boolean(a.get(), b.get(), COMMON, 0.0, true))?;
+    let volume = occ(ffi::qoob3d_volume(common.get(), VOLUME_RELATIVE_ERROR))?;
     Ok(if volume.is_finite() { volume.max(0.0) } else { 0.0 })
 }

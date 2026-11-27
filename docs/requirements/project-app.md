@@ -35,6 +35,7 @@ with `"error": {"kind", "message"}` when `ok` is false.
 | WA-LV-04 | The browser panel lists the project parts with name and state (English: up to date / outdated / error / never built; German: aktuell / veraltet / Fehler / nie gebaut); a part in state `failed` is marked in the error color; the eye (👁) toggles visibility. All texts via `tr()`. | MUST |
 | WA-LV-05 | If the service stops answering, the panel shows "service not reachable" and the last meshes stay visible; when it answers again, polling continues. The poller reads `service.json` again while there is no answer, so it follows a service restarted on another port; a failed first connection is retried every poll interval (AG-HD-05; the retries look for a running service, they start none). | MUST |
 | WA-LV-06 | The first time meshes arrive, the camera fits all parts. Later updates do not move the camera. | SHOULD |
+| WA-LV-07 | A part that declares a colour (`color` in `/status`, AG-PJ-07) is drawn in it; parts without one keep the theme's body colour. | SHOULD |
 
 ## 3. Mesh transfer format (`qoob3d_core::qmesh`)
 

@@ -9,6 +9,8 @@
 mod graph;
 mod imports;
 pub mod layout;
+mod plates;
+mod pose;
 mod values;
 
 use std::path::{Path, PathBuf};
@@ -18,6 +20,8 @@ use sha2::{Digest, Sha256};
 
 pub use graph::{Graph, PartDecl};
 pub use imports::resolve_imports;
+pub use plates::{COLOR_NAMES, Placement, parse_color, plates};
+pub use pose::{ARRANGE_GAP_MM, PrintPose, arrange};
 pub use values::{Value, ValueStatus, Values};
 
 /// Longest time limit of a job: one day (AG-HD-01).
@@ -257,7 +261,9 @@ pub struct KeyInputs {
     /// version and the tessellation settings (AG-PF-05), composed by the caller.
     pub program_version: String,
     pub part_file: Vec<u8>,
-    /// Bytes of every transitively imported module, in [`resolve_imports`] order.
+    /// Bytes of every transitively imported module, in [`resolve_imports`]
+    /// order, followed by the bytes of the files the build imported with
+    /// `import_step` and `import_mesh` (AG-SC-24).
     pub modules: Vec<Vec<u8>>,
     /// Values read in the last build; empty before the first build. The
     /// order does not matter, the key sorts them.

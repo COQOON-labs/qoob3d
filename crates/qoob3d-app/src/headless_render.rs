@@ -4,14 +4,20 @@
 use std::path::Path;
 
 use anyhow::Context as _;
-use qoob3d_core::ShapeMesh;
+use qoob3d_core::{Aabb, ShapeMesh};
 use qoob3d_render::headless::{HeadlessGpu, read_rgba8};
 use qoob3d_render::{Camera, Projection, SceneOptions, ViewPreset, ViewportRenderer};
 
 /// Renders `mesh` from `view` into the PNG `out` and prints what it shows.
-pub fn run(out: &Path, view: ViewPreset, size: [u32; 2], mesh: &ShapeMesh) -> anyhow::Result<()> {
+pub fn run(
+    out: &Path,
+    view: ViewPreset,
+    size: [u32; 2],
+    mesh: &ShapeMesh,
+    frame: Option<Aabb>,
+) -> anyhow::Result<()> {
     let report = mesh.faces.analyze();
-    let rgba = render_views(mesh, &[view], size)?.pop().context("no view rendered")?;
+    let rgba = render_views(mesh, &[view], size, frame)?.pop().context("no view rendered")?;
     write_png(out, size, &rgba).with_context(|| format!("writing {}", out.display()))?;
     println!(
         "wrote {} ({}x{}, view {}) | triangles {} | edges {} | watertight {} | volume {:.3} mm³",
@@ -27,12 +33,14 @@ pub fn run(out: &Path, view: ViewPreset, size: [u32; 2], mesh: &ShapeMesh) -> an
     Ok(())
 }
 
-/// `mesh` once per view, orthographic and fitted, each `size` pixels of
+/// `mesh` once per view, orthographic and fitted to the box `frame` (the
+/// whole mesh without one: a region zooms in), each `size` pixels of
 /// sRGB-encoded RGBA, with one GPU setup for all of them.
 pub(crate) fn render_views(
     mesh: &ShapeMesh,
     views: &[ViewPreset],
     size: [u32; 2],
+    frame: Option<Aabb>,
 ) -> anyhow::Result<Vec<Vec<u8>>> {
     let bounds = mesh.faces.bounds().context("nothing to render: the mesh is empty")?;
     let gpu = HeadlessGpu::new()?;
@@ -44,8 +52,8 @@ pub(crate) fn render_views(
     for view in views {
         let mut camera = Camera::default();
         camera.look_from(view.eye_direction());
-        camera.fit(bounds, size[0] as f32 / size[1] as f32);
         camera.projection = Projection::Orthographic;
+        camera.fit_tight(frame.unwrap_or(bounds), size[0] as f32 / size[1] as f32);
         let (texture_view, _) = renderer.render(&gpu.device, &gpu.queue, size, &camera, &options);
         images.push(read_rgba8(&gpu.device, &gpu.queue, texture_view.texture()));
     }

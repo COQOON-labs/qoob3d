@@ -3155,12 +3155,15 @@ dependencies = [
 name = "qoob3d-core"
 version = "0.1.0"
 dependencies = [
+ "miniz_oxide 0.9.1",
  "proptest",
+ "quick-xml",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.21",
  "toml",
+ "ttf-parser",
 ]
 
 [[package]]

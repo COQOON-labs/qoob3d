@@ -1152,6 +1152,20 @@ const API: &[&str] = &[
     "section",
     "overhangs",
     "bed_area",
+    // Findings of the Damen 5009 project (agent.md §6.6).
+    "common",
+    "group",
+    "outline",
+    "defects",
+    "heal",
+    "fill_voids",
+    "split",
+    "on_bed",
+    "heights",
+    "mesh_report",
+    "step_names",
+    // Lettering (AG-SC-38).
+    "text",
 ];
 
 #[test]

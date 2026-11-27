@@ -6,7 +6,9 @@
 use std::f64::consts::{FRAC_PI_2, PI};
 use std::rc::Rc;
 
-use rhai::{Array, Dynamic, Engine};
+use rhai::{Array, Dynamic, Engine, Map};
+
+use qoob3d_core::font::Region;
 
 use super::api::{
     COMMON, CUT, FUSE, ROTATE, Rr, TRANSLATE, finite, geometry, made, num, occt, point, positive,
@@ -186,6 +188,14 @@ fn offset(p: &Profile, d: f64) -> Rr<Profile> {
     }
 }
 
+/// The profile without its holes (AG-SC-27): every region filled up to its
+/// outline.
+fn outline_of(p: &Profile) -> Rr<Profile> {
+    let local = p.local("outline")?;
+    let faces = made("outline", ffi::qoob3d_profile_outline(local.get()))?;
+    Ok(Profile { source: Source::Faces(faces), frame: p.frame })
+}
+
 /// The cut of `s` with an origin plane moved to the world coordinate `at`
 /// along the axis the plane name leaves out (AG-SC-21).
 fn section(s: &Shape, name: &str, at: f64) -> Rr<Profile> {
@@ -295,6 +305,40 @@ fn polygon(points: &Array) -> Rr<Profile> {
     Ok(Profile::new(outline(&corners), Vec::new(), Vec::new(), false))
 }
 
+/// The profile of polygons with holes (`text`, AG-SC-38): every outline
+/// counter-clockwise, every hole clockwise, none crossing itself. Holes
+/// become inner wires of their outline (the `punch` path of the profile
+/// cut, no boolean); regions that touch or overlap (`fuse`) are united in
+/// one planar operation, the others only collected.
+pub(super) fn regions(function: &'static str, regions: &[Region], fuse: bool) -> Rr<Profile> {
+    let simple = |points: &[[f64; 2]]| Profile::new(outline(points), Vec::new(), Vec::new(), true);
+    let mut parts = Vec::with_capacity(regions.len());
+    for region in regions {
+        let outer = simple(&region.outline);
+        if region.holes.is_empty() {
+            parts.push(outer);
+            continue;
+        }
+        // As faces of their own the holes run counter-clockwise too.
+        let holes: Vec<Profile> = region
+            .holes
+            .iter()
+            .map(|hole| simple(&hole.iter().rev().copied().collect::<Vec<_>>()))
+            .collect();
+        parts.push(combine(function, &outer, &holes, CUT)?);
+    }
+    match parts.split_first() {
+        None => Err(runtime(format!("{function}: no outline"))),
+        Some((first, [])) => Ok(first.clone()),
+        Some((first, rest)) if fuse => combine(function, first, rest, FUSE),
+        Some(_) => {
+            let faces = parts.iter().map(|p| p.local(function)).collect::<Rr<Vec<_>>>()?;
+            let all = occt(function, compound(&faces))?;
+            Ok(Profile { source: Source::Faces(all), frame: Frame::XY })
+        }
+    }
+}
+
 fn plane(name: &str) -> Rr<Frame> {
     match name {
         "xy" => Ok(Frame::XY),
@@ -323,7 +367,7 @@ pub(super) fn turned(function: &'static str, points: &[[f64; 2]]) -> Rr<Shape> {
     revolve(function, &Profile::new(outline(points), Vec::new(), Vec::new(), true), 360.0)
 }
 
-fn loft(sections: &Array) -> Rr<Shape> {
+fn loft(sections: &Array, smooth: bool) -> Rr<Shape> {
     let profiles = profiles_of(sections, "loft: every section")?;
     // The loft runs through outer wires only: holes would be lost silently.
     if profiles.iter().any(|p| matches!(p.source, Source::Faces(_))) {
@@ -334,7 +378,7 @@ fn loft(sections: &Array) -> Rr<Shape> {
     }
     let faces = profiles.iter().map(|p| p.face("loft", &p.frame)).collect::<Rr<Vec<_>>>()?;
     let all = occt("loft", compound(&faces))?;
-    made("loft", ffi::qoob3d_loft(all.get(), &[], &[]))
+    made("loft", ffi::qoob3d_loft(all.get(), &[], &[], !smooth))
 }
 
 fn pipe(points: &Array, d: f64, bend: f64) -> Rr<Shape> {
@@ -383,6 +427,15 @@ pub(super) fn register(engine: &mut Engine) {
     engine.register_fn("on", |name: &str, p: Profile| -> Rr<Profile> {
         Ok(Profile { frame: plane(name)?, ..p })
     });
+    // On a plane parallel to an origin plane, where `section` puts its cut
+    // (AG-SC-28): moved to `at` along the axis the plane name leaves out.
+    engine.register_fn("on", |name: &str, p: Profile, at: Dynamic| -> Rr<Profile> {
+        let mut frame = plane(name)?;
+        let at = finite(&at, "on: offset")?;
+        frame.origin = frame.n.map(|c| c.abs() * at);
+        Ok(Profile { frame, ..p })
+    });
+    engine.register_fn("outline", |p: Profile| outline_of(&p));
     engine.register_fn("at_z", |p: Profile, z: Dynamic| -> Rr<Profile> {
         let mut frame = p.frame;
         frame.origin[2] += finite(&z, "at_z: z")?;
@@ -424,7 +477,11 @@ pub(super) fn register(engine: &mut Engine) {
         }
         revolve("revolve", &p, deg)
     });
-    engine.register_fn("loft", |sections: Array| loft(&sections));
+    engine.register_fn("loft", |sections: Array| loft(&sections, false));
+    engine.register_fn("loft", |sections: Array, options: Map| -> Rr<Shape> {
+        let smooth = super::api::options(&options, "loft", &["smooth"])?;
+        loft(&sections, super::api::flag(&smooth, "smooth", "loft")?)
+    });
     engine.register_fn("pipe", |points: Array, d: Dynamic, bend: Dynamic| -> Rr<Shape> {
         pipe(&points, positive(&d, "pipe: d")?, num(&bend, "pipe: bend_radius")?)
     });

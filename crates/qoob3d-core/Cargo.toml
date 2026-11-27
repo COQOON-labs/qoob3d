@@ -7,11 +7,16 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Mesh import (ADR-0034): inflate for deflated 3MF entries, pull parser for the model XML.
+miniz_oxide = "0.9"
+quick-xml = "0.41"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror.workspace = true
 toml = "1"
+# Glyph outlines and kerning for `text` (AG-SC-38): pure Rust, no dependencies.
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 proptest = "1.12"

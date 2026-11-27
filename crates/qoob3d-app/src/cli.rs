@@ -57,6 +57,14 @@ pub enum Command {
         /// Parts to show, comma separated; all without it.
         #[arg(long, value_delimiter = ',')]
         parts: Vec<String>,
+        /// A throwaway script whose shown shapes are rendered instead of
+        /// parts (AG-MC-12).
+        #[arg(long, value_name = "RHAI", conflicts_with = "parts")]
+        source: Option<PathBuf>,
+        /// Frame this box instead of everything: x0,y0,z0,x1,y1,z1 in mm
+        /// (a zoom, AG-MC-12).
+        #[arg(long, value_parser = parse_region, allow_hyphen_values = true)]
+        region: Option<[f32; 6]>,
     },
     /// MCP server for the project in DIR (default: the working directory)
     /// over stdio (AG-MC-01).
@@ -85,6 +93,26 @@ pub enum ProjectCommand {
         /// stl, 3mf (one object per part) or step.
         #[arg(long)]
         format: String,
+        /// One file out/KIT.<format> with all parts, each in its print pose
+        /// and count, arranged on the bed (AG-SV-09).
+        #[arg(long)]
+        kit: Option<String>,
+        /// Bed width for the arrangement of a kit (mm, default 256).
+        #[arg(long)]
+        bed_mm: Option<f32>,
+        /// One Bambu Studio project out/PROJECT.3mf: all parts on plates,
+        /// each in the filament of its colour (AG-SV-10).
+        #[arg(long, conflicts_with_all = ["kit", "bed_mm"])]
+        project: Option<String>,
+        /// For --project: parts with `print_with` print inside their host
+        /// as multi-colour objects (AMS); without it every plate holds
+        /// parts of one colour.
+        #[arg(long, requires = "project")]
+        multicolor: bool,
+        /// For --project: printer whose bed and presets the project uses,
+        /// e.g. bambu-lab-p1s (default), bambu-lab-a1, bambu-lab-x1-carbon.
+        #[arg(long, requires = "project")]
+        printer: Option<String>,
     },
     /// Target values with source and status, and the assumptions.
     Values,
@@ -145,6 +173,20 @@ impl From<View> for ViewPreset {
             View::Bottom => ViewPreset::Bottom,
         }
     }
+}
+
+fn parse_region(s: &str) -> Result<[f32; 6], String> {
+    let values: Vec<f32> = s
+        .split(',')
+        .map(|v| v.trim().parse::<f32>().map_err(|e| format!("'{v}': {e}")))
+        .collect::<Result<_, _>>()?;
+    let [x0, y0, z0, x1, y1, z1] = values[..] else {
+        return Err("expected six numbers x0,y0,z0,x1,y1,z1".to_owned());
+    };
+    if !(x0 < x1 && y0 < y1 && z0 <= z1) || values.iter().any(|v| !v.is_finite()) {
+        return Err("the region needs finite numbers with x0 < x1, y0 < y1, z0 <= z1".to_owned());
+    }
+    Ok([x0, y0, z0, x1, y1, z1])
 }
 
 fn parse_size(s: &str) -> Result<[u32; 2], String> {

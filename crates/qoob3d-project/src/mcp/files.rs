@@ -3,7 +3,9 @@
 //! formats, at most 1 MiB. Any symbolic link on the way is refused, so a
 //! path means the same file for the check and for the access. Task files
 //! are read-only here: they change through the task tools and their role
-//! rules.
+//! rules. Reference files the human put into the project (STEP, STL, 3MF)
+//! are listed as `imports` with their size; scripts read them with
+//! `import_step` and `import_mesh`, the file tools never (AG-MC-11).
 
 use std::path::{Component, Path, PathBuf};
 
@@ -13,6 +15,13 @@ use qoob3d_core::fs::write_atomic;
 use qoob3d_core::project::layout;
 
 const EXTENSIONS: [&str; 3] = ["rhai", "toml", "md"];
+/// Importable extensions (lower case) and the script function that reads them.
+const IMPORTS: [(&str, &str); 4] = [
+    ("step", "import_step"),
+    ("stp", "import_step"),
+    ("stl", "import_mesh"),
+    ("3mf", "import_mesh"),
+];
 const MAX_BYTES: u64 = 1 << 20;
 
 /// The plain components of a project-relative path.
@@ -46,6 +55,12 @@ fn allowed_extension(name: &str) -> bool {
     Path::new(name).extension().is_some_and(|e| EXTENSIONS.iter().any(|x| e == *x))
 }
 
+/// The script function that imports `name`, if it is a reference file.
+fn import_function(name: &str) -> Option<&'static str> {
+    let extension = Path::new(name).extension()?.to_str()?.to_ascii_lowercase();
+    IMPORTS.iter().find(|(x, _)| *x == extension).map(|(_, function)| *function)
+}
+
 /// The file `relative` if the file tools may touch it.
 fn file(root: &Path, relative: &str) -> Result<PathBuf, String> {
     let parts = components(relative)?;
@@ -60,7 +75,14 @@ fn file(root: &Path, relative: &str) -> Result<PathBuf, String> {
             layout::CONFIG_FILE
         ));
     }
-    if !parts.last().is_some_and(|name| allowed_extension(name)) {
+    let name = parts.last().copied().unwrap_or_default();
+    if let Some(function) = import_function(name) {
+        return Err(format!(
+            "{relative:?} is a reference file, not text: scripts read it with \
+             {function}(\"{relative}\")"
+        ));
+    }
+    if !allowed_extension(name) {
         return Err(format!("{relative:?}: only .rhai, .toml and .md files"));
     }
     without_links(root, &parts)
@@ -106,39 +128,54 @@ pub(super) fn write(root: &Path, relative: &str, content: &str) -> Result<Value,
     Ok(json!({"path": relative, "bytes": content.len()}))
 }
 
-/// The allowed files below `folder` (project-relative `prefix`), without
-/// following links.
-fn walk(folder: &Path, prefix: &str, files: &mut Vec<String>) {
+/// What `file_list` finds: text files and reference files with their size.
+#[derive(Default)]
+struct Found {
+    files: Vec<String>,
+    imports: Vec<(String, u64)>,
+}
+
+/// The allowed and the importable files below `folder` (project-relative
+/// `prefix`), without following links.
+fn walk(folder: &Path, prefix: &str, found: &mut Found) {
     for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue };
         let relative = format!("{prefix}/{name}");
         match entry.file_type() {
-            Ok(kind) if kind.is_dir() => walk(&entry.path(), &relative, files),
-            Ok(kind) if kind.is_file() && allowed_extension(&name) => files.push(relative),
+            Ok(kind) if kind.is_dir() => walk(&entry.path(), &relative, found),
+            Ok(kind) if kind.is_file() && allowed_extension(&name) => found.files.push(relative),
+            Ok(kind) if kind.is_file() && import_function(&name).is_some() => {
+                let size = entry.metadata().map_or(0, |m| m.len());
+                found.imports.push((relative, size));
+            }
             _ => {}
         }
     }
 }
 
-/// `file_list {dir?}` → `{files}`: sorted project-relative paths.
+/// `file_list {dir?}` → `{files, imports}`: sorted project-relative paths,
+/// the reference files as `{path, size}`.
 pub(super) fn list(root: &Path, dir: Option<&str>) -> Result<Value, String> {
-    let mut files = Vec::new();
+    let mut found = Found::default();
     if let Some(dir) = dir {
         let parts = components(dir)?;
         if !parts.first().is_some_and(|folder| layout::FOLDERS.contains(folder)) {
             return Err(format!("{dir:?}: only parts/, lib/, values/, checks/ and tasks/"));
         }
-        walk(&without_links(root, &parts)?, &parts.join("/"), &mut files);
+        walk(&without_links(root, &parts)?, &parts.join("/"), &mut found);
     } else {
         if std::fs::symlink_metadata(root.join(layout::CONFIG_FILE)).is_ok_and(|m| m.is_file()) {
-            files.push(layout::CONFIG_FILE.to_owned());
+            found.files.push(layout::CONFIG_FILE.to_owned());
         }
         for folder in layout::FOLDERS {
             if let Ok(path) = without_links(root, &[folder]) {
-                walk(&path, folder, &mut files);
+                walk(&path, folder, &mut found);
             }
         }
     }
-    files.sort();
-    Ok(json!({"files": files}))
+    found.files.sort();
+    found.imports.sort();
+    let imports: Vec<Value> =
+        found.imports.into_iter().map(|(path, size)| json!({"path": path, "size": size})).collect();
+    Ok(json!({"files": found.files, "imports": imports}))
 }

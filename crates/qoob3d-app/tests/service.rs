@@ -1846,3 +1846,572 @@ fn cli_status_waits_for_discovery_and_lists_a_freshly_written_part() {
     assert!(errors.iter().any(|e| e["file"] == json!("parts/broken.rhai")), "{st}");
     drop(s);
 }
+
+// ===========================================================================
+// AG-SC-24: files read by import_step / import_mesh are inputs of the part
+// ===========================================================================
+
+/// Binary STL of an axis-aligned box from `min` (80-byte header, u32 count,
+/// per triangle zero normal, three f32 corners, u16), written here
+/// independently of any reader. Corner index x + 2y + 4z; quads
+/// counter-clockwise from outside (z=min [0,2,3,1]: (0,1,0)×(1,1,0) =
+/// (0,0,−1), …).
+fn box_stl(min: [f64; 3], size: [f64; 3]) -> Vec<u8> {
+    let corner = |i: usize| -> [f32; 3] {
+        let bit = |k: usize| if (i >> k) & 1 == 1 { 1.0 } else { 0.0 };
+        // STL stores f32; the dimensions here are exact in f32.
+        [0, 1, 2].map(|k| (min[k] + bit(k) * size[k]) as f32)
+    };
+    let quads =
+        [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]];
+    let mut out = vec![0u8; 80];
+    out.extend_from_slice(&12u32.to_le_bytes());
+    for q in quads {
+        for t in [[q[0], q[1], q[2]], [q[0], q[2], q[3]]] {
+            out.extend_from_slice(&[0u8; 12]);
+            for f in t.into_iter().flat_map(corner) {
+                out.extend_from_slice(&f.to_le_bytes());
+            }
+            out.extend_from_slice(&[0u8; 2]);
+        }
+    }
+    out
+}
+
+/// A STEP file of `box(x, y, z)` written by the kernel (AG-SC-14).
+fn box_step(x: u32, y: u32, z: u32) -> Vec<u8> {
+    let dir = std::env::temp_dir().join(format!("qoob3d-sc24-step-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create STEP dir");
+    let path = dir.join(format!("box-{x}-{y}-{z}.step"));
+    let source = format!("show(box({x}, {y}, {z}), \"b\");");
+    let out = qoob3d_kernel::script::run(&source, &qoob3d_kernel::script::RunOptions::default())
+        .unwrap_or_else(|e| panic!("{source}: {e}"));
+    qoob3d_kernel::script::export_step(&out.shapes, &path).expect("write STEP");
+    let bytes = std::fs::read(&path).expect("read STEP");
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_dir(&dir).ok();
+    bytes
+}
+
+fn put_bytes(p: &Project, rel: &str, bytes: &[u8]) {
+    let path = p.path(rel);
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("create folder");
+    std::fs::write(path, bytes).expect("write imported file");
+}
+
+/// Replaces `rel` by a new file (write beside it, then rename over it).
+fn replace_bytes(p: &Project, rel: &str, bytes: &[u8]) {
+    let tmp = p.path(&format!("{rel}.incoming"));
+    std::fs::write(&tmp, bytes).expect("write replacement");
+    std::fs::rename(&tmp, p.path(rel)).expect("rename over");
+}
+
+fn files_read(result: &Value, part: &str) -> Value {
+    result["parts"][part]["files_read"].clone()
+}
+
+/// The part failed and its error names `file`.
+fn failed_naming(result: &Value, part: &str, file: &str) {
+    let p = &result["parts"][part];
+    assert_eq!(p["state"], json!("failed"), "{part}: {p}");
+    assert!(p["error"].to_string().contains(file), "{part}: the error names {file}: {p}");
+}
+
+/// The import part, its dependent `Q` (moved by 100 in x) and `Normal`.
+fn import_project(name: &str, part: &str, call: &str) -> Project {
+    let p = Project::new(name, "[workers]\ncount = 1\n");
+    p.write("parts/p.rhai", &format!("part(\"{part}\", #{{}}, |deps| {call});\n"))
+        .write(
+            "parts/q.rhai",
+            &format!("part(\"Q\", #{{ depends: [\"{part}\"] }}, |deps| deps[\"{part}\"].move(100, 0, 0));\n"),
+        )
+        .write("parts/normal.rhai", NORMAL);
+    p
+}
+
+#[test]
+fn ag_sc_24_a_changed_replaced_or_removed_stl_rebuilds_its_part_and_the_dependents() {
+    // P = import_mesh of box 40 × 30 × 10 at x ±20, y ±15, z 0..10:
+    // 12 000 mm³; Q = P moved +100 in x. Then 40 × 30 × 20 (24 000 mm³),
+    // then 40 × 30 × 5 (6000 mm³), then the file is gone.
+    let p = import_project("sc-24-stl", "P", "import_mesh(\"lib/block.stl\")");
+    put_bytes(&p, "lib/block.stl", &box_stl([-20.0, -15.0, 0.0], [40.0, 30.0, 10.0]));
+    let s = Service::start(&p);
+    let r = s.build(None);
+    assert_built(&r, "P", "built", 12000.0, ([-20.0, -15.0, 0.0], [20.0, 15.0, 10.0]));
+    assert_built(&r, "Q", "built", 12000.0, ([80.0, -15.0, 0.0], [120.0, 15.0, 10.0]));
+    assert_eq!(files_read(&r, "P"), json!(["lib/block.stl"]), "project-relative: {r}");
+    let q = files_read(&r, "Q");
+    assert!(q.is_null() || q == json!([]), "Q reads no file itself: {r}");
+    assert_eq!(built_cached(&s.build(None)), (set(&[]), set(&["Normal", "P", "Q"])));
+    let key = key_of(&s.status(), "P");
+
+    // The same bytes again (new mtime only): the key hashes bytes, nothing rebuilds.
+    put_bytes(&p, "lib/block.stl", &box_stl([-20.0, -15.0, 0.0], [40.0, 30.0, 10.0]));
+    assert!(states(&s.status()).values().all(|v| v == "current"), "same bytes");
+    assert_eq!(built_cached(&s.build(None)), (set(&[]), set(&["Normal", "P", "Q"])));
+
+    // Changed in place: P and its dependent Q are stale, Normal is not.
+    put_bytes(&p, "lib/block.stl", &box_stl([-20.0, -15.0, 0.0], [40.0, 30.0, 20.0]));
+    let st = states(&s.status());
+    assert_eq!((st["P"].as_str(), st["Q"].as_str()), ("outdated", "outdated"), "{st:?}");
+    assert_eq!(st["Normal"], "current", "{st:?}");
+    let r = s.build(None);
+    assert_eq!(built_cached(&r), (set(&["P", "Q"]), set(&["Normal"])));
+    assert_built(&r, "P", "built", 24000.0, ([-20.0, -15.0, 0.0], [20.0, 15.0, 20.0]));
+    assert_ne!(key_of(&s.status(), "P"), key, "the bytes of the file enter the key");
+
+    // Replaced by another file under the same name.
+    replace_bytes(&p, "lib/block.stl", &box_stl([-20.0, -15.0, 0.0], [40.0, 30.0, 5.0]));
+    assert_eq!(states(&s.status())["P"], "outdated", "replaced file");
+    let r = s.build(None);
+    assert_eq!(built_cached(&r), (set(&["P", "Q"]), set(&["Normal"])));
+    assert_built(&r, "P", "built", 6000.0, ([-20.0, -15.0, 0.0], [20.0, 15.0, 5.0]));
+
+    // Removed: stale, and the rebuild fails naming the file.
+    std::fs::remove_file(p.path("lib/block.stl")).expect("remove");
+    assert_eq!(states(&s.status())["P"], "outdated", "removed file");
+    let r = s.build(None);
+    failed_naming(&r, "P", "lib/block.stl");
+    assert_eq!(r["parts"]["Normal"]["state"], json!("cached"), "{r}");
+}
+
+#[test]
+fn ag_sc_24_a_changed_3mf_rebuilds_its_part() {
+    // First the Bambu Studio fixture (qoob3d-core/tests/fixtures/README.md:
+    // 12 000 + 2760 mm³; x 80..120, y 74.00003..125.99998, z 0..15 from the
+    // transforms in the file), then a stored 3MF of one box 10³ at the
+    // origin (1000 mm³).
+    let p = import_project("sc-24-3mf", "C", "import_mesh(\"lib/clip.3mf\")");
+    let fixture: &[u8] = include_bytes!("../../qoob3d-core/tests/fixtures/bambu_two_objects.3mf");
+    put_bytes(&p, "lib/clip.3mf", fixture);
+    let s = Service::start(&p);
+    let r = s.build(None);
+    assert_built(&r, "C", "built", 14760.0, ([80.0, 74.00003, 0.0], [120.0, 125.99998, 15.0]));
+    assert_eq!(files_read(&r, "C"), json!(["lib/clip.3mf"]), "{r}");
+
+    let model = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<model unit=\"millimeter\" \
+        xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\"><resources>\
+        <object id=\"1\" type=\"model\"><mesh><vertices>\
+        <vertex x=\"0\" y=\"0\" z=\"0\"/><vertex x=\"10\" y=\"0\" z=\"0\"/>\
+        <vertex x=\"0\" y=\"10\" z=\"0\"/><vertex x=\"10\" y=\"10\" z=\"0\"/>\
+        <vertex x=\"0\" y=\"0\" z=\"10\"/><vertex x=\"10\" y=\"0\" z=\"10\"/>\
+        <vertex x=\"0\" y=\"10\" z=\"10\"/><vertex x=\"10\" y=\"10\" z=\"10\"/>\
+        </vertices><triangles>\
+        <triangle v1=\"0\" v2=\"2\" v3=\"3\"/><triangle v1=\"0\" v2=\"3\" v3=\"1\"/>\
+        <triangle v1=\"4\" v2=\"5\" v3=\"7\"/><triangle v1=\"4\" v2=\"7\" v3=\"6\"/>\
+        <triangle v1=\"0\" v2=\"1\" v3=\"5\"/><triangle v1=\"0\" v2=\"5\" v3=\"4\"/>\
+        <triangle v1=\"2\" v2=\"6\" v3=\"7\"/><triangle v1=\"2\" v2=\"7\" v3=\"3\"/>\
+        <triangle v1=\"0\" v2=\"4\" v3=\"6\"/><triangle v1=\"0\" v2=\"6\" v3=\"2\"/>\
+        <triangle v1=\"1\" v2=\"3\" v3=\"7\"/><triangle v1=\"1\" v2=\"7\" v3=\"5\"/>\
+        </triangles></mesh></object></resources><build><item objectid=\"1\"/></build></model>\n";
+    let rels = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Relationships \
+        xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+        <Relationship Target=\"/3D/3dmodel.model\" Id=\"rel0\" \
+        Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\"/></Relationships>\n";
+    let types = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Types \
+        xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
+        <Default Extension=\"rels\" \
+        ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
+        <Default Extension=\"model\" \
+        ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodel+xml\"/></Types>\n";
+    let cube = qoob3d_core::export::zip_store(&[
+        ("[Content_Types].xml", types.as_bytes()),
+        ("_rels/.rels", rels.as_bytes()),
+        ("3D/3dmodel.model", model.as_bytes()),
+    ]);
+    put_bytes(&p, "lib/clip.3mf", &cube);
+    let st = states(&s.status());
+    assert_eq!((st["C"].as_str(), st["Q"].as_str()), ("outdated", "outdated"), "{st:?}");
+    let r = s.build(None);
+    assert_eq!(built_cached(&r), (set(&["C", "Q"]), set(&["Normal"])));
+    assert_built(&r, "C", "built", 1000.0, ([0.0; 3], [10.0; 3]));
+}
+
+#[test]
+fn ag_sc_24_a_changed_or_removed_step_file_rebuilds_its_part() {
+    // Regression: a changed STEP file did not make the part stale.
+    // S = import_step of box(10, 20, 30): 6000 mm³, x ±5, y ±10, z 0..30;
+    // then box(10, 20, 40): 8000 mm³, z 0..40; then the file is gone.
+    let p = import_project("sc-24-step", "S", "import_step(\"lib/block.step\")");
+    put_bytes(&p, "lib/block.step", &box_step(10, 20, 30));
+    let s = Service::start(&p);
+    let r = s.build(None);
+    assert_built(&r, "S", "built", 6000.0, ([-5.0, -10.0, 0.0], [5.0, 10.0, 30.0]));
+    assert_eq!(built_cached(&s.build(None)), (set(&[]), set(&["Normal", "Q", "S"])));
+
+    put_bytes(&p, "lib/block.step", &box_step(10, 20, 40));
+    let st = states(&s.status());
+    assert_eq!((st["S"].as_str(), st["Q"].as_str()), ("outdated", "outdated"), "{st:?}");
+    let r = s.build(None);
+    assert_eq!(built_cached(&r), (set(&["Q", "S"]), set(&["Normal"])));
+    assert_built(&r, "S", "built", 8000.0, ([-5.0, -10.0, 0.0], [5.0, 10.0, 40.0]));
+    assert_eq!(files_read(&r, "S"), json!(["lib/block.step"]), "{r}");
+
+    std::fs::remove_file(p.path("lib/block.step")).expect("remove");
+    assert_eq!(states(&s.status())["S"], "outdated", "removed STEP file");
+    failed_naming(&s.build(None), "S", "lib/block.step");
+}
+
+// ===========================================================================
+// AG-PJ-06, AG-SV-09: print pose and kits (findings 2.3 and 3.7 of the
+// Damen 5009 project: every printed part was a second part that only
+// turned the first one, and 18 parts came as 18 files)
+// ===========================================================================
+
+#[test]
+fn ag_sv_09_export_writes_the_print_pose_and_whole_kits() {
+    let p = Project::new("print-pose", "");
+    // A wedge standing on its point when modelled: a 10 × 20 × 30 box with
+    // its print pose upside down; B prints twice as it is modelled.
+    p.write(
+        "parts/kit.rhai",
+        "part(\"A\", #{ pose: #{ rotate: [\"x\", 180] } }, |deps| box(10, 20, 30).move(0, 0, 5));\n\
+         part(\"B\", #{ pose: #{ count: 2 } }, |deps| box(30, 30, 4).move(50, 0, 0));\n",
+    );
+    let s = Service::start(&p);
+    let r = s.post("/export", &json!({"parts": ["A", "B"], "format": "stl"}));
+    let v = r.ok();
+    assert_eq!(v["files"], json!(["out/A.stl", "out/B.stl"]), "{v}");
+    let details = v["details"].as_array().expect("details");
+    assert_eq!(details[0]["watertight"], json!(true), "{v}");
+    assert_eq!(details[0]["triangles"], json!(12), "{v}");
+    assert_eq!(details[1]["count"], json!(2), "{v}");
+    // Upside down and on the bed, centred: z ∈ [0, 30], x ∈ [−5, 5], y ∈ [−10, 10].
+    let (vol, lo, hi) = stl_volume_bbox(&std::fs::read(p.path("out/A.stl")).expect("A.stl"));
+    assert_rel_f64(vol, 6000.0, 1e-5, "A keeps its volume when it turns");
+    assert_box((lo, hi), ([-5.0, -10.0, 0.0], [5.0, 10.0, 30.0]), FLAT, "A in its print pose");
+
+    // A kit: one file, B twice, arranged in a row on a 200 mm bed.
+    let r = s.post(
+        "/export",
+        &json!({"parts": ["A", "B"], "format": "3mf", "kit": "all", "bed_mm": 200}),
+    );
+    let v = r.ok();
+    assert_eq!(v["files"], json!(["out/all.3mf"]), "{v}");
+    let kit = &v["details"][0];
+    assert_eq!(kit["objects"].as_array().map(Vec::len), Some(3), "A and B twice: {v}");
+    // Footprints 10 + 5 + 30 + 5 + 30 = 80 wide, 30 deep.
+    assert_eq!(kit["footprint"], json!([80.0, 30.0]), "{v}");
+    assert_eq!(kit["fits_one_bed"], json!(true), "{v}");
+    let model = Command::new("unzip")
+        .arg("-p")
+        .arg(p.path("out/all.3mf"))
+        .arg("3D/3dmodel.model")
+        .output()
+        .expect("unzip -p");
+    let model = String::from_utf8_lossy(&model.stdout);
+    assert_eq!(model.matches("<object ").count(), 3, "one object per copy:\n{model}");
+
+    let bad = s.post("/export", &json!({"parts": ["A"], "format": "step", "kit": "all"}));
+    assert_eq!(bad.envelope()["ok"], json!(false), "a STEP kit is refused");
+    let bad = s.post("/export", &json!({"parts": ["A"], "format": "stl", "kit": "../x"}));
+    assert_eq!(bad.envelope()["ok"], json!(false), "a kit name is a plain file name");
+}
+
+// ===========================================================================
+// AG-PJ-07, AG-SV-10: colours and the kit as a slicer project (a kit of 20
+// objects came as one grey file that fits no bed: the plates and the
+// filaments had to be set up by hand in the slicer)
+// ===========================================================================
+
+/// `unzip -p FILE ENTRY` as text: the independent ZIP reader (ADR-0013).
+fn unzipped(file: &std::path::Path, entry: &str) -> String {
+    let out = Command::new("unzip").arg("-p").arg(file).arg(entry).output().expect("unzip -p");
+    assert!(out.status.success(), "unzip -p {} {entry}", file.display());
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+const HOUSE: &str = "\
+part(\"Walls\", #{ color: \"#F4F4F4\" }, |deps| cut(box(40, 20, 20), [box(2, 12, 8).move(-1, 4, 6)]));\n\
+part(\"Windows\", #{ color: \"#202020\", print_with: \"Walls\" }, |deps| box(2, 12, 8).move(-1, 4, 6));\n\
+part(\"Roof\", #{ color: \"#C0392B\", pose: #{ rotate: [\"x\", 180] } }, |deps| box(44, 24, 3).move(-2, -2, 20));\n\
+part(\"Chimney\", #{ color: \"#c0392b\", pose: #{ count: 2 } }, |deps| box(4, 4, 10).move(30, 8, 23));\n";
+
+#[test]
+fn ag_sv_10_a_project_has_one_colour_per_plate_or_multi_colour_objects() {
+    let p = Project::new("slicer-project", "");
+    p.write("parts/house.rhai", HOUSE);
+    let s = Service::start(&p);
+    let all = json!(["Walls", "Windows", "Roof", "Chimney"]);
+    // One colour per plate: every part its own object, three colours, three plates.
+    let r = s.post("/export", &json!({"parts": all, "format": "3mf", "project": "house"}));
+    let v = r.ok();
+    assert_eq!(v["files"], json!(["out/house.3mf"]), "{v}");
+    let d = &v["details"][0];
+    let colors: Vec<&str> = d["filaments"]
+        .as_array()
+        .expect("filaments")
+        .iter()
+        .filter_map(|f| f["color"].as_str())
+        .collect();
+    assert_eq!(colors, ["#F4F4F4", "#202020", "#C0392B"], "one filament per colour: {v}");
+    assert_eq!(d["filaments"][2]["parts"], json!(["Roof", "Chimney"]), "{v}");
+    let plates = d["plates"].as_array().expect("plates");
+    assert_eq!(plates.len(), 3, "{v}");
+    for (i, plate) in plates.iter().enumerate() {
+        assert_eq!(plate["filaments"], json!([i + 1]), "plate {} prints in one colour: {v}", i + 1);
+    }
+    assert_eq!(plates[2]["objects"], json!(["Roof", "Chimney 1", "Chimney 2"]), "{v}");
+    assert!(
+        d["objects"].as_array().expect("objects").iter().all(|o| o["watertight"] == json!(true))
+    );
+    assert_eq!(d["warnings"], json!([]), "{v}");
+
+    // The status reports what the parts declare (the export waited for discovery).
+    let st = s.status();
+    let part = |name: &str| {
+        st["parts"].as_array().expect("parts").iter().find(|q| q["name"] == name).cloned()
+    };
+    assert_eq!(part("Walls").expect("Walls")["color"], json!("#F4F4F4"), "{st}");
+    assert_eq!(part("Windows").expect("Windows")["print_with"], json!("Walls"), "{st}");
+
+    // Multi-colour: the windows print inside the walls on a plate with two
+    // filaments; the red parts keep a plate of their own.
+    let r = s.post(
+        "/export",
+        &json!({"parts": all, "format": "3mf", "project": "house-ams", "multicolor": true}),
+    );
+    let v = r.ok();
+    let d = &v["details"][0];
+    assert_eq!(d["plates"].as_array().map(Vec::len), Some(2), "{v}");
+    assert_eq!(d["plates"][0]["filaments"], json!([1, 2]), "{v}");
+    assert_eq!(d["plates"][0]["objects"], json!(["Walls"]), "{v}");
+    assert_eq!(d["plates"][1]["filaments"], json!([3]), "{v}");
+    let walls = &d["objects"][0];
+    assert_eq!(walls["object"], json!("Walls"), "{v}");
+    let inside: Vec<(&str, u64)> = walls["parts"]
+        .as_array()
+        .expect("parts")
+        .iter()
+        .filter_map(|q| Some((q["part"].as_str()?, q["filament"].as_u64()?)))
+        .collect();
+    assert_eq!(inside, [("Walls", 1), ("Windows", 2)], "{v}");
+    assert_eq!(d["objects"].as_array().map(Vec::len), Some(4), "walls, roof, two chimneys: {v}");
+
+    // The file: readable by an independent ZIP reader, in Bambu Studio's layout.
+    let file = p.path("out/house-ams.3mf");
+    let test = Command::new("unzip").arg("-t").arg(&file).output().expect("unzip -t");
+    assert!(test.status.success(), "{}", String::from_utf8_lossy(&test.stdout));
+    let settings = unzipped(&file, "Metadata/model_settings.config");
+    assert_eq!(settings.matches("<plate>").count(), 2, "{settings}");
+    assert_eq!(settings.matches("<object ").count(), 4, "{settings}");
+    assert_eq!(settings.matches("<part ").count(), 5, "{settings}");
+    let first = unzipped(&file, "3D/Objects/object_1.model");
+    assert_eq!(first.matches("<object ").count(), 2, "walls and windows in one file");
+    // Posed together: the windows keep their place in the wall (z from 6 up).
+    assert!(first.contains("z=\"6\"") && first.contains("z=\"14\""), "{first}");
+}
+
+#[test]
+fn ag_sv_10_what_cannot_be_a_project_is_refused_with_the_reason() {
+    let p = Project::new("slicer-project-refused", "");
+    p.write("parts/house.rhai", HOUSE);
+    let s = Service::start(&p);
+    let all = json!(["Walls", "Windows", "Roof", "Chimney"]);
+    for (body, why) in [
+        (
+            json!({"parts": ["Windows"], "format": "3mf", "project": "x", "multicolor": true}),
+            "Windows prints with Walls, which is not among the exported parts",
+        ),
+        (json!({"parts": all, "format": "stl", "project": "x"}), "format 3mf"),
+        (json!({"parts": all, "format": "3mf", "project": "../x"}), "plain file name"),
+        (
+            json!({"parts": all, "format": "3mf", "project": "x", "printer": "nope"}),
+            "no slicer project for printer \"nope\"",
+        ),
+        (json!({"parts": all, "format": "3mf", "project": "x", "bed_mm": 200}), "bed_mm"),
+    ] {
+        let bad = s.post("/export", &body);
+        let e = bad.envelope();
+        assert_eq!(e["ok"], json!(false), "{body}");
+        let message = e["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains(why), "{body}: {message}");
+    }
+}
+
+#[test]
+fn ag_sv_10_plates_follow_the_bed_of_the_printer() {
+    let p = Project::new("slicer-project-bed", "");
+    // Four plates of 150 mm: two fit a 256 mm bed side by side, none of them
+    // shares the 180 mm bed of the A1 mini.
+    p.write(
+        "parts/plates.rhai",
+        "part(\"Plate\", #{ color: \"#808080\", pose: #{ count: 4 } }, |deps| box(150, 100, 2));\n\
+         part(\"Beam\", #{ color: \"#808080\" }, |deps| box(300, 10, 10));\n",
+    );
+    let s = Service::start(&p);
+    let export = |printer: &str, parts: Value| {
+        let body = json!({"parts": parts, "format": "3mf", "project": "p", "printer": printer});
+        s.post("/export", &body).ok()["details"][0].clone()
+    };
+    let big = export("bambu-lab-p1s", json!(["Plate"]));
+    assert_eq!(big["bed"], json!([256.0, 256.0]), "{big}");
+    assert_eq!(big["plates"].as_array().map(Vec::len), Some(2), "two per plate: {big}");
+    let mini = export("bambu-lab-a1-mini", json!(["Plate"]));
+    assert_eq!(mini["bed"], json!([180.0, 180.0]), "{mini}");
+    assert_eq!(mini["plates"].as_array().map(Vec::len), Some(4), "one per plate: {mini}");
+    // A part larger than the bed is written, alone on its plate, and reported.
+    let long = export("bambu-lab-p1s", json!(["Beam"]));
+    assert_eq!(long["objects"][0]["fits"], json!(false), "{long}");
+    let warning = long["warnings"][0].as_str().unwrap_or_default();
+    assert!(warning.contains("Beam (300 x 10 mm) is larger than the bed"), "{long}");
+}
+
+/// Where Bambu Studio is installed (`QOOB3D_BAMBU_STUDIO` or the macOS app):
+/// the program and its `profiles/BBL` folder.
+fn bambu_studio() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let program = std::env::var_os("QOOB3D_BAMBU_STUDIO").map_or_else(
+        || std::path::PathBuf::from("/Applications/BambuStudio.app/Contents/MacOS/BambuStudio"),
+        std::path::PathBuf::from,
+    );
+    let profiles = std::env::var_os("QOOB3D_BAMBU_PROFILES").map_or_else(
+        || program.parent().map(|p| p.join("../Resources/profiles/BBL")).unwrap_or_default(),
+        std::path::PathBuf::from,
+    );
+    (program.exists() && profiles.is_dir()).then_some((program, profiles))
+}
+
+/// A system preset of Bambu Studio with its `inherits` and `include` chain
+/// folded in: the command line loads only complete presets.
+fn flat_preset(
+    profiles: &std::path::Path,
+    kind: &str,
+    name: &str,
+) -> serde_json::Map<String, Value> {
+    let path = profiles.join(kind).join(format!("{name}.json"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let own: serde_json::Map<String, Value> = serde_json::from_str(&text).expect("preset JSON");
+    let mut flat = serde_json::Map::new();
+    if let Some(parent) = own.get("inherits").and_then(Value::as_str).filter(|p| !p.is_empty()) {
+        flat = flat_preset(profiles, kind, parent);
+    }
+    for include in own.get("include").and_then(Value::as_array).into_iter().flatten() {
+        let included = flat_preset(profiles, kind, include.as_str().unwrap_or_default());
+        let own_keys =
+            ["name", "type", "from", "instantiation", "setting_id", "inherits", "include"];
+        flat.extend(included.into_iter().filter(|(k, _)| !own_keys.contains(&k.as_str())));
+    }
+    flat.extend(own);
+    flat.remove("include");
+    flat.insert("inherits".into(), json!(""));
+    flat.insert("from".into(), json!("system"));
+    flat
+}
+
+/// The independent verifier (ADR-0013): Bambu Studio itself loads the
+/// project with its own presets, keeps the plates and slices every plate
+/// in the filaments the project names. Skipped where it is not installed.
+#[test]
+fn ag_sv_10_bambu_studio_keeps_the_plates_and_slices_the_filaments() {
+    use qoob3d_core::export::bambu::PRESETS;
+    let Some((program, profiles)) = bambu_studio() else {
+        eprintln!("Bambu Studio not found: the project is not loaded in a slicer");
+        return;
+    };
+    // The names the project relies on are presets of this installation, and
+    // the process and the filament are meant for the printer.
+    for presets in PRESETS {
+        let printer = presets.printer_name();
+        assert!(
+            profiles.join("machine").join(format!("{printer}.json")).exists(),
+            "{}: Bambu Studio has no printer preset {printer:?}",
+            presets.id
+        );
+        for (kind, name) in
+            [("process", presets.process_name()), ("filament", presets.filament_name())]
+        {
+            let file = profiles.join(kind).join(format!("{name}.json"));
+            assert!(file.exists(), "{}: Bambu Studio has no {kind} preset {name:?}", presets.id);
+            let compatible = flat_preset(&profiles, kind, &name)["compatible_printers"].clone();
+            let listed = compatible.as_array().is_some_and(|c| c.contains(&json!(printer)));
+            assert!(listed, "{}: {kind} preset {name:?} is not for {printer:?}", presets.id);
+        }
+    }
+
+    let p = Project::new("slicer-project-bambu", "");
+    p.write("parts/house.rhai", HOUSE);
+    let s = Service::start(&p);
+    let all = json!(["Walls", "Windows", "Roof", "Chimney"]);
+    let p1s = PRESETS.iter().find(|q| q.id == "bambu-lab-p1s").expect("the P1S");
+    let mut settings = Vec::new();
+    for (kind, name) in [
+        ("machine", p1s.printer_name()),
+        ("process", p1s.process_name()),
+        ("filament", p1s.filament_name()),
+    ] {
+        let file = p.path(&format!("out/{kind}.json"));
+        std::fs::create_dir_all(file.parent().expect("out")).expect("out/");
+        let preset = Value::Object(flat_preset(&profiles, kind, &name));
+        std::fs::write(&file, preset.to_string()).expect("write the preset");
+        settings.push(file.display().to_string());
+    }
+    let filaments = vec![settings[2].clone(); 3].join(";");
+
+    for (name, multicolor, plates) in [
+        ("apart", false, vec![vec![1], vec![2], vec![3]]),
+        ("together", true, vec![vec![1, 2], vec![3]]),
+    ] {
+        let body =
+            json!({"parts": all, "format": "3mf", "project": name, "multicolor": multicolor});
+        s.post("/export", &body).ok();
+        let sliced = p.path(&format!("out/{name}-sliced.3mf"));
+        let run = Command::new(&program)
+            .args(["--debug", "1", "--load-settings"])
+            .arg(format!("{};{}", settings[0], settings[1]))
+            .arg("--load-filaments")
+            .arg(&filaments)
+            .args(["--slice", "0", "--export-3mf"])
+            .arg(&sliced)
+            .arg(p.path(&format!("out/{name}.3mf")))
+            .output()
+            .expect("run Bambu Studio");
+        assert!(
+            run.status.success(),
+            "{name}: Bambu Studio refused the project:\n{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        // One <plate> block per plate, each with the filaments it used.
+        let info = unzipped(&sliced, "Metadata/slice_info.config");
+        let used: Vec<Vec<u64>> = info
+            .split("<plate>")
+            .skip(1)
+            .map(|plate| {
+                plate
+                    .split("<filament id=\"")
+                    .skip(1)
+                    .filter_map(|f| f.split('"').next()?.parse().ok())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            used, plates,
+            "{name}: filaments per plate as Bambu Studio sliced them:\n{info}"
+        );
+        for color in ["#F4F4F4", "#202020", "#C0392B"] {
+            assert!(info.contains(&format!("color=\"{color}\"")), "{name}: {color} in\n{info}");
+        }
+        // Every object is on the plate the project put it on.
+        let kept = unzipped(&sliced, "Metadata/model_settings.config");
+        let per_plate: Vec<usize> = kept
+            .split("<plate>")
+            .skip(1)
+            .map(|plate| plate.matches("<model_instance>").count())
+            .collect();
+        let expected = if multicolor { vec![1, 3] } else { vec![1, 1, 3] };
+        assert_eq!(per_plate, expected, "{name}: objects per plate:\n{kept}");
+    }
+}
+
+#[test]
+fn ag_pj_06_a_wrong_pose_option_is_a_load_error_naming_the_part() {
+    let p = Project::new("print-pose-error", "");
+    p.write("parts/bad.rhai", "part(\"A\", #{ pose: #{ turn: 1 } }, |deps| box(1, 1, 1));\n");
+    let s = Service::start(&p);
+    // `/status` never waits for discovery (ADR-0055): let the file be read first.
+    let _ = s.request("POST", "/discover", Some(&json!({"files": null, "wait_s": 20})));
+    let st = s.status();
+    let text = st.to_string();
+    assert!(text.contains("pose has the unknown key \\\"turn\\\""), "{text}");
+}

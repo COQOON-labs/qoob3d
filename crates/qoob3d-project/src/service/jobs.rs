@@ -43,8 +43,9 @@ pub(crate) enum Work {
     Build(Option<Vec<String>>),
     /// Builds all parts, then runs the checks; `None` = all (AG-CK-03).
     Check(Option<Vec<String>>),
-    /// Runs a throwaway script (AG-SV-05).
-    Run(String),
+    /// Runs a throwaway script (AG-SV-05); with `meshes` its shapes are
+    /// meshed for a picture (AG-MC-12).
+    Run { source: String, meshes: bool },
 }
 
 pub(crate) struct Job {
@@ -67,7 +68,7 @@ impl Job {
         match self.work {
             Work::Build(_) => "build",
             Work::Check(_) => "check",
-            Work::Run(_) => "run",
+            Work::Run { .. } => "run",
         }
     }
 
@@ -265,7 +266,9 @@ impl Service {
             return;
         };
         let output = caught(|| match &work {
-            Work::Run(source) => self.run_script(source, &cancel).map(Some),
+            Work::Run { source, meshes } => {
+                self.run_script(source, meshes.then_some(id), &cancel).map(Some)
+            }
             Work::Build(parts) => self.build_job(id, parts.as_deref(), &cancel).map(|_| None),
             Work::Check(names) => self
                 .build_job(id, None, &cancel)

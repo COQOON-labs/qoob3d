@@ -62,7 +62,8 @@ subcommands here.
   error; `/save` needs the project folder to be the Git top level and commits with the
   pathspec of the add. The cache key hashes the modules the engine resolved in the last
   build (`modules_read` in the cache `.json`, `snapshot::Reads`), the literal scan only
-  before the first build (AG-HD-06). Declaration results are cached per file **including
+  before the first build (AG-HD-06), and after them the files `import_step`/`import_mesh`
+  read (`files_read`, AG-SC-24; a file that is gone hashes as empty). Declaration results are cached per file **including
   load errors**, so a file that hits the discovery limits is not evaluated on every poll.
   `/status` reports `load_errors: [{kind, message, file, line?, column?}]` (kind `load`,
   `time_limit`, `memory_limit`, `crash`) and the first one also as `error`; a build of all
@@ -78,13 +79,31 @@ subcommands here.
   the service envelope through (service started on demand, `task_update` always as role
   agent, also binds `parts`/`checks`; `task_get` adds `project` from `/status`; `render` adds
   the `bbox` from the build results); `files.rs` confined file tools (AG-MC-03: allowed folders and extensions, 1 MiB, any
-  symlink on the path refused, task files read-only); `render.rs` runs `render-project` as a
+  symlink on the path refused, task files read-only; AG-MC-11: `file_list` adds `imports`
+  `{path, size}` for `.step`/`.stp`/`.stl`/`.3mf`, `file_read` on them names `import_step`
+  or `import_mesh`); `render.rs` runs `render-project` as a
   child process and returns the PNG as base64 (`views`: 2 to 6 views as one contact sheet;
   the view table there must match `guide.md`); `resources.rs` embeds `docs/script-api.md`,
   `mcp/guide.md` (at most 120 lines; its minimal project is built by `tests/mcp_guide.rs`)
   and the kernel example scripts.
+- Damen 5009 findings (agent.md §6.6): `/export` applies `PrintPose` from the snapshot's
+  declarations and writes kits (`kit`, `bed_mm`) with `details` per file (AG-SV-09);
+  `/run {meshes: true}` makes the worker write the shown shapes as `.qoob3d/run/<job>/<i>.qmsh`
+  for `render-project --source` (AG-MC-12); `PartError::printed` carries the lines printed
+  before a script error (AG-SC-35); a meshing failure is kind `script` naming the part
+  (AG-SC-36); the cache `.json` has `mesh` (export report) and `printed` (entry version 4).
+  MCP `render` takes `source` and `region` and hashes long file names; `file_write` of
+  `qoob3d.toml` answers when its sections apply (limits, mesh, cache: next job; workers: next
+  start).
+- Colours and slicer projects (AG-PJ-07, AG-SV-10, ADR-0034): declarations carry `color` and
+  `print_with` to `/status`; `service/slicer.rs` writes `/export {project, multicolor,
+  printer}` as a Bambu Studio project (plates grouped by the filaments their objects need,
+  purge corner of the bed kept empty). **Check a change there with Bambu Studio's command
+  line** (`ag_sv_10_bambu_studio_…` in `tests/service.rs`, no window): our own 3MF reader
+  accepted three files the slicer got wrong.
 - `src/init.rs`: `qoob3d init <DIR>` (AG-SV-08); writes `lib/examples/` from the master
-  copies in `docs/script-api/lib/examples/`.
+  copies in `docs/script-api/lib/examples/` (`EXAMPLES`: a new asset of the reference needs
+  an entry there).
 
 ## Relevant ADRs
 

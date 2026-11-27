@@ -107,3 +107,31 @@ fn interpolation_hits_endpoints() {
     let mid = Camera::interpolate(&a, &b, 0.5);
     assert!((mid.distance - 200.0).abs() < 1e-2, "log interpolation: {}", mid.distance);
 }
+
+#[test]
+fn tight_fit_lets_a_long_part_fill_the_width_of_an_orthographic_image() {
+    // Finding 3.1 of the Damen 5009 project: a 584 mm hull filled a quarter
+    // of the image. Front view (looking along +Y): x is right, z is up.
+    let hull = Aabb { min: [0.0, -54.0, 0.0], max: [584.0, 54.0, 100.0] };
+    let aspect = 4.0 / 3.0;
+    let mut cam = Camera::default();
+    cam.look_from(ViewPreset::Front.eye_direction());
+    cam.projection = Projection::Orthographic;
+    cam.fit_tight(hull, aspect);
+    let ndc: Vec<Vec3> = [[0.0, 0.0, 0.0], [584.0, 0.0, 100.0], [584.0, 54.0, 0.0]]
+        .into_iter()
+        .map(|p| cam.project(Vec3::from(p), aspect).unwrap())
+        .collect();
+    // The ends of the hull sit at the margin, left and right.
+    assert!((ndc[0].x + 1.0 / 1.04).abs() < 1e-3, "{ndc:?}");
+    assert!((ndc[1].x - 1.0 / 1.04).abs() < 1e-3, "{ndc:?}");
+    // Height 100 of a width of 584 at aspect 4:3: y = ± 100 / 584 · 4/3 / 1.04.
+    let y = 100.0 / 584.0 * aspect / 1.04;
+    assert!((ndc[1].y - y).abs() < 1e-3, "{ndc:?}");
+    assert!((ndc[0].y + y).abs() < 1e-3, "{ndc:?}");
+    // The sphere fit leaves the same hull far smaller: its bow at x ≈ 0.61
+    // (the sphere around the box, 1.15 margin, fitted to the height).
+    cam.fit(hull, aspect);
+    let sphere = cam.project(Vec3::new(584.0, 0.0, 0.0), aspect).unwrap();
+    assert!(sphere.x < 0.65, "{sphere:?}");
+}

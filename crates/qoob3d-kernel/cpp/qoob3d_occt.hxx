@@ -42,11 +42,14 @@ std::unique_ptr<TopoDS_Shape> qoob3d_revolve(const TopoDS_Shape &faces,
 // points (empty slice or x y z) before and after.
 std::unique_ptr<TopoDS_Shape> qoob3d_loft(const TopoDS_Shape &faces,
                                           rust::Slice<const double> start_point,
-                                          rust::Slice<const double> end_point);
+                                          rust::Slice<const double> end_point, bool ruled);
 // op: 0 fuse, 1 cut (a − b), 2 common. Compounds count as lists of
-// arguments, so a batch of shapes is one operation.
+// arguments, so a batch of shapes is one operation. `fuzzy` > 0 treats
+// geometry closer than it as touching, < 0 uses the tolerance of freeform
+// inputs (0 for analytic ones); `parallel` uses OCCT's thread pool. On
+// freeform faces an invalid result is repaired.
 std::unique_ptr<TopoDS_Shape> qoob3d_boolean(const TopoDS_Shape &a, const TopoDS_Shape &b,
-                                             uint32_t op);
+                                             uint32_t op, double fuzzy, bool parallel);
 // The same on planar faces in the plane z = 0 (profile algebra, AG-PF-02).
 // Result: a compound of faces; an empty result is an error.
 std::unique_ptr<TopoDS_Shape> qoob3d_profile_boolean(const TopoDS_Shape &a, const TopoDS_Shape &b,
@@ -54,7 +57,8 @@ std::unique_ptr<TopoDS_Shape> qoob3d_profile_boolean(const TopoDS_Shape &a, cons
 // Distance between two shapes (0 if they touch or overlap). Exact up to
 // `max`; beyond it a lower bound (the distance of the bounding boxes).
 double qoob3d_distance(const TopoDS_Shape &a, const TopoDS_Shape &b, double max);
-double qoob3d_volume(const TopoDS_Shape &shape);
+// Volume; `relative_error` > 0 integrates adaptively up to that error.
+double qoob3d_volume(const TopoDS_Shape &shape, double relative_error);
 bool qoob3d_is_valid(const TopoDS_Shape &shape);
 // The solids of a shape (compounds are flattened).
 uint32_t qoob3d_solid_count(const TopoDS_Shape &shape);
@@ -97,7 +101,13 @@ rust::Vec<double> qoob3d_ray(const TopoDS_Shape &shape, rust::Slice<const double
 std::unique_ptr<TopoDS_Shape> qoob3d_pipe(rust::Slice<const double> points, double radius,
                                           double bend_radius);
 void qoob3d_write_step(const TopoDS_Shape &shape, rust::Str path);
-std::unique_ptr<TopoDS_Shape> qoob3d_read_step(rust::Str path);
+// Polyhedral solids from an indexed mesh (mesh import, ADR-0034): one vertex
+// per point, one line edge per edge, so faces share their edges; the faces,
+// their loops and the solids are computed and checked in Rust. No
+// BRepCheck here: it costs seconds on big meshes, and the build reports
+// validity anyway.
+struct Qoob3dPolyhedron;
+std::unique_ptr<TopoDS_Shape> qoob3d_polyhedron(const Qoob3dPolyhedron &p);
 // OCCT's native BREP text format (cache entries, AG-PJ-04).
 void qoob3d_write_brep(const TopoDS_Shape &shape, rust::Str path);
 std::unique_ptr<TopoDS_Shape> qoob3d_read_brep(rust::Str path);
@@ -125,3 +135,31 @@ double qoob3d_bed_area(const TopoDS_Shape &shape);
 // the faces counted by `qoob3d_bed_area`. Planar faces exact, curved faces
 // from a fine mesh with the true normals, triangles split at the limit.
 double qoob3d_overhang_area(const TopoDS_Shape &shape, double max_angle);
+
+// ---- Robustness and repair (ADR-0053).
+
+// The elements BRepCheck_Analyzer finds defective, at most `limit`: kind
+// (0 vertex, 1 edge, 2 wire, 3 face, 4 shell, 5 solid), index in
+// TopExp::MapShapes of that kind, the statuses as text, the bounding box
+// (6 values each). Empty for a valid shape.
+struct Qoob3dDefects;
+Qoob3dDefects qoob3d_defects(const TopoDS_Shape &shape, uint32_t limit);
+// ShapeFix with the precision `tolerance` (gaps, small edges, wires), then
+// same-domain faces merged. The result must contain a solid.
+std::unique_ptr<TopoDS_Shape> qoob3d_heal(const TopoDS_Shape &shape, double tolerance);
+// All solids of a STEP file as a compound; `names` gets the STEP name of
+// each solid in TopExp order (empty where the file has none).
+std::unique_ptr<TopoDS_Shape> qoob3d_read_step_named(rust::Str path,
+                                                     rust::Vec<rust::String> &names);
+// The solids with these 0-based TopExp indices as a compound.
+std::unique_ptr<TopoDS_Shape> qoob3d_pick_solids(const TopoDS_Shape &shape,
+                                                 rust::Slice<const uint32_t> indices);
+// The planar faces without their holes.
+std::unique_ptr<TopoDS_Shape> qoob3d_profile_outline(const TopoDS_Shape &faces);
+// Every solid reduced to its outer shell: inner voids filled.
+std::unique_ptr<TopoDS_Shape> qoob3d_fill_voids(const TopoDS_Shape &shape);
+// The solid grown (distance > 0) or shrunk by `distance`, arcs at convex edges.
+std::unique_ptr<TopoDS_Shape> qoob3d_offset_shape(const TopoDS_Shape &shape, double distance);
+// Highest z on vertical lines through a grid (NaN where nothing is hit).
+rust::Vec<double> qoob3d_heights(const TopoDS_Shape &shape, double x0, double y0, double dx,
+                                 double dy, uint32_t nx, uint32_t ny);

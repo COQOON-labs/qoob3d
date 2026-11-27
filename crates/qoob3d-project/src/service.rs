@@ -15,6 +15,7 @@ mod jobs;
 mod pool;
 mod probe;
 mod save;
+mod slicer;
 pub(crate) mod snapshot;
 mod tasks;
 
@@ -207,6 +208,26 @@ struct BuildBody {
 struct ExportBody {
     parts: Vec<String>,
     format: String,
+    /// One file `out/<kit>.<format>` with all parts, each `count` times in
+    /// its print pose, arranged on the bed (AG-SV-09).
+    #[serde(default)]
+    kit: Option<String>,
+    /// Bed width for the arrangement of a kit, mm.
+    #[serde(default)]
+    bed_mm: Option<f32>,
+    /// One Bambu Studio project `out/<project>.3mf` with all parts on
+    /// plates, each in the filament of its colour (AG-SV-10).
+    #[serde(default)]
+    project: Option<String>,
+    /// For a project: parts that declare `print_with` print inside their
+    /// host as one multi-colour object; otherwise every part is an object
+    /// of its own and a plate holds one colour.
+    #[serde(default)]
+    multicolor: bool,
+    /// For a project: the printer whose bed the plates are laid out for
+    /// (an id of the printer database).
+    #[serde(default)]
+    printer: Option<String>,
 }
 
 impl Service {
@@ -437,19 +458,108 @@ impl Service {
         let out = self.dir.join(layout::OUT_DIR);
         std::fs::create_dir_all(&out)
             .map_err(|e| Failure::new(500, ErrorKind::Io, format!("{}: {e}", out.display())))?;
+        let poses = self.poses();
+        let io = |e: String| Failure::new(500, ErrorKind::Io, e);
+        if let Some(name) = &request.project {
+            return self.export_project(name, &request, &keys);
+        }
+        if let Some(kit) = &request.kit {
+            if format == "step" || !plain_file_name(kit) {
+                return Err(Failure::bad_request(
+                    "kit takes a plain file name and the format stl or 3mf",
+                ));
+            }
+            let objects = request
+                .parts
+                .iter()
+                .zip(&keys)
+                .map(|(part, key)| {
+                    let qmsh = layout::cache_dir(&self.dir, part).join(key).with_extension("qmsh");
+                    let pose = poses.get(part).cloned().flatten().unwrap_or_default();
+                    Ok((part.clone(), pose.apply(&read_mesh(&qmsh)?), pose.count))
+                })
+                .collect::<Result<Vec<_>, String>>()
+                .map_err(io)?;
+            let file = format!("out/{kit}.{format}");
+            let bed = request.bed_mm.unwrap_or(DEFAULT_BED_MM);
+            let detail = export_kit(&objects, &self.dir.join(&file), format, bed).map_err(io)?;
+            return Ok(json!({"files": [file], "details": [detail]}));
+        }
         let mut files = Vec::new();
+        let mut details = Vec::new();
         for (part, key) in request.parts.iter().zip(keys) {
             let file = format!("out/{part}.{format}");
             let base = layout::cache_dir(&self.dir, part).join(key);
             if format == "step" {
                 self.export_step(part, &base.with_extension("brep"), &file)?;
+                details.push(json!({"file": file, "parts": [part]}));
             } else {
-                export_mesh(part, &base.with_extension("qmsh"), &self.dir.join(&file), format)
-                    .map_err(|e| Failure::new(500, ErrorKind::Io, e))?;
+                let pose = poses.get(part).cloned().flatten();
+                let detail = export_mesh(
+                    part,
+                    &base.with_extension("qmsh"),
+                    &self.dir.join(&file),
+                    format,
+                    pose.as_ref(),
+                )
+                .map_err(io)?;
+                details.push(
+                    json!({"file": file})
+                        .as_object()
+                        .cloned()
+                        .map(|mut m| {
+                            m.extend(detail.as_object().cloned().unwrap_or_default());
+                            Value::Object(m)
+                        })
+                        .unwrap_or(detail),
+                );
             }
             files.push(file);
         }
-        Ok(json!({"files": files}))
+        Ok(json!({"files": files, "details": details}))
+    }
+
+    /// The print pose of every part (AG-PJ-06), from the last declarations.
+    fn poses(&self) -> std::collections::HashMap<String, Option<qoob3d_core::project::PrintPose>> {
+        self.snapshot(None)
+            .map(|s| s.parts.into_iter().map(|p| (p.name, p.print)).collect())
+            .unwrap_or_default()
+    }
+
+    /// The built parts as a slicer project `out/<name>.3mf` (AG-SV-10), with
+    /// pose, colour and host from the last declarations.
+    fn export_project(&self, name: &str, request: &ExportBody, keys: &[String]) -> Answer {
+        let alone = request.kit.is_none() && request.bed_mm.is_none();
+        if request.format != "3mf" || !plain_file_name(name) || !alone {
+            return Err(Failure::bad_request(
+                "project takes a plain file name and the format 3mf, without kit or bed_mm \
+                 (the bed is the printer's)",
+            ));
+        }
+        let io = |e: String| Failure::new(500, ErrorKind::Io, e);
+        let printer = slicer::printer(request.printer.as_deref()).map_err(Failure::bad_request)?;
+        let declared = self.snapshot(None).map(|s| s.parts).unwrap_or_default();
+        let mut parts = Vec::new();
+        for (part, key) in request.parts.iter().zip(keys) {
+            let qmsh = layout::cache_dir(&self.dir, part).join(key).with_extension("qmsh");
+            let source = declared.iter().find(|p| p.name == *part);
+            parts.push(slicer::Part {
+                name: part.clone(),
+                mesh: read_mesh(&qmsh).map_err(io)?,
+                pose: source.and_then(|p| p.print.clone()),
+                color: source
+                    .and_then(|p| p.color.as_deref())
+                    .and_then(qoob3d_core::project::parse_color),
+                print_with: source.and_then(|p| p.print_with.clone()),
+            });
+        }
+        let file = format!("out/{name}.3mf");
+        let detail = slicer::export(&parts, request.multicolor, &printer, &self.dir.join(&file))
+            .map_err(|e| match e {
+                slicer::Refused::Request(m) => Failure::bad_request(m),
+                slicer::Refused::Io(m) => io(m),
+            })?;
+        Ok(json!({"files": [file], "details": [detail]}))
     }
 
     fn export_step(&self, part: &str, brep: &Path, file: &str) -> Result<(), Failure> {
@@ -501,14 +611,121 @@ fn status_name(status: ValueStatus) -> &'static str {
     }
 }
 
-/// STL or 3MF (one object) of the cached mesh `qmsh` to `out`.
-fn export_mesh(part: &str, qmsh: &Path, out: &Path, format: &str) -> Result<(), String> {
+/// Bed width for arranging a kit when the request names none, mm (the
+/// 256 mm bed of the Bambu Lab printers, ADR-0002).
+const DEFAULT_BED_MM: f32 = 256.0;
+
+/// A plain file name for a kit: no path, no dot at the start.
+fn plain_file_name(name: &str) -> bool {
+    !name.is_empty() && !name.starts_with('.') && !name.contains(['/', '\\']) && name.len() <= 100
+}
+
+fn read_mesh(qmsh: &Path) -> Result<qoob3d_core::TriMesh, String> {
     let bytes = std::fs::read(qmsh).map_err(|e| format!("{}: {e}", qmsh.display()))?;
     let mesh = qmesh::read(&bytes).map_err(|e| format!("{}: {e:?}", qmsh.display()))?;
-    drop(bytes);
-    let objects = [ExportObject { name: part.to_owned(), mesh: &mesh.faces }];
+    Ok(mesh.faces)
+}
+
+/// What a slicer will find in an exported mesh: size, triangles, whether
+/// it is closed, and the warnings (findings 1.5, 3.7).
+fn mesh_detail(mesh: &qoob3d_core::TriMesh) -> Value {
+    let report = mesh.export_report();
+    let size = mesh.bounds().map(|b| std::array::from_fn::<f32, 3, _>(|i| b.max[i] - b.min[i]));
+    let mut warnings = Vec::new();
+    if !report.is_watertight() {
+        warnings.push(format!(
+            "not watertight: {} open, {} non-manifold, {} flipped edges; a slicer may reject it",
+            report.open_edges, report.non_manifold_edges, report.inconsistent_edges
+        ));
+    }
+    json!({
+        "triangles": report.triangles,
+        "size": size,
+        "watertight": report.is_watertight(),
+        "warnings": warnings,
+    })
+}
+
+/// STL or 3MF (one object) of the cached mesh `qmsh` to `out`, in the
+/// print pose if the part has one; what the file holds.
+fn export_mesh(
+    part: &str,
+    qmsh: &Path,
+    out: &Path,
+    format: &str,
+    pose: Option<&qoob3d_core::project::PrintPose>,
+) -> Result<Value, String> {
+    let mut mesh = read_mesh(qmsh)?;
+    if let Some(pose) = pose {
+        mesh = pose.apply(&mesh);
+    }
+    let objects = [ExportObject { name: part.to_owned(), mesh: &mesh }];
     let data = if format == "3mf" { export::three_mf(&objects) } else { export::stl(&objects) };
-    write_atomic(out, &data).map_err(|e| format!("{}: {e}", out.display()))
+    write_atomic(out, &data).map_err(|e| format!("{}: {e}", out.display()))?;
+    let mut detail = mesh_detail(&mesh);
+    detail["parts"] = json!([part]);
+    if let Some(pose) = pose.filter(|p| p.count > 1) {
+        detail["count"] = json!(pose.count);
+    }
+    Ok(detail)
+}
+
+/// One file of all `objects` (name, posed mesh, count), each copy its own
+/// object, arranged on a bed `bed` mm wide (AG-SV-09).
+fn export_kit(
+    objects: &[(String, qoob3d_core::TriMesh, u32)],
+    out: &Path,
+    format: &str,
+    bed: f32,
+) -> Result<Value, String> {
+    let copies: Vec<(String, &qoob3d_core::TriMesh)> = objects
+        .iter()
+        .flat_map(|(name, mesh, count)| {
+            (1..=*count).map(move |i| {
+                let label = if *count > 1 { format!("{name} {i}") } else { name.clone() };
+                (label, mesh)
+            })
+        })
+        .collect();
+    let sizes: Vec<[f32; 2]> = copies
+        .iter()
+        .map(|(_, m)| m.bounds().map_or([0.0; 2], |b| [b.max[0] - b.min[0], b.max[1] - b.min[1]]))
+        .collect();
+    let centres = qoob3d_core::project::arrange(&sizes, bed);
+    let placed: Vec<(String, qoob3d_core::TriMesh)> = copies
+        .iter()
+        .zip(&centres)
+        .map(|((name, mesh), c)| {
+            let mut m = (*mesh).clone();
+            for p in &mut m.positions {
+                p[0] += c[0];
+                p[1] += c[1];
+            }
+            (name.clone(), m)
+        })
+        .collect();
+    let exported: Vec<ExportObject<'_>> =
+        placed.iter().map(|(name, mesh)| ExportObject { name: name.clone(), mesh }).collect();
+    let data = if format == "3mf" { export::three_mf(&exported) } else { export::stl(&exported) };
+    write_atomic(out, &data).map_err(|e| format!("{}: {e}", out.display()))?;
+    let details: Vec<Value> = placed
+        .iter()
+        .map(|(name, mesh)| {
+            let mut d = mesh_detail(mesh);
+            d["object"] = json!(name);
+            d
+        })
+        .collect();
+    let footprint = centres.iter().zip(&sizes).fold([0.0f32; 2], |acc, (c, s)| {
+        [acc[0].max(c[0] + s[0] / 2.0), acc[1].max(c[1] + s[1] / 2.0)]
+    });
+    Ok(json!({
+        "file": out.file_name().map(|f| f.to_string_lossy().into_owned()),
+        "parts": objects.iter().map(|(n, _, _)| n).collect::<Vec<_>>(),
+        "objects": details,
+        "footprint": footprint,
+        "fits_one_bed": footprint[0] <= bed && footprint[1] <= bed,
+    }))
 }
 
 fn job_id(id: &str) -> Result<u64, Failure> {

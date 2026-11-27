@@ -29,14 +29,31 @@ shapes on the thread that called `script::run`; the app runs scripts in worker p
   transforms, measures, `countersink`/`counterbore`, `mass`, `overhangs`/`bed_area`;
   `profile.rs` profiles, profile algebra (AG-PF-02), `rounded_rect`, `rotate`, `offset`,
   `area`, `section`, extrude/revolve/loft, pipe; `select.rs` edge/face selectors incl.
-  `in_box`/`near`/`length`/`area`, fillet, chamfer, shell; `project.rs` `part()`/`value()` with
+  `in_box`/`near`/`length`/`area`, fillet, chamfer, shell; `project.rs` `part()`/`value()` (part
+  options `depends`, `pose`, `color`, `print_with`; AG-PJ-06/07) with
   `PartMode` (all, declare without the CAD API, one part from dependency BREPs); `check.rs`
   `check()`/`expect…` (incl. `expect_eq`) and `part(name)`; `limits.rs` the size limits of
   declaration discovery (AG-HD-02: runs in doubling stages that measure the variables, then a search for
   the statement that crossed a limit) (AG-CK-01/02, `RunOptions::check`, results in
   `RunOutput::checks`; closures run only in `PartMode::All`); `measure.rs` area, center,
   distance, common volume for callers in Rust; BREP
-  read/write and `Shape::mesh` for the cache. Runs on the calling thread, not
+  read/write and `Shape::mesh` for the cache; `polyhedron.rs` the topology for `import_mesh`
+  (AG-SC-23): open/non-manifold edges counted and refused, one shell per edge-connected group;
+  positive shells are solids, a negative shell is a cavity of the smallest positive shell that
+  contains it (ray parity) or refused as inside out (AG-SC-37), coplanar
+  neighbours grown into planar faces, their boundary chained into loops (outline first,
+  holes after; at a point where a face touches itself the first side clockwise from the way
+  back); `qoob3d_polyhedron` only builds it (shared vertices and edges, stored 2D curves, no
+  sewing). `imports.rs` `import_step` (whole file, or solids by STEP name from the reader's
+  transfer table, AG-SC-29; one read per file and run), `step_names`, `import_mesh`; both
+  record what they read in `RunOutput::files_read` (AG-SC-24). `solid_ops.rs` `defects`,
+  `heal`, `fill_voids`, `offset(s, d)`, `split`, `on_bed`, `heights`, `mesh_report`
+  (AG-SC-26…34). `text.rs` `text` (AG-SC-38): options, the font file (confined and recorded
+  like an import, read once per run), then `profile::regions` turns the polygons of
+  `qoob3d_core::font` into faces: holes through the `punch` path of the profile cut (no
+  boolean), one planar union only when the font module reports ink that overlaps.
+  `run_keeping_prints` returns `RunFailure {error, printed}` (AG-SC-35).
+  Runs on the calling thread, not
   the worker. Every API change updates `docs/script-api.md` (its examples run in
   `tests/script.rs` and `tests/script_helpers.rs` with the project folder `docs/script-api`; the
   imported example assets live in `docs/script-api/lib/examples/`, and `qoob3d init` copies
@@ -66,6 +83,30 @@ shapes on the thread that called `script::run`; the app runs scripts in worker p
   must never be one BOP argument (self-interference).
 - `qoob3d_boolean` runs the BOP in parallel mode (AG-PF-01, `OSD_ThreadPool`, no TBB). On
   four cores the 1000-hole solid cut gained only ~10 %; most of a big BOP is serial.
+- **Freeform bodies (AG-SC-25, ADR-0053)**: `has_freeform` decides; cut/common/section use
+  `freeform_fuzzy` (2 × largest edge tolerance, 1e-5…1e-3 mm), unions stay exact (fuzzy
+  destroyed the hull + deck union), invalid results go through `repaired` (ShapeFix +
+  `BRepLib::SameParameter`). **Never ShapeFix_Wireframe**: it changed slab volumes by 3 %.
+  A common + cut bookkeeping check does not catch misclassified pieces: both sides agree.
+  The retries (serial, then fuzzy for unions) are in `api::boolean`; `fuzzy < 0` means auto.
+- **Operations must not change their operands.** Shapes share edges and faces with their copies
+  (`move`), with the profile they were extruded from and with every result built from them. BOPs
+  run with `SetNonDestructive` (by default OCCT adds pcurves and raises tolerances in place), and
+  `repaired` (ShapeFix + SameParameter, also `heal`) works on a `BRepBuilderAPI_Copy`: in place it
+  gave a face of the imported Damen hull a surface with poles near 1e100 mm, and every later boolean
+  with that hull returned the whole tool. Test: `ag_sc_25_a_boolean_leaves_its_operands_as_they_were`;
+  the hull case only in the opt-in acceptance test (`quinam_a_prism_cuts_the_hull_alike_twice`).
+- `BRepGProp::VolumeProperties` with the fixed Gauss order was 1.1 % off on an imported hull;
+  `qoob3d_volume` integrates adaptively (`VOLUME_RELATIVE_ERROR` 1e-7). With `OnlyClosed =
+  true` it returns 0 for shells OCCT does not mark closed: keep it false.
+- The bed and `top()`/`bottom()` tolerance is 1 µm: a planar cut face of a freeform body lay
+  20 nm above the lowest point its B-spline faces reported.
+- STEP names: `XSControl_TransferReader::EntityFromShapeResult` found no entity for the
+  solids of our own STEP files; the names come from the `Transfer_TransientProcess` map
+  (`StepRepr_RepresentationItem` → `TransferBRep::ShapeResult`, keyed by `TShape`).
+- `print` is a reserved word in Rhai, also as a map key: the part option is `pose`.
+- Rhai's expression depth differs between debug (32/16) and release (64/32) builds; we set
+  128/64 so that nested calls in functions work in both (AG-SC-35).
 - Profile algebra (`qoob3d_profile_boolean`): a cut whose tools are hole-free faces strictly
   inside one base face, clear of its holes and of each other, adds them as inner wires
   (`punch`) instead of running a BOP; everything else is a planar BOP. `punch` stores the
@@ -96,6 +137,15 @@ shapes on the thread that called `script::run`; the app runs scripts in worker p
   for a sphere, 118 s for a torus), so export and display meshes stay untouched.
 - STEP read/write share static OCCT settings; the wrappers serialise them with a mutex.
   OCCT's STEP translator prints progress to stdout.
+- `qoob3d_polyhedron` runs no `BRepCheck_Analyzer`: on a 50 000-triangle sphere the check
+  took 2.2 s of a 2.5 s import (and ~0.8 GB), and the build reports validity anyway. Its
+  topology is checked in Rust instead.
+- `BRepMesh_IncrementalMesh` costs ~60 kB per face even for faces it reuses (3 GB for an
+  imported mesh of 50 000 faces). `qoob3d_polyhedron` therefore stores every face's own
+  triangles as an exact triangulation (deflection 0) with the edge polygons, and
+  `qoob3d_tessellate` meshes only the faces that are not planar, bounded by lines and
+  exactly triangulated (`exactly_triangulated`); after a boolean only the new faces are
+  meshed.
 - OCCT normals follow the surface, not the face orientation → for `TopAbs_REVERSED`
   flip winding and normal (done by `qoob3d_tessellate`).
 

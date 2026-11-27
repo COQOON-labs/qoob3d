@@ -9,8 +9,26 @@
 #include <vector>
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 
 #include <BRepAdaptor_Surface.hxx>
+#include <Geom_Surface.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <BRepTools_WireExplorer.hxx>
+#include <BRepCheck.hxx>
+#include <BRepCheck_ListOfStatus.hxx>
+#include <BRepCheck_Result.hxx>
+#include <BRepClass3d.hxx>
+#include <BRepOffsetAPI_MakeOffsetShape.hxx>
+#include <ShapeFix_Shape.hxx>
+#include <StepRepr_RepresentationItem.hxx>
+#include <TCollection_HAsciiString.hxx>
+#include <Transfer_TransientProcess.hxx>
+#include <TransferBRep.hxx>
+#include <XSControl_TransferReader.hxx>
+#include <XSControl_WorkSession.hxx>
+#include <sstream>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
@@ -45,6 +63,12 @@
 #include <BRepTools.hxx>
 #include <BRep_Builder.hxx>
 #include <Bnd_Box.hxx>
+#include <Geom_Plane.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+#include <TColStd_Array1OfReal.hxx>
+#include <unordered_map>
+#include <TopoDS_Shell.hxx>
+#include <TopoDS_Solid.hxx>
 #include <GeomLib.hxx>
 #include <ShapeFix_Face.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
@@ -106,6 +130,8 @@ template <typename F> auto guarded(const char *what, F &&f) -> decltype(f()) {
   }
 }
 
+std::string box_text(const TopoDS_Shape &s);
+
 void tessellate_faces(const TopoDS_Shape &shape, Qoob3dMesh &out) {
   TopTools_IndexedMapOfShape faces;
   TopExp::MapShapes(shape, TopAbs_FACE, faces);
@@ -115,7 +141,8 @@ void tessellate_faces(const TopoDS_Shape &shape, Qoob3dMesh &out) {
     TopLoc_Location loc;
     const Handle(Poly_Triangulation) &tri = BRep_Tool::Triangulation(face, loc);
     if (tri.IsNull()) {
-      throw std::runtime_error("face " + std::to_string(fi) + " has no triangulation");
+      throw std::runtime_error("face " + std::to_string(fi) + " has no triangulation; it lies " +
+                               box_text(face));
     }
     if (!tri->HasNormals()) {
       BRepLib_ToolTriangulatedShape::ComputeNormals(face, tri);
@@ -212,19 +239,265 @@ void extract_edges(const TopoDS_Shape &shape, double lin, double ang, Qoob3dMesh
   out.edge_starts.push_back(static_cast<uint32_t>(out.edge_points.size() / 3));
 }
 
+// A planar face bounded by straight edges whose triangulation is exact
+// (deflection 0, the face's own triangles of an imported mesh): any mesher
+// setting gives the same triangles, and its straight edges have no points
+// between their ends, so neighbouring faces meshed anew still match.
+bool exactly_triangulated(const TopoDS_Face &face) {
+  TopLoc_Location loc;
+  const Handle(Poly_Triangulation) &tri = BRep_Tool::Triangulation(face, loc);
+  if (tri.IsNull() || tri->Deflection() != 0.0 ||
+      BRepAdaptor_Surface(face, Standard_False).GetType() != GeomAbs_Plane) {
+    return false;
+  }
+  for (TopExp_Explorer e(face, TopAbs_EDGE); e.More(); e.Next()) {
+    if (BRepAdaptor_Curve(TopoDS::Edge(e.Current())).GetType() != GeomAbs_Line) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::string box_text(const TopoDS_Shape &s) {
+  Bnd_Box box;
+  BRepBndLib::Add(s, box);
+  if (box.IsVoid()) {
+    return "no extent";
+  }
+  double b[6];
+  box.Get(b[0], b[1], b[2], b[3], b[4], b[5]);
+  std::ostringstream text;
+  text.precision(6);
+  text << "from (" << b[0] << ", " << b[1] << ", " << b[2] << ") to (" << b[3] << ", " << b[4]
+       << ", " << b[5] << ")";
+  return text.str();
+}
+
+// The face meshed on its own with `params`; whether it has triangles now.
+bool meshed(const TopoDS_Face &face, const IMeshTools_Parameters &params) {
+  BRepMesh_IncrementalMesh mesh(face, params);
+  TopLoc_Location loc;
+  return !BRep_Tool::Triangulation(face, loc).IsNull();
+}
+
+// Triangles for `face` from its boundary: the wire discretised, a fan from
+// the boundary's centre projected onto the surface. The last resort for a
+// small face the mesher refuses (a 0.75 mm face of an imported boat).
+// The points of `edge` as the triangulation of a neighbouring face samples
+// them (so the fan closes against it), else the curve discretised; in the
+// direction of the edge's curve.
+std::vector<gp_Pnt> edge_points(const TopoDS_Edge &edge, const TopoDS_Face &face,
+                                const TopTools_IndexedDataMapOfShapeListOfShape &edge_faces,
+                                double lin, double ang) {
+  std::vector<gp_Pnt> out;
+  const int index = edge_faces.FindIndex(edge);
+  if (index > 0) {
+    for (TopTools_ListIteratorOfListOfShape it(edge_faces(index)); it.More(); it.Next()) {
+      const TopoDS_Face &other = TopoDS::Face(it.Value());
+      if (other.IsSame(face)) {
+        continue;
+      }
+      TopLoc_Location loc;
+      const Handle(Poly_Triangulation) &tri = BRep_Tool::Triangulation(other, loc);
+      if (tri.IsNull()) {
+        continue;
+      }
+      const Handle(Poly_PolygonOnTriangulation) &poly =
+          BRep_Tool::PolygonOnTriangulation(edge, tri, loc);
+      if (poly.IsNull()) {
+        continue;
+      }
+      for (int i = 1; i <= poly->NbNodes(); ++i) {
+        out.push_back(tri->Node(poly->Node(i)).Transformed(loc.Transformation()));
+      }
+      return out;
+    }
+  }
+  BRepAdaptor_Curve curve(edge);
+  GCPnts_TangentialDeflection points(curve, ang, lin);
+  for (int i = 1; i <= points.NbPoints(); ++i) {
+    out.push_back(points.Value(i));
+  }
+  return out;
+}
+
+Handle(Poly_Triangulation) boundary_fan(const TopoDS_Face &face,
+                                        const TopTools_IndexedDataMapOfShapeListOfShape &edge_faces,
+                                        double lin, double ang) {
+  const TopoDS_Wire outer = BRepTools::OuterWire(face);
+  if (outer.IsNull()) {
+    return nullptr;
+  }
+  std::vector<gp_Pnt> ring;
+  for (BRepTools_WireExplorer e(outer, face); e.More(); e.Next()) {
+    std::vector<gp_Pnt> edge = edge_points(e.Current(), face, edge_faces, lin, ang);
+    // Points run along the curve; the wire may run it backwards. The
+    // end that meets the ring so far comes first.
+    const bool forward = e.Current().Orientation() != TopAbs_REVERSED;
+    if (!forward) {
+      std::reverse(edge.begin(), edge.end());
+    }
+    if (!ring.empty() && edge.size() > 1 &&
+        ring.back().Distance(edge.back()) < ring.back().Distance(edge.front())) {
+      std::reverse(edge.begin(), edge.end());
+    }
+    for (size_t i = ring.empty() ? 0 : 1; i < edge.size(); ++i) {
+      ring.push_back(edge[i]);
+    }
+  }
+  if (ring.size() > 1 && ring.front().Distance(ring.back()) < 1e-9) {
+    ring.pop_back();
+  }
+  if (ring.size() < 3) {
+    return nullptr;
+  }
+  gp_XYZ mid(0, 0, 0);
+  for (const gp_Pnt &p : ring) {
+    mid += p.XYZ();
+  }
+  gp_Pnt centre(mid / static_cast<double>(ring.size()));
+  const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+  GeomAPI_ProjectPointOnSurf onto(centre, surface);
+  if (onto.IsDone() && onto.NbPoints() > 0) {
+    centre = onto.NearestPoint();
+  }
+  const int n = static_cast<int>(ring.size());
+  Handle(Poly_Triangulation) tri = new Poly_Triangulation(n + 1, n, Standard_False);
+  for (int i = 0; i < n; ++i) {
+    tri->SetNode(i + 1, ring[static_cast<size_t>(i)]);
+  }
+  tri->SetNode(n + 1, centre);
+  // The wire of the oriented face runs counter-clockwise about its outward
+  // normal; a triangulation is stored for the surface's own orientation,
+  // which a reversed face turns round.
+  const bool reversed = face.Orientation() == TopAbs_REVERSED;
+  for (int i = 0; i < n; ++i) {
+    const int a = i + 1, b = (i + 1) % n + 1;
+    tri->SetTriangle(i + 1, reversed ? Poly_Triangle(n + 1, b, a) : Poly_Triangle(n + 1, a, b));
+  }
+  // Normals from the triangles (the face has no UV nodes here).
+  tri->AddNormals();
+  for (int i = 1; i <= n + 1; ++i) {
+    tri->SetNormal(i, gp_Dir(0, 0, 1));
+  }
+  gp_XYZ sum(0, 0, 0);
+  for (int i = 0; i < n; ++i) {
+    const gp_XYZ a = ring[static_cast<size_t>(i)].XYZ() - centre.XYZ();
+    const gp_XYZ b = ring[static_cast<size_t>((i + 1) % n)].XYZ() - centre.XYZ();
+    sum += a.Crossed(b);
+  }
+  if (sum.Modulus() > 1e-15) {
+    gp_Dir normal(sum);
+    if (face.Orientation() == TopAbs_REVERSED) {
+      normal.Reverse();
+    }
+    for (int i = 1; i <= n + 1; ++i) {
+      tri->SetNormal(i, normal);
+    }
+  }
+  return tri;
+}
+
+TopoDS_Shape repaired(const TopoDS_Shape &shape, double tolerance);
+
+// Faces the mesher left without triangles (it happens on single trimmed
+// faces of imported bodies) are meshed again on their own: finer, then with
+// relative deflection and without surface control. Returns how many still
+// have none.
+int remesh_missing(const TopoDS_Shape &shape, double lin, double ang) {
+  TopTools_IndexedMapOfShape faces;
+  TopExp::MapShapes(shape, TopAbs_FACE, faces);
+  IMeshTools_Parameters finer;
+  finer.Deflection = finer.DeflectionInterior = lin * 0.5;
+  finer.Angle = finer.AngleInterior = ang * 0.5;
+  IMeshTools_Parameters loose;
+  loose.Deflection = loose.DeflectionInterior = 0.05;
+  loose.Angle = loose.AngleInterior = 0.5;
+  loose.Relative = Standard_True;
+  loose.ControlSurfaceDeflection = Standard_False;
+  loose.AdjustMinSize = Standard_True;
+  int missing = 0;
+  for (int fi = 1; fi <= faces.Extent(); ++fi) {
+    const TopoDS_Face &face = TopoDS::Face(faces(fi));
+    TopLoc_Location loc;
+    if (BRep_Tool::Triangulation(face, loc).IsNull() && !meshed(face, finer) &&
+        !meshed(face, loose)) {
+      ++missing;
+    }
+  }
+  return missing;
+}
+
+// The last resort for faces without triangles: a fan over their boundary,
+// else an error naming the face and where it lies (AG-SC-36).
+void fan_missing(const TopoDS_Shape &shape, double lin, double ang) {
+  TopTools_IndexedMapOfShape faces;
+  TopExp::MapShapes(shape, TopAbs_FACE, faces);
+  TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
+  TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edge_faces);
+  for (int fi = 1; fi <= faces.Extent(); ++fi) {
+    const TopoDS_Face &face = TopoDS::Face(faces(fi));
+    TopLoc_Location loc;
+    if (!BRep_Tool::Triangulation(face, loc).IsNull()) {
+      continue;
+    }
+    const Handle(Poly_Triangulation) tri = boundary_fan(face, edge_faces, lin, ang);
+    if (tri.IsNull()) {
+      throw std::runtime_error("face " + std::to_string(fi) +
+                               " cannot be triangulated, even after repair; it lies " +
+                               box_text(face));
+    }
+    BRep_Builder().UpdateFace(TopoDS::Face(face.Located(TopLoc_Location())), tri);
+  }
+}
+
 } // namespace
 
 Qoob3dMesh qoob3d_tessellate(const TopoDS_Shape &shape, double linear_deflection,
                              double angular_deflection) {
   return guarded("tessellate", [&] {
-    BRepMesh_IncrementalMesh mesher(shape, linear_deflection, Standard_False,
-                                    angular_deflection, Standard_True);
-    if (!mesher.IsDone()) {
-      throw std::runtime_error("BRepMesh_IncrementalMesh failed");
+    // Only the faces that need it: the mesher costs ~60 kB per face (3 GB
+    // for an imported mesh of 50 000 faces).
+    TopoDS_Compound rest;
+    BRep_Builder builder;
+    builder.MakeCompound(rest);
+    bool any = false;
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    for (int i = 1; i <= faces.Extent(); ++i) {
+      if (!exactly_triangulated(TopoDS::Face(faces(i)))) {
+        builder.Add(rest, faces(i));
+        any = true;
+      }
+    }
+    TopoDS_Shape meshed_shape = shape;
+    if (any) {
+      BRepMesh_IncrementalMesh mesher(rest, linear_deflection, Standard_False,
+                                      angular_deflection, Standard_True);
+      if (!mesher.IsDone()) {
+        throw std::runtime_error("BRepMesh_IncrementalMesh failed");
+      }
+      if (remesh_missing(shape, linear_deflection, angular_deflection) > 0) {
+        // A face of an imported boat would not mesh at all; the repaired
+        // copy of the whole body (its edges fixed together with the
+        // neighbouring faces) meshed closed. The copy has the same geometry.
+        // Repaired from a copy without triangles, as `heal` does for a
+        // shape read from the cache: kept triangles of faces the repair did
+        // not touch would not match the repaired edges next to them.
+        const TopoDS_Shape bare = BRepBuilderAPI_Copy(shape, Standard_True, Standard_False).Shape();
+        const TopoDS_Shape fixed = repaired(bare, 1e-4);
+        BRepMesh_IncrementalMesh again(fixed, linear_deflection, Standard_False,
+                                       angular_deflection, Standard_True);
+        if (remesh_missing(fixed, linear_deflection, angular_deflection) == 0) {
+          meshed_shape = fixed;
+        } else {
+          fan_missing(shape, linear_deflection, angular_deflection);
+        }
+      }
     }
     Qoob3dMesh out;
-    tessellate_faces(shape, out);
-    extract_edges(shape, linear_deflection, angular_deflection, out);
+    tessellate_faces(meshed_shape, out);
+    extract_edges(meshed_shape, linear_deflection, angular_deflection, out);
     return out;
   });
 }
@@ -405,6 +678,70 @@ TopoDS_Shape unify(const TopoDS_Shape &s) {
   return u.Shape();
 }
 
+// Precision of the automatic repair after booleans on freeform faces (mm).
+constexpr double HEAL_TOLERANCE = 1e-4;
+
+// Whether any face of the shapes is not a plane, cylinder, cone, sphere or
+// torus (B-spline, Bezier, offset, swept surfaces).
+bool has_freeform(const TopTools_ListOfShape &shapes) {
+  for (TopTools_ListIteratorOfListOfShape it(shapes); it.More(); it.Next()) {
+    for (TopExp_Explorer f(it.Value(), TopAbs_FACE); f.More(); f.Next()) {
+      switch (BRepAdaptor_Surface(TopoDS::Face(f.Current()), Standard_False).GetType()) {
+      case GeomAbs_Plane:
+      case GeomAbs_Cylinder:
+      case GeomAbs_Cone:
+      case GeomAbs_Sphere:
+      case GeomAbs_Torus:
+        break;
+      default:
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Fuzzy value for booleans on freeform shapes: twice the largest edge
+// tolerance of the inputs, at least 1e-5 mm, at most 1e-3 mm. Measured on
+// an imported hull: exact cuts at a plane through edges of the hull lost
+// half of a slab ("valid", and common + cut still added up), fuzzy ones
+// matched the integral of 2D sections; but the fuzzy union of the hull
+// with its deck was destroyed where the exact one was right. So cuts and
+// commons use it first, unions only as the last attempt (AG-SC-25).
+double freeform_fuzzy(const TopTools_ListOfShape &a, const TopTools_ListOfShape &b) {
+  double tol = 0.0;
+  for (const TopTools_ListOfShape *list : {&a, &b}) {
+    for (TopTools_ListIteratorOfListOfShape it(*list); it.More(); it.Next()) {
+      for (TopExp_Explorer e(it.Value(), TopAbs_EDGE); e.More(); e.Next()) {
+        tol = std::max(tol, BRep_Tool::Tolerance(TopoDS::Edge(e.Current())));
+      }
+    }
+  }
+  return std::clamp(2.0 * tol, 1e-5, 1e-3);
+}
+
+// ShapeFix with the precision `tolerance`, then the 2D and 3D curves of
+// every edge made to agree. Measured on cuts through an imported hull:
+// this makes every invalid result valid without changing its volume.
+// ShapeFix_Wireframe (dropping small edges, closing gaps) is left out on
+// purpose: it removed up to 3 % of the volume of the same cuts.
+// It works on a copy: ShapeFix and SameParameter change the faces and edges
+// they fix in place, and a boolean's result shares them with its operands
+// (`heal` with the shape it was given). On an imported hull the repair after
+// one common gave a face of the hull a B-spline surface with poles near
+// 1e100 mm, and every later boolean with that hull returned the whole tool.
+TopoDS_Shape repaired(const TopoDS_Shape &shape, double tolerance) {
+  const TopoDS_Shape copy = BRepBuilderAPI_Copy(shape, Standard_True, Standard_False).Shape();
+  Handle(ShapeFix_Shape) fix = new ShapeFix_Shape(copy);
+  fix->SetPrecision(tolerance);
+  fix->SetMaxTolerance(std::max(tolerance * 10.0, 1e-3));
+  fix->SetMinTolerance(tolerance * 0.1);
+  fix->Perform();
+  TopoDS_Shape fixed = fix->Shape();
+  BRepLib::SameParameter(fixed, tolerance, Standard_True);
+  return unify(fixed);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------- solid modelling
@@ -498,9 +835,9 @@ std::unique_ptr<TopoDS_Shape> qoob3d_revolve(const TopoDS_Shape &faces,
 
 std::unique_ptr<TopoDS_Shape> qoob3d_loft(const TopoDS_Shape &faces,
                                           rust::Slice<const double> start_point,
-                                          rust::Slice<const double> end_point) {
+                                          rust::Slice<const double> end_point, bool ruled) {
   return guarded("loft", [&] {
-    BRepOffsetAPI_ThruSections loft(Standard_True, Standard_True);
+    BRepOffsetAPI_ThruSections loft(Standard_True, ruled ? Standard_True : Standard_False);
     loft.CheckCompatibility(Standard_True);
     if (start_point.size() == 3) {
       loft.AddVertex(
@@ -526,37 +863,67 @@ namespace {
 
 // One BOP for any number of shapes on both sides, in OCCT's parallel mode
 // (AG-PF-01; OSD_ThreadPool, no extra library).
-TopoDS_Shape boolean(const TopTools_ListOfShape &objects, const TopTools_ListOfShape &tools,
-                     uint32_t op) {
-  if (objects.IsEmpty() || tools.IsEmpty()) {
-    throw std::runtime_error("boolean needs shapes on both sides");
+// Same-domain faces merged; on freeform shapes an invalid result repaired.
+// Cuts through freeform faces (imported hulls, smooth lofts) often come
+// back with edges whose 3D and 2D curves disagree: BRepCheck calls them
+// invalid although nothing is missing (AG-SC-25).
+TopoDS_Shape finished(const TopoDS_Shape &raw, bool freeform) {
+  const TopoDS_Shape result = unify(raw);
+  if (freeform && !BRepCheck_Analyzer(result).IsValid()) {
+    const TopoDS_Shape fixed = repaired(result, HEAL_TOLERANCE);
+    if (BRepCheck_Analyzer(fixed).IsValid()) {
+      return fixed;
+    }
   }
-  std::unique_ptr<BRepAlgoAPI_BooleanOperation> bop;
-  const char *failure = nullptr;
+  return result;
+}
+
+std::unique_ptr<BRepAlgoAPI_BooleanOperation> bop_of(uint32_t op, const char *&failure) {
   switch (op) {
   case 0:
-    bop = std::make_unique<BRepAlgoAPI_Fuse>();
     failure = "join failed";
-    break;
+    return std::make_unique<BRepAlgoAPI_Fuse>();
   case 1:
-    bop = std::make_unique<BRepAlgoAPI_Cut>();
     failure = "cut failed";
-    break;
+    return std::make_unique<BRepAlgoAPI_Cut>();
   case 2:
-    bop = std::make_unique<BRepAlgoAPI_Common>();
     failure = "common failed";
-    break;
+    return std::make_unique<BRepAlgoAPI_Common>();
   default:
     throw std::runtime_error("unknown boolean operation");
   }
-  bop->SetRunParallel(Standard_True);
+}
+
+// One BOP for any number of shapes on both sides (AG-SC-05). `fuzzy` > 0
+// counts geometry closer than it as touching, < 0 picks the tolerance of
+// freeform inputs (0 for analytic ones); `parallel` uses OCCT's thread
+// pool (AG-PF-01; OSD_ThreadPool, no extra library).
+TopoDS_Shape boolean(const TopTools_ListOfShape &objects, const TopTools_ListOfShape &tools,
+                     uint32_t op, double fuzzy = 0.0, bool parallel = true) {
+  if (objects.IsEmpty() || tools.IsEmpty()) {
+    throw std::runtime_error("boolean needs shapes on both sides");
+  }
+  const bool freeform = has_freeform(objects) || has_freeform(tools);
+  if (fuzzy < 0.0) {
+    fuzzy = freeform ? freeform_fuzzy(objects, tools) : 0.0;
+  }
+  const char *failure = nullptr;
+  std::unique_ptr<BRepAlgoAPI_BooleanOperation> bop = bop_of(op, failure);
+  bop->SetRunParallel(parallel ? Standard_True : Standard_False);
+  // Operands stay as they are: by default OCCT adds 2D curves to the edges
+  // of its arguments and may raise their tolerances in place, and shapes
+  // share edges with their copies and with the profile they came from.
+  bop->SetNonDestructive(Standard_True);
+  if (fuzzy > 0.0) {
+    bop->SetFuzzyValue(fuzzy);
+  }
   bop->SetArguments(objects);
   bop->SetTools(tools);
   bop->Build();
   if (!bop->IsDone() || bop->HasErrors()) {
     throw std::runtime_error(failure);
   }
-  return unify(bop->Shape());
+  return finished(bop->Shape(), freeform);
 }
 
 // Extent of an outline in the plane z = 0, with a margin.
@@ -671,14 +1038,14 @@ bool punch(const TopTools_ListOfShape &objects, const TopTools_ListOfShape &tool
 } // namespace
 
 std::unique_ptr<TopoDS_Shape> qoob3d_boolean(const TopoDS_Shape &a, const TopoDS_Shape &b,
-                                             uint32_t op) {
+                                             uint32_t op, double fuzzy, bool parallel) {
   return guarded("boolean", [&] {
     // Compounds are argument lists: one BOP for any number of shapes
     // (batched booleans, AG-SC-05), and never a self-interfering compound.
     TopTools_ListOfShape objects, tools;
     flatten(a, objects);
     flatten(b, tools);
-    return own(boolean(objects, tools, op));
+    return own(boolean(objects, tools, op, fuzzy, parallel));
   });
 }
 
@@ -724,11 +1091,21 @@ double qoob3d_distance(const TopoDS_Shape &a, const TopoDS_Shape &b, double max)
   });
 }
 
-double qoob3d_volume(const TopoDS_Shape &shape) {
+double qoob3d_volume(const TopoDS_Shape &shape, double relative_error) {
   return guarded("volume", [&] {
-    GProp_GProps props;
-    BRepGProp::VolumeProperties(shape, props);
-    return props.Mass();
+    GProp_GProps fixed;
+    BRepGProp::VolumeProperties(shape, fixed);
+    if (relative_error <= 0.0) {
+      return fixed.Mass();
+    }
+    // Adaptive integration up to the relative error: the fixed Gauss order
+    // is exact for analytic faces but off by 1 % on the freeform faces of
+    // an imported hull, too much for the plausibility rule (AG-SC-12).
+    GProp_GProps adaptive;
+    const double error =
+        BRepGProp::VolumeProperties(shape, adaptive, relative_error, Standard_False);
+    // A negative error means the adaptive integration gave up.
+    return error < 0.0 ? fixed.Mass() : adaptive.Mass();
   });
 }
 
@@ -1118,17 +1495,144 @@ void qoob3d_write_step(const TopoDS_Shape &shape, rust::Str path) {
   });
 }
 
-std::unique_ptr<TopoDS_Shape> qoob3d_read_step(rust::Str path) {
-  return guarded("read_step", [&] {
-    std::lock_guard<std::mutex> lock(step_mutex);
-    STEPControl_Reader reader;
-    if (reader.ReadFile(std::string(path).c_str()) != IFSelect_RetDone) {
-      throw std::runtime_error("STEP file could not be read");
+namespace {
+
+// The face's own triangles as its triangulation, and its edges as polygons
+// on it, both exact (deflection 0): the mesher reuses them instead of
+// meshing every face again, which took 3 GB for 50 000 faces.
+void attach_triangles(BRep_Builder &builder, const TopoDS_Face &face, const Qoob3dPolyhedron &p,
+                      size_t f, const std::vector<TopoDS_Edge> &edges,
+                      const std::vector<uint32_t> &edge_ids) {
+  std::unordered_map<uint32_t, int> node;
+  const uint32_t first = p.triangle_starts[f], last = p.triangle_starts[f + 1];
+  for (uint32_t i = 3 * first; i < 3 * last; ++i) {
+    node.emplace(p.triangles[i], static_cast<int>(node.size()) + 1);
+  }
+  Handle(Poly_Triangulation) tri =
+      new Poly_Triangulation(static_cast<int>(node.size()), static_cast<int>(last - first),
+                             Standard_True);
+  const gp_Pln plane = BRepAdaptor_Surface(face).Plane();
+  for (const auto &[point, local] : node) {
+    const gp_Pnt at(p.points[3 * point], p.points[3 * point + 1], p.points[3 * point + 2]);
+    double u = 0.0, v = 0.0;
+    ElSLib::Parameters(plane, at, u, v);
+    tri->SetNode(local, at);
+    tri->SetUVNode(local, gp_Pnt2d(u, v));
+  }
+  for (uint32_t t = first; t < last; ++t) {
+    tri->SetTriangle(static_cast<int>(t - first) + 1,
+                     Poly_Triangle(node.at(p.triangles[3 * t]), node.at(p.triangles[3 * t + 1]),
+                                   node.at(p.triangles[3 * t + 2])));
+  }
+  tri->Deflection(0.0);
+  builder.UpdateFace(face, tri);
+  for (const uint32_t id : edge_ids) {
+    const TopoDS_Edge &edge = edges[id];
+    // The edge runs from its first point to its second (`MakeEdge(v1, v2)`).
+    TColStd_Array1OfInteger nodes(1, 2);
+    nodes(1) = node.at(p.edges[2 * id]);
+    nodes(2) = node.at(p.edges[2 * id + 1]);
+    double a = 0.0, b = 0.0;
+    BRep_Tool::Range(edge, a, b);
+    TColStd_Array1OfReal params(1, 2);
+    params(1) = a;
+    params(2) = b;
+    Handle(Poly_PolygonOnTriangulation) polygon = new Poly_PolygonOnTriangulation(nodes, params);
+    polygon->Deflection(0.0);
+    builder.UpdateEdge(edge, polygon, tri, TopLoc_Location());
+  }
+}
+
+} // namespace
+
+std::unique_ptr<TopoDS_Shape> qoob3d_polyhedron(const Qoob3dPolyhedron &p) {
+  return guarded("polyhedron", [&] {
+    BRep_Builder builder;
+    const size_t points = p.points.size() / 3;
+    std::vector<TopoDS_Vertex> vertices(points);
+    auto vertex = [&](uint32_t i) -> const TopoDS_Vertex & {
+      if (i >= points) {
+        throw std::runtime_error("polyhedron: point index out of range");
+      }
+      if (vertices[i].IsNull()) {
+        const gp_Pnt at(p.points[3 * i], p.points[3 * i + 1], p.points[3 * i + 2]);
+        builder.MakeVertex(vertices[i], at, Precision::Confusion());
+      }
+      return vertices[i];
+    };
+    std::vector<TopoDS_Edge> edges;
+    edges.reserve(p.edges.size() / 2);
+    for (size_t e = 0; e + 1 < p.edges.size(); e += 2) {
+      BRepBuilderAPI_MakeEdge make(vertex(p.edges[e]), vertex(p.edges[e + 1]));
+      if (!make.IsDone()) {
+        throw std::runtime_error("polyhedron: an edge could not be built");
+      }
+      edges.push_back(make.Edge());
     }
-    if (reader.TransferRoots() == 0) {
-      throw std::runtime_error("STEP file contains no shape");
+    auto face_of = [&](size_t f) {
+      const gp_Pnt origin(p.planes[6 * f], p.planes[6 * f + 1], p.planes[6 * f + 2]);
+      const gp_Dir normal(p.planes[6 * f + 3], p.planes[6 * f + 4], p.planes[6 * f + 5]);
+      TopoDS_Face face;
+      builder.MakeFace(face, new Geom_Plane(gp_Pln(origin, normal)), Precision::Confusion());
+      TopTools_ListOfShape face_edges;
+      std::vector<uint32_t> edge_ids;
+      for (uint32_t l = p.face_starts[f]; l < p.face_starts[f + 1]; ++l) {
+        TopoDS_Wire wire;
+        builder.MakeWire(wire);
+        for (uint32_t r = p.loop_starts[l]; r < p.loop_starts[l + 1]; ++r) {
+          const uint32_t ref = p.loops[r];
+          if ((ref >> 1) >= edges.size()) {
+            throw std::runtime_error("polyhedron: edge index out of range");
+          }
+          const TopoDS_Edge &edge = edges[ref >> 1];
+          builder.Add(wire, edge.Oriented((ref & 1) ? TopAbs_REVERSED : TopAbs_FORWARD));
+          face_edges.Append(edge);
+          edge_ids.push_back(ref >> 1);
+        }
+        wire.Closed(Standard_True);
+        builder.Add(face, wire);
+      }
+      // Without stored 2D curves OCCT projects every edge again whenever it
+      // is asked about the face (see `punch`).
+      BRepLib::BuildPCurveForEdgesOnPlane(face_edges, face);
+      attach_triangles(builder, face, p, f, edges, edge_ids);
+      // Points of a nearly planar face lie up to this far from its plane.
+      const double tolerance = p.tolerances[f];
+      if (tolerance > Precision::Confusion()) {
+        builder.UpdateFace(face, tolerance);
+        for (TopExp_Explorer e(face, TopAbs_EDGE); e.More(); e.Next()) {
+          builder.UpdateEdge(TopoDS::Edge(e.Current()), tolerance);
+        }
+        for (TopExp_Explorer v(face, TopAbs_VERTEX); v.More(); v.Next()) {
+          builder.UpdateVertex(TopoDS::Vertex(v.Current()), tolerance);
+        }
+      }
+      return face;
+    };
+    TopoDS_Compound all;
+    builder.MakeCompound(all);
+    const size_t solids = p.solid_starts.empty() ? 0 : p.solid_starts.size() - 1;
+    for (size_t s = 0; s < solids; ++s) {
+      TopoDS_Solid solid;
+      builder.MakeSolid(solid);
+      // The outside first, then the cavities; their faces already point
+      // away from the material, into the void.
+      for (uint32_t h = p.solid_starts[s]; h < p.solid_starts[s + 1]; ++h) {
+        TopoDS_Shell shell;
+        builder.MakeShell(shell);
+        for (uint32_t f = p.shell_starts[h]; f < p.shell_starts[h + 1]; ++f) {
+          builder.Add(shell, face_of(f));
+        }
+        shell.Closed(Standard_True);
+        builder.Add(solid, shell);
+      }
+      builder.Add(all, solid);
     }
-    return own(reader.OneShape());
+    if (solids == 1) {
+      TopoDS_Iterator only(all);
+      return own(only.Value());
+    }
+    return own(all);
   });
 }
 
@@ -1280,9 +1784,15 @@ gp_Dir outward(const TopoDS_Face &face, const gp_Pln &plane) {
   return face.Orientation() == TopAbs_REVERSED ? n.Reversed() : n;
 }
 
+// How far above the lowest point a face still lies on the bed (mm): the
+// cut face of a freeform body lies a few nanometres above the lowest point
+// its curved faces report (20 nm measured on an imported hull), and no
+// printer resolves a micrometre.
+constexpr double BED_TOLERANCE = 1e-3;
+
 // Whether a planar face with the outward normal `n` lies on the bed z = `bed`.
 bool on_bed(const gp_Pln &plane, const gp_Dir &n, double bed) {
-  return n.Z() < -(1.0 - 1e-9) && std::abs(plane.Location().Z() - bed) < 1e-6;
+  return n.Z() < -(1.0 - 1e-9) && std::abs(plane.Location().Z() - bed) < BED_TOLERANCE;
 }
 
 // Share of a triangle where a function that is linear on it and has the
@@ -1465,7 +1975,21 @@ std::unique_ptr<TopoDS_Shape> qoob3d_section(const TopoDS_Shape &shape,
                                          hi.Y() + m)
                      .Face());
     flatten(local, solids);
-    return own(faces_of(boolean(plane, solids, 2), "the plane does not cut the shape"));
+    // Like every common with a freeform body (AG-SC-25): with the fuzzy
+    // value of its tolerance first, then serially, then exact; the plane
+    // of a section often runs through edges of the body (AG-SC-21).
+    const std::pair<double, bool> attempts[] = {{-1.0, true}, {-1.0, false}, {0.0, false}};
+    std::string failure = "the plane does not cut the shape";
+    for (const auto &[fuzzy, parallel] : attempts) {
+      try {
+        return own(faces_of(boolean(plane, solids, 2, fuzzy, parallel),
+                            "the plane does not cut the shape"));
+      } catch (const std::runtime_error &e) {
+        failure = e.what();
+      } catch (const Standard_Failure &) {
+      }
+    }
+    throw std::runtime_error(failure);
   });
 }
 
@@ -1526,5 +2050,295 @@ double qoob3d_overhang_area(const TopoDS_Shape &shape, double max_angle) {
       }
     }
     return total;
+  });
+}
+
+// ---------------------------------------------------------------- robustness and repair
+
+namespace {
+
+uint32_t defect_kind(TopAbs_ShapeEnum type) {
+  switch (type) {
+  case TopAbs_VERTEX:
+    return 0;
+  case TopAbs_EDGE:
+    return 1;
+  case TopAbs_WIRE:
+    return 2;
+  case TopAbs_FACE:
+    return 3;
+  case TopAbs_SHELL:
+    return 4;
+  default:
+    return 5;
+  }
+}
+
+// Appends every status other than "no error" of `result` (on the shape
+// itself and in the context of other shapes) to `found`.
+void statuses_of(const Handle(BRepCheck_Result) & result, std::vector<std::string> &found) {
+  auto add = [&](const BRepCheck_ListOfStatus &list) {
+    for (BRepCheck_ListIteratorOfListOfStatus it(list); it.More(); it.Next()) {
+      if (it.Value() == BRepCheck_NoError) {
+        continue;
+      }
+      std::ostringstream name;
+      BRepCheck::Print(it.Value(), name);
+      std::string text = name.str();
+      while (!text.empty() && (text.back() == '\n' || text.back() == ' ')) {
+        text.pop_back();
+      }
+      if (std::find(found.begin(), found.end(), text) == found.end()) {
+        found.push_back(text);
+      }
+    }
+  };
+  add(result->Status());
+  for (result->InitContextIterator(); result->MoreShapeInContext();
+       result->NextShapeInContext()) {
+    add(result->StatusOnShape());
+  }
+}
+
+} // namespace
+
+Qoob3dDefects qoob3d_defects(const TopoDS_Shape &shape, uint32_t limit) {
+  return guarded("defects", [&] {
+    Qoob3dDefects out;
+    BRepCheck_Analyzer check(shape, Standard_True);
+    if (check.IsValid()) {
+      return out;
+    }
+    const TopAbs_ShapeEnum types[] = {TopAbs_SOLID, TopAbs_SHELL, TopAbs_FACE,
+                                      TopAbs_WIRE,  TopAbs_EDGE,  TopAbs_VERTEX};
+    for (TopAbs_ShapeEnum type : types) {
+      TopTools_IndexedMapOfShape map;
+      TopExp::MapShapes(shape, type, map);
+      for (int i = 1; i <= map.Extent() && out.indices.size() < limit; ++i) {
+        const Handle(BRepCheck_Result) &result = check.Result(map(i));
+        if (result.IsNull()) {
+          continue;
+        }
+        std::vector<std::string> found;
+        statuses_of(result, found);
+        if (found.empty()) {
+          continue;
+        }
+        std::string text;
+        for (const std::string &f : found) {
+          text += (text.empty() ? "" : ", ") + f;
+        }
+        Bnd_Box box;
+        BRepBndLib::Add(map(i), box);
+        double b[6] = {0, 0, 0, 0, 0, 0};
+        if (!box.IsVoid()) {
+          box.Get(b[0], b[1], b[2], b[3], b[4], b[5]);
+        }
+        out.kinds.push_back(defect_kind(type));
+        out.indices.push_back(static_cast<uint32_t>(i));
+        out.statuses.push_back(rust::String(text));
+        for (double v : b) {
+          out.bounds.push_back(v);
+        }
+      }
+    }
+    if (out.indices.empty()) {
+      // The analyser says invalid but reports no element (e.g. a
+      // self-intersecting shell found only in the context of the solid).
+      out.kinds.push_back(5);
+      out.indices.push_back(0);
+      out.statuses.push_back(rust::String("invalid, no element reported"));
+      Bnd_Box box;
+      BRepBndLib::Add(shape, box);
+      double b[6] = {0, 0, 0, 0, 0, 0};
+      if (!box.IsVoid()) {
+        box.Get(b[0], b[1], b[2], b[3], b[4], b[5]);
+      }
+      for (double v : b) {
+        out.bounds.push_back(v);
+      }
+    }
+    return out;
+  });
+}
+
+std::unique_ptr<TopoDS_Shape> qoob3d_heal(const TopoDS_Shape &shape, double tolerance) {
+  return guarded("heal", [&] {
+    const TopoDS_Shape fixed = repaired(shape, tolerance);
+    TopExp_Explorer solid(fixed, TopAbs_SOLID);
+    if (!solid.More()) {
+      throw std::runtime_error("the healed shape has no solid");
+    }
+    return own(fixed);
+  });
+}
+
+// Every solid of a STEP file with the name of its STEP entity (`names[i]`
+// belongs to the i-th solid of the returned compound in TopExp order).
+std::unique_ptr<TopoDS_Shape> qoob3d_read_step_named(rust::Str path, rust::Vec<rust::String> &names) {
+  return guarded("read_step", [&] {
+    std::lock_guard<std::mutex> lock(step_mutex);
+    STEPControl_Reader reader;
+    if (reader.ReadFile(std::string(path).c_str()) != IFSelect_RetDone) {
+      throw std::runtime_error("STEP file could not be read");
+    }
+    if (reader.TransferRoots() == 0) {
+      throw std::runtime_error("STEP file contains no shape");
+    }
+    const TopoDS_Shape all = reader.OneShape();
+    // Names from the transfer table: every STEP item that became a solid,
+    // keyed by the solid's geometry (assemblies place it with a location).
+    const Handle(Transfer_TransientProcess) process = reader.WS()->TransferReader()->TransientProcess();
+    std::unordered_map<const TopoDS_TShape *, std::string> named;
+    for (int i = 1; !process.IsNull() && i <= process->NbMapped(); ++i) {
+      const Handle(StepRepr_RepresentationItem) item =
+          Handle(StepRepr_RepresentationItem)::DownCast(process->Mapped(i));
+      if (item.IsNull() || item->Name().IsNull()) {
+        continue;
+      }
+      const TopoDS_Shape result = TransferBRep::ShapeResult(process->MapItem(i));
+      for (TopExp_Explorer s(result, TopAbs_SOLID); s.More(); s.Next()) {
+        named.emplace(s.Current().TShape().get(), item->Name()->ToCString());
+      }
+    }
+    BRep_Builder bb;
+    TopoDS_Compound solids;
+    bb.MakeCompound(solids);
+    TopTools_IndexedMapOfShape map;
+    TopExp::MapShapes(all, TopAbs_SOLID, map);
+    for (int i = 1; i <= map.Extent(); ++i) {
+      const auto found = named.find(map(i).TShape().get());
+      names.push_back(rust::String(found == named.end() ? std::string() : found->second));
+      bb.Add(solids, map(i));
+    }
+    return own(solids);
+  });
+}
+
+// The solids with the given 0-based indices (TopExp order) as a compound.
+std::unique_ptr<TopoDS_Shape> qoob3d_pick_solids(const TopoDS_Shape &shape,
+                                                 rust::Slice<const uint32_t> indices) {
+  return guarded("pick_solids", [&] {
+    TopTools_IndexedMapOfShape map;
+    TopExp::MapShapes(shape, TopAbs_SOLID, map);
+    BRep_Builder bb;
+    TopoDS_Compound out;
+    bb.MakeCompound(out);
+    for (uint32_t i : indices) {
+      if (i >= static_cast<uint32_t>(map.Extent())) {
+        throw std::runtime_error("solid index out of range");
+      }
+      bb.Add(out, map(static_cast<int>(i) + 1));
+    }
+    return own(out);
+  });
+}
+
+std::unique_ptr<TopoDS_Shape> qoob3d_profile_outline(const TopoDS_Shape &faces) {
+  return guarded("outline", [&] {
+    BRep_Builder bb;
+    TopoDS_Compound out;
+    bb.MakeCompound(out);
+    bool any = false;
+    for (TopExp_Explorer f(faces, TopAbs_FACE); f.More(); f.Next()) {
+      const TopoDS_Face face = TopoDS::Face(f.Current());
+      const TopoDS_Wire outer = BRepTools::OuterWire(face);
+      BRepBuilderAPI_MakeFace filled(BRepAdaptor_Surface(face).Plane(), outer, Standard_True);
+      if (!filled.IsDone()) {
+        throw std::runtime_error("an outline could not be filled");
+      }
+      TopoDS_Face result = filled.Face();
+      if (face.Orientation() == TopAbs_REVERSED) {
+        result.Reverse();
+      }
+      bb.Add(out, result);
+      any = true;
+    }
+    if (!any) {
+      throw std::runtime_error("the profile has no region");
+    }
+    return own(out);
+  });
+}
+
+std::unique_ptr<TopoDS_Shape> qoob3d_fill_voids(const TopoDS_Shape &shape) {
+  return guarded("fill_voids", [&] {
+    BRep_Builder bb;
+    TopoDS_Compound out;
+    bb.MakeCompound(out);
+    bool any = false;
+    for (TopExp_Explorer s(shape, TopAbs_SOLID); s.More(); s.Next()) {
+      const TopoDS_Solid solid = TopoDS::Solid(s.Current());
+      const TopoDS_Shell outer = BRepClass3d::OuterShell(solid);
+      if (outer.IsNull()) {
+        throw std::runtime_error("a solid has no outer shell");
+      }
+      TopoDS_Solid filled;
+      bb.MakeSolid(filled);
+      bb.Add(filled, outer);
+      bb.Add(out, filled);
+      any = true;
+    }
+    if (!any) {
+      throw std::runtime_error("the shape has no solid");
+    }
+    return own(out);
+  });
+}
+
+std::unique_ptr<TopoDS_Shape> qoob3d_offset_shape(const TopoDS_Shape &shape, double distance) {
+  return guarded("offset", [&] {
+    BRepOffsetAPI_MakeOffsetShape offset;
+    offset.PerformByJoin(shape, distance, 1e-6, BRepOffset_Skin, Standard_False, Standard_False,
+                         GeomAbs_Arc);
+    if (!offset.IsDone()) {
+      throw std::runtime_error("the offset failed");
+    }
+    TopoDS_Shape result = offset.Shape();
+    if (result.ShapeType() == TopAbs_SHELL) {
+      BRep_Builder bb;
+      TopoDS_Solid solid;
+      bb.MakeSolid(solid);
+      bb.Add(solid, result);
+      result = solid;
+    }
+    TopExp_Explorer solid(result, TopAbs_SOLID);
+    if (!solid.More()) {
+      throw std::runtime_error("the offset has no solid");
+    }
+    return own(result);
+  });
+}
+
+// Height map: the highest z where a vertical line through each grid point
+// meets the shape (NaN where it misses). Row-major, `nx` points per row
+// from (x0, y0) in steps of dx, `ny` rows in steps of dy. One intersector
+// for all lines: loading it is what makes single rays slow.
+rust::Vec<double> qoob3d_heights(const TopoDS_Shape &shape, double x0, double y0, double dx,
+                                 double dy, uint32_t nx, uint32_t ny) {
+  return guarded("heights", [&] {
+    IntCurvesFace_ShapeIntersector inter;
+    inter.Load(shape, 1e-7);
+    Bnd_Box box;
+    BRepBndLib::Add(shape, box);
+    const double top = box.IsVoid() ? 0.0 : box.CornerMax().Z() + 1.0;
+    rust::Vec<double> out;
+    for (uint32_t j = 0; j < ny; ++j) {
+      for (uint32_t i = 0; i < nx; ++i) {
+        const gp_Lin line(gp_Pnt(x0 + i * dx, y0 + j * dy, top), gp_Dir(0.0, 0.0, -1.0));
+        inter.Perform(line, 0.0, RealLast());
+        double best = std::nan("");
+        if (inter.IsDone()) {
+          for (int k = 1; k <= inter.NbPnt(); ++k) {
+            const double z = inter.Pnt(k).Z();
+            if (std::isnan(best) || z > best) {
+              best = z;
+            }
+          }
+        }
+        out.push_back(best);
+      }
+    }
+    return out;
   });
 }

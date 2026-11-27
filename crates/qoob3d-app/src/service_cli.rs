@@ -79,8 +79,11 @@ fn request(command: &Command) -> anyhow::Result<Value> {
             let body = json!({"parts": parts, "wait_s": wait});
             client.call("POST", "/build", Some(&body), timeout)
         }
-        Command::Export { parts, format } => {
-            let body = json!({"parts": parts, "format": format});
+        Command::Export { parts, format, kit, bed_mm, project, multicolor, printer } => {
+            let body = json!({
+                "parts": parts, "format": format, "kit": kit, "bed_mm": bed_mm,
+                "project": project, "multicolor": multicolor, "printer": printer,
+            });
             client.call("POST", "/export", Some(&body), EXPORT_TIMEOUT)
         }
         Command::Check { names } => {

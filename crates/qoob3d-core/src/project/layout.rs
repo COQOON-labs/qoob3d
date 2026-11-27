@@ -17,6 +17,8 @@ pub const SERVICE_JSON: &str = "service.json";
 pub const SERVICE_LOCK: &str = "service.lock";
 /// Build results per part, inside [`DATA_DIR`].
 pub const CACHE_DIR: &str = "cache";
+/// Meshes of throwaway scripts for pictures, inside [`DATA_DIR`] (AG-MC-12).
+pub const RUN_DIR: &str = "run";
 
 /// `<dir>/.qoob3d`.
 pub fn data_dir(dir: &Path) -> PathBuf {
@@ -26,6 +28,11 @@ pub fn data_dir(dir: &Path) -> PathBuf {
 /// `<dir>/.qoob3d/service.json`.
 pub fn service_json(dir: &Path) -> PathBuf {
     data_dir(dir).join(SERVICE_JSON)
+}
+
+/// `<dir>/.qoob3d/run/<job>`: meshes of the shapes a throwaway script showed.
+pub fn run_dir(dir: &Path, job: u64) -> PathBuf {
+    data_dir(dir).join(RUN_DIR).join(job.to_string())
 }
 
 /// `<dir>/.qoob3d/cache/<part>`.

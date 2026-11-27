@@ -10,7 +10,7 @@ use std::rc::Rc;
 use cxx::UniquePtr;
 use rhai::{Array, Dynamic, Engine, EvalAltResult, Map, Position};
 
-use super::{RunOutput, Shape, compound, inside_project, profile, select};
+use super::{RunOutput, Shape, compound, profile, select};
 use crate::KernelError;
 use crate::occt::ffi;
 use crate::occt::{self, occ};
@@ -22,6 +22,12 @@ pub(super) type Rr<T> = Result<T, Box<EvalAltResult>>;
 pub(super) struct GeometryFault {
     pub(super) function: &'static str,
     pub(super) message: String,
+}
+
+impl std::fmt::Display for GeometryFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} failed: {}", self.function, self.message)
+    }
 }
 
 /// Results with less volume are empty (AG-SC-12), mm³.
@@ -150,34 +156,147 @@ pub(super) enum Expect {
     Less(f64),
     /// At least the largest input (union).
     AtLeast(f64),
+    /// A union: at least the largest input, and its box covers the boxes of
+    /// all inputs. A union of freeform bodies once dropped a whole input
+    /// (a deck lid) while its volume stayed above the largest one.
+    Covers { largest: f64, min: [f64; 3], max: [f64; 3] },
+}
+
+/// The box around all `shapes` (`None` if one has none).
+fn joint_bounds(shapes: &[Shape]) -> Option<([f64; 3], [f64; 3])> {
+    shapes.iter().try_fold(([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]), |(lo, hi), s| {
+        let (a, b) = s.bounds().ok()?;
+        Some((std::array::from_fn(|i| lo[i].min(a[i])), std::array::from_fn(|i| hi[i].max(b[i]))))
+    })
+}
+
+/// Whether the box of `result` reaches the box `min`..`max` within a
+/// tolerance relative to its size.
+fn covers(result: &Shape, min: [f64; 3], max: [f64; 3]) -> Result<(), String> {
+    let (lo, hi) = result.bounds().map_err(|e| e.to_string())?;
+    let size = (0..3).map(|i| max[i] - min[i]).fold(0.0, f64::max);
+    let tol = 1e-6 * size + 1e-3;
+    for i in 0..3 {
+        if lo[i] > min[i] + tol || hi[i] < max[i] - tol {
+            let axis = ["x", "y", "z"][i];
+            return Err(format!(
+                "the result reaches {axis} {} to {}, its inputs {} to {}: part of an input was lost",
+                lo[i], hi[i], min[i], max[i]
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The plausibility rule AG-SC-12: OCCT can return "valid" results that are
 /// empty or unchanged (M0).
-pub(super) fn plausible(function: &'static str, result: Shape, expect: Expect) -> Rr<Shape> {
+pub(super) fn plausible(function: &'static str, result: Shape, expect: &Expect) -> Rr<Shape> {
     let v = result.volume();
     if v.is_nan() || v <= MIN_VOLUME_MM3 {
         return Err(geometry(function, format!("the result has no volume ({v} mm³)")));
     }
-    match expect {
+    match *expect {
         Expect::Less(before) if v >= before * (1.0 - VOLUME_REL_TOL) => Err(geometry(
             function,
             format!("removed no material ({before} -> {v} mm³); does the tool overlap the body?"),
         )),
-        Expect::AtLeast(largest) if v < largest * (1.0 - VOLUME_REL_TOL) => Err(geometry(
-            function,
-            format!("the result ({v} mm³) is smaller than an input ({largest} mm³)"),
-        )),
+        Expect::AtLeast(largest) | Expect::Covers { largest, .. }
+            if v < largest * (1.0 - VOLUME_REL_TOL) =>
+        {
+            Err(geometry(
+                function,
+                format!("the result ({v} mm³) is smaller than an input ({largest} mm³)"),
+            ))
+        }
+        Expect::Covers { min, max, .. } => {
+            covers(&result, min, max).map_err(|m| geometry(function, m))?;
+            Ok(result)
+        }
         _ => Ok(result),
     }
 }
 
-fn boolean(function: &'static str, a: &Shape, b: &Shape, op: u32) -> Rr<Shape> {
-    made(function, ffi::qoob3d_boolean(a.get(), b.get(), op))
+/// Options of the booleans (`union`, `cut`, `common`).
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct BoolOptions {
+    /// Geometry closer than this (mm) counts as touching, 0 is exact;
+    /// `None` leaves it to [`boolean`].
+    pub(super) fuzzy: Option<f64>,
+}
+
+impl BoolOptions {
+    fn of(map: &Map, function: &str) -> Rr<Self> {
+        let fuzzy = options(map, function, &["fuzzy"])?;
+        let fuzzy = match fuzzy.get("fuzzy") {
+            Some(v) => Some(non_negative(v, &format!("{function}: fuzzy"))?),
+            None => None,
+        };
+        Ok(Self { fuzzy })
+    }
+}
+
+/// The keys of an options map, checked against the `known` ones.
+pub(super) fn options(map: &Map, function: &str, known: &[&str]) -> Rr<Map> {
+    if let Some(key) = map.keys().find(|k| !known.contains(&k.as_str())) {
+        return Err(runtime(format!(
+            "{function}: unknown option {key:?}; known: {}",
+            known.join(", ")
+        )));
+    }
+    Ok(map.clone())
+}
+
+/// The bool option `key` of an options map (false when it is missing).
+pub(super) fn flag(map: &Map, key: &str, function: &str) -> Rr<bool> {
+    match map.get(key) {
+        None => Ok(false),
+        Some(v) => v
+            .as_bool()
+            .map_err(|t| runtime(format!("{function}: {key} must be true or false, got {t}"))),
+    }
+}
+
+/// `fuzzy` for `qoob3d_boolean`: the tolerance of freeform inputs, exact
+/// for analytic ones.
+pub(super) const AUTO_FUZZY: f64 = -1.0;
+
+/// One BOP, checked by the plausibility rule (AG-SC-12, AG-SC-25). Without
+/// a `fuzzy` option, cuts and commons run with the tolerance of freeform
+/// inputs and unions exactly (measured on an imported hull, see
+/// `freeform_fuzzy` in the C++ wrappers). A failed or implausible result
+/// is computed again serially, and a union finally with the fuzzy value;
+/// the first error is the one reported.
+pub(super) fn boolean(
+    function: &'static str,
+    a: &Shape,
+    b: &Shape,
+    op: u32,
+    expect: &Expect,
+    opts: BoolOptions,
+) -> Rr<Shape> {
+    let run = |fuzzy: f64, parallel: bool| -> Rr<Shape> {
+        let result = made(function, ffi::qoob3d_boolean(a.get(), b.get(), op, fuzzy, parallel))?;
+        plausible(function, result, expect)
+    };
+    let fuzzy = opts.fuzzy.unwrap_or(if op == FUSE { 0.0 } else { AUTO_FUZZY });
+    let first = match run(fuzzy, true) {
+        Ok(r) => return Ok(r),
+        Err(e) => e,
+    };
+    if let Ok(r) = run(fuzzy, false) {
+        return Ok(r);
+    }
+    if opts.fuzzy.is_none()
+        && op == FUSE
+        && let Ok(r) = run(AUTO_FUZZY, false)
+    {
+        return Ok(r);
+    }
+    Err(first)
 }
 
 /// Union of all parts as one OCCT operation (AG-SC-05).
-fn fuse(function: &'static str, parts: &[Shape]) -> Rr<Shape> {
+fn fuse(function: &'static str, parts: &[Shape], opts: BoolOptions) -> Rr<Shape> {
     let Some((first, rest)) = parts.split_first() else {
         return Err(runtime(format!("{function} needs at least one shape")));
     };
@@ -186,17 +305,25 @@ fn fuse(function: &'static str, parts: &[Shape]) -> Rr<Shape> {
     }
     let tools = occt(function, compound(rest))?;
     let largest = parts.iter().map(Shape::volume).fold(0.0, f64::max);
-    plausible(function, boolean(function, first, &tools, FUSE)?, Expect::AtLeast(largest))
+    let expect = match joint_bounds(parts) {
+        Some((min, max)) => Expect::Covers { largest, min, max },
+        None => Expect::AtLeast(largest),
+    };
+    boolean(function, first, &tools, FUSE, &expect, opts)
 }
 
 /// `a` minus all tools as one OCCT operation (AG-SC-05).
-fn cut(a: &Shape, tools: &[Shape]) -> Rr<Shape> {
+fn cut(a: &Shape, tools: &[Shape], opts: BoolOptions) -> Rr<Shape> {
     let tool = match tools {
         [] => return Err(runtime("cut needs at least one tool")),
         [one] => one.clone(),
         many => occt("cut", compound(many))?,
     };
-    plausible("cut", boolean("cut", a, &tool, CUT)?, Expect::Less(a.volume()))
+    boolean("cut", a, &tool, CUT, &Expect::Less(a.volume()), opts)
+}
+
+fn common(a: &Shape, b: &Shape, opts: BoolOptions) -> Rr<Shape> {
+    boolean("common", a, b, COMMON, &Expect::Material, opts)
 }
 
 fn transform(function: &'static str, s: &Shape, kind: u32, params: &[f64]) -> Rr<Shape> {
@@ -219,6 +346,11 @@ pub(super) fn register(
     project: Option<PathBuf>,
 ) {
     engine.register_type_with_name::<Shape>("Shape");
+    // A geometry error caught with `catch (e)` reads as its message, not as
+    // the name of the Rust type (AG-SC-03).
+    engine.register_type_with_name::<GeometryFault>("GeometryError");
+    engine.register_fn("to_string", |f: &mut GeometryFault| f.to_string());
+    engine.register_fn("to_debug", |f: &mut GeometryFault| f.to_string());
     register_output(engine, output, project);
     register_solids(engine);
     register_screw_holes(engine);
@@ -228,6 +360,7 @@ pub(super) fn register(
     register_print_analysis(engine);
     profile::register(engine);
     select::register(engine);
+    super::solid_ops::register(engine);
 }
 
 fn register_output(engine: &mut Engine, output: &Rc<RefCell<RunOutput>>, project: Option<PathBuf>) {
@@ -240,14 +373,8 @@ fn register_output(engine: &mut Engine, output: &Rc<RefCell<RunOutput>>, project
         shown.borrow_mut().shapes.push((name, s));
         Ok(())
     });
-    engine.register_fn("import_step", move |path: &str| -> Rr<Shape> {
-        let Some(root) = &project else {
-            return Err(runtime("import_step needs a project folder"));
-        };
-        let file = inside_project(root, path).map_err(runtime)?;
-        let file = file.to_str().ok_or_else(|| runtime(format!("{path:?} is not UTF-8")))?;
-        made("import_step", ffi::qoob3d_read_step(file))
-    });
+    super::imports::register(engine, output, project.clone());
+    super::text::register(engine, output, project);
 }
 
 fn register_solids(engine: &mut Engine) {
@@ -342,15 +469,38 @@ fn register_screw_holes(engine: &mut Engine) {
 }
 
 fn register_booleans(engine: &mut Engine) {
-    engine.register_fn("+", |a: Shape, b: Shape| fuse("union", &[a, b]));
-    engine.register_fn("-", |a: Shape, b: Shape| cut(&a, &[b]));
-    engine.register_fn("&", |a: Shape, b: Shape| -> Rr<Shape> {
-        plausible("common", boolean("common", &a, &b, COMMON)?, Expect::Material)
+    let exact = BoolOptions::default();
+    engine.register_fn("+", move |a: Shape, b: Shape| fuse("union", &[a, b], exact));
+    engine.register_fn("-", move |a: Shape, b: Shape| cut(&a, &[b], exact));
+    engine.register_fn("&", move |a: Shape, b: Shape| common(&a, &b, exact));
+    engine.register_fn("union", move |parts: Array| {
+        fuse("union", &shapes_of(&parts, "union: element")?, exact)
     });
-    engine
-        .register_fn("union", |parts: Array| fuse("union", &shapes_of(&parts, "union: element")?));
-    engine.register_fn("cut", |a: Shape, tools: Array| cut(&a, &shapes_of(&tools, "cut: tool")?));
-    engine.register_fn("cut", |a: Shape, tool: Shape| cut(&a, &[tool]));
+    engine.register_fn("union", |parts: Array, o: Map| -> Rr<Shape> {
+        fuse("union", &shapes_of(&parts, "union: element")?, BoolOptions::of(&o, "union")?)
+    });
+    engine.register_fn("cut", move |a: Shape, tools: Array| {
+        cut(&a, &shapes_of(&tools, "cut: tool")?, exact)
+    });
+    engine.register_fn("cut", move |a: Shape, tool: Shape| cut(&a, &[tool], exact));
+    engine.register_fn("cut", |a: Shape, tools: Array, o: Map| -> Rr<Shape> {
+        cut(&a, &shapes_of(&tools, "cut: tool")?, BoolOptions::of(&o, "cut")?)
+    });
+    engine.register_fn("cut", |a: Shape, tool: Shape, o: Map| -> Rr<Shape> {
+        cut(&a, &[tool], BoolOptions::of(&o, "cut")?)
+    });
+    engine.register_fn("common", move |a: Shape, b: Shape| common(&a, &b, exact));
+    engine.register_fn("common", |a: Shape, b: Shape, o: Map| -> Rr<Shape> {
+        common(&a, &b, BoolOptions::of(&o, "common")?)
+    });
+    // Several shapes as one without a boolean: they keep their own volumes.
+    engine.register_fn("group", |parts: Array| -> Rr<Shape> {
+        let shapes = shapes_of(&parts, "group: element")?;
+        if shapes.is_empty() {
+            return Err(runtime("group needs at least one shape"));
+        }
+        occt("group", compound(&shapes))
+    });
 }
 
 fn register_transforms(engine: &mut Engine) {
@@ -388,7 +538,7 @@ fn register_transforms(engine: &mut Engine) {
                 transform("linear", &s, TRANSLATE, &[k * dx, k * dy, k * dz])
             })
             .collect::<Rr<Vec<_>>>()?;
-        fuse("linear", &copies)
+        fuse("linear", &copies, BoolOptions::default())
     });
     engine.register_fn("polar", |s: Shape, n: Dynamic, total: Dynamic| -> Rr<Shape> {
         let n = count(&n, "polar: n")?;
@@ -401,7 +551,7 @@ fn register_transforms(engine: &mut Engine) {
                 transform("polar", &s, ROTATE, &[0.0, 0.0, 1.0, (k as f64 * step).to_radians()])
             })
             .collect::<Rr<Vec<_>>>()?;
-        fuse("polar", &copies)
+        fuse("polar", &copies, BoolOptions::default())
     });
 }
 

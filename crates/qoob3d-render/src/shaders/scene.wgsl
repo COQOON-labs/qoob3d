@@ -69,12 +69,14 @@ fn fs_background(in: BgOut) -> @location(0) vec4<f32> {
 struct MeshIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    @location(2) color: vec4<f32>,
 };
 
 struct MeshOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) world_pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    @location(2) color: vec4<f32>,
 };
 
 @vertex
@@ -83,6 +85,7 @@ fn vs_mesh(in: MeshIn) -> MeshOut {
     out.pos = g.view_proj * vec4<f32>(in.position, 1.0);
     out.world_pos = in.position;
     out.normal = in.normal;
+    out.color = in.color;
     return out;
 }
 
@@ -111,7 +114,9 @@ fn fs_mesh(in: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4
     let h = normalize(key + v);
     let spec = pow(max(dot(n, h), 0.0), 64.0) * 0.12;
 
-    let color = g.body_color.rgb * (ambient + diffuse) + vec3<f32>(spec);
+    // A part's own colour (alpha 1) replaces the theme's body colour.
+    let base = mix(g.body_color.rgb, in.color.rgb, in.color.a);
+    let color = base * (ambient + diffuse) + vec3<f32>(spec);
     return vec4<f32>(color, 1.0);
 }
 

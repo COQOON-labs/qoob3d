@@ -7,7 +7,9 @@ service builds them. Units are mm, angles degrees, +Z is up, the print bed is z 
 
 - `qoob3d.toml` – project name, limits (time, memory), workers.
 - `parts/*.rhai` – parts: `part("Name", #{ depends: [..] }, |deps| { … shape })`.
-- `lib/*.rhai` – shared functions, used with `import "lib/name" as name;`.
+- `lib/*.rhai` – shared functions, used with `import "lib/name" as name;`. Reference files
+  (`.stl`, `.3mf`, `.step`) come from the human into `lib/`; you cannot write them. Load them
+  with `import_mesh`, `import_step` (`step_names` + `import_step(path, name)` pick bodies).
 - `values/*.toml` – target values, read in scripts with `value("id")`.
 - `checks/*.rhai` – checks: `check("name", || { expect_near(…); })`.
 - `tasks/NNNN-slug.md` – the human's tasks; `out/`, `.qoob3d/` (cache) are not yours to edit.
@@ -22,8 +24,8 @@ service builds them. Units are mm, angles degrees, +Z is up, the print bed is z 
    for part, check and lib files it reports declarations or load errors immediately.
 5. `build` – fix every error it reports, then build again.
 6. `check` – every expectation lists actual and expected; fix the part, not the check.
-7. `render {views: ["iso", "front", "top"]}` and look at the image; `measure` and
-   `run_script` answer geometric questions exactly without changing the project.
+7. `render {views: ["iso", "front", "top"]}` and look at the image (`region` zooms, `source`
+   renders a throwaway script); `measure`, `run_script` answer questions exactly.
 8. `task_update {id, parts: [..], checks: [..]}` – bind what you built and checked (while the
    task is `open` or `in_progress`; the lists replace the old ones).
 9. `task_update {id, state: "review", note}` – hand over. The gate needs at least one part
@@ -36,10 +38,8 @@ Only the human sets `done` or `rejected`. You may move `open -> in_progress`,
 
 ## Dimensions
 
-- A dimension the task text or a measurement fixes is a value with status `measured`
-  (measured on the real object) or `one_source` (one statement, e.g. the task text).
-- A free design dimension (wall thickness, a radius you chose) is a value with status
-  `assumption`; list every assumption in the note of the hand-over to review.
+- A dimension fixed by a measurement is `measured`, by one statement (the task) `one_source`.
+- A free design dimension is a value with status `assumption`; list them in the review note.
 - A missing **interface** dimension (something the part must fit to: a screw, a rail, another
   part) or contradictory text is a question, never a guess:
   `task_update {id, state: "blocked", note: "<your question>"}`, then wait for the human.
@@ -97,23 +97,23 @@ check("plate_size", || {
 
 ## FDM printing
 
-- Model the part in its print orientation, standing on z = 0, or say in the review note how
-  it has to be turned.
+- Print orientation: model a part where it sits, give it `pose: #{ rotate: ["x", 180],
+  count: 2 }`; export writes it so, `export {kit}` puts a whole kit into one file.
+- Colours: `color: "#C0392B"` per part (`render` shows it); `export {project}` writes a slicer
+  project with plates and a filament per colour (`print_with`, `multicolor`); lettering: `text`.
 - `fillet` the top edges; on the bed face use `chamfer` (a fillet there starts as an overhang).
-- Overhang rule: downward faces flatter than 45 degrees from the horizontal need support;
-  measure with `overhangs(s, 45)`, then prefer a chamfer or another orientation.
-- Holes: vertical axis where possible; fits with `pin(d, l)` and `hole(d, l, clearance)` and
-  0.1–0.2 mm clearance; horizontal holes come out smaller.
+- Overhangs flatter than 45° need support: `overhangs(s, 45)`; prefer a chamfer or a pose.
+- Holes: vertical where possible; fits with `pin(d, l)`, `hole(d, l, clearance)` (0.1–0.2).
 
 ## Rules and errors
 
 - Batch booleans: `union([a, b, c])` and `cut(body, [t1, t2])` are one operation and far
   faster than a chain of `+` and `-`. For many holes, cut 2D profiles before `extrude`.
-- A cut must remove material and a union must not shrink, otherwise the build fails: almost
-  always a placement mistake. Task files change only through the task tools.
+- Imported (freeform) bodies: booleans take seconds, raise `[limits] time_s` in `qoob3d.toml`;
+  an invalid part: `defects`, `heal`. A cut must remove material, a union must not shrink.
 
 Every tool answers with one JSON envelope `{ok, duration_s, warnings, result}` and, when
-`ok` is false, `error: {kind, message, file?, line?, column?}`: `script` – your script
+`ok` is false, `error: {kind, message, file?, line?, column?, printed?}`: `script` – your script
 failed at that place; `time_limit`, `memory_limit`, `crash` – the worker was stopped, the
 service goes on; `gate` – review or save refused, the message lists what is not green;
 `bad_request`, `not_found`, `load` – wrong arguments, unknown names, broken project files.

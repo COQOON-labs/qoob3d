@@ -5,6 +5,7 @@
 
 use std::time::{Duration, Instant};
 
+use qoob3d_core::project::layout;
 use serde_json::{Map, Value, json};
 
 use super::resources::{GUIDE, api_reference};
@@ -32,6 +33,8 @@ enum Kind {
     Id,
     /// A task state the agent may set (AG-TK-02): never `done`, `rejected`.
     AgentState,
+    /// A box `{min: [x, y, z], max: [x, y, z]}`.
+    Region,
 }
 
 /// `(name, kind, required, description)`.
@@ -127,7 +130,9 @@ const TOOLS: [Tool; 19] = [
     (
         "file_list",
         "Project files the file tools may read: qoob3d.toml and .rhai, .toml, .md files under \
-         parts/, lib/, values/, checks/, tasks/.",
+         parts/, lib/, values/, checks/, tasks/. `imports` lists the reference files there \
+         (.step, .stp, .stl, .3mf) with their size; scripts read them with import_step and \
+         import_mesh.",
         &[("dir", Kind::Text, false, "Only this folder, e.g. \"parts\" or \"lib/util\".")],
     ),
     (
@@ -181,9 +186,10 @@ const TOOLS: [Tool; 19] = [
     ),
     (
         "render",
-        "Render built parts (stale ones are built first) as a PNG image, orthographic, camera \
-         fitted to the parts. Returns the image, its path under out/renders/, the bbox of the \
-         rendered parts and per view where the camera looks along and which axis is up.",
+        "Render built parts (stale ones are built first), or the shapes a throwaway script \
+         shows, as a PNG image, orthographic, camera fitted to what is rendered or to a region. \
+         Returns the image, its path under out/renders/, the bbox of the rendered parts and per \
+         view where the camera looks along and which axis is up.",
         &[
             ("view", Kind::Text, false, "iso (default), front, back, left, right, top or bottom."),
             (
@@ -194,16 +200,51 @@ const TOOLS: [Tool; 19] = [
                  a label per view instead of `view`; width and height are the size of one view.",
             ),
             ("parts", Kind::Names, false, "Part names; all parts without it."),
+            (
+                "source",
+                Kind::Text,
+                false,
+                "A throwaway script instead of parts: its show(shape, name) shapes are rendered \
+                 (part(\"Name\") and value(\"id\") work as in run_script). Nothing is written.",
+            ),
+            (
+                "region",
+                Kind::Region,
+                false,
+                "Zoom: frame this box {min: [x, y, z], max: [x, y, z]} (mm) instead of everything.",
+            ),
             ("width", Kind::Integer, false, "Image width in pixels (default 1024)."),
             ("height", Kind::Integer, false, "Image height in pixels (default 768)."),
         ],
     ),
     (
         "export",
-        "Write out/<part>.<format> for printing or exchange (parts are built first if needed).",
+        "Write out/<part>.<format> for printing or exchange (parts are built first if needed), \
+         STL and 3MF in each part's print pose (option pose of part). With kit: one file \
+         out/<kit>.<format> with all parts, each count times, arranged on the bed. With \
+         project: one Bambu Studio project out/<project>.3mf with all parts on plates, each in \
+         the filament of its colour (option color of part). The answer lists per file the \
+         size, triangles, whether the mesh is watertight, and warnings.",
         &[
             ("parts", Kind::Names, true, "Part names."),
             ("format", Kind::Text, true, "stl, 3mf (one object per part) or step."),
+            ("kit", Kind::Text, false, "File name of one file with all parts (stl or 3mf)."),
+            ("bed_mm", Kind::Number, false, "Bed width for arranging a kit (default 256)."),
+            ("project", Kind::Text, false, "File name of a Bambu Studio project (format 3mf)."),
+            (
+                "multicolor",
+                Kind::Flag,
+                false,
+                "For project: parts with print_with print inside their host as one multi-colour \
+                 object (AMS). Default false: every part its own object, one colour per plate.",
+            ),
+            (
+                "printer",
+                Kind::Text,
+                false,
+                "For project: printer id (bed and presets), default bambu-lab-p1s; a wrong \
+                 id answers with the known ones.",
+            ),
         ],
     ),
     ("values", "All target values with source and status, and the ids that are assumptions.", &[]),
@@ -225,6 +266,11 @@ fn schema((_, kind, _, description): &Arg) -> Value {
         Kind::Id => json!({"type": ["integer", "string"]}),
         Kind::AgentState => {
             json!({"type": "string", "enum": ["in_progress", "blocked", "review"]})
+        }
+        Kind::Region => {
+            let corner =
+                json!({"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3});
+            json!({"type": "object", "properties": {"min": corner, "max": corner}, "required": ["min", "max"]})
         }
     };
     property["description"] = json!(description);
@@ -354,14 +400,23 @@ impl Server {
                 }
             }
             "measure" => self.service("POST", "/measure", Some(pick(args, &["a", "b"])), LONG),
-            "export" => {
-                self.service("POST", "/export", Some(pick(args, &["parts", "format"])), LONG)
-            }
+            "export" => self.service(
+                "POST",
+                "/export",
+                Some(pick(
+                    args,
+                    &["parts", "format", "kit", "bed_mm", "project", "multicolor", "printer"],
+                )),
+                LONG,
+            ),
             "save_state" => self.service("POST", "/save", Some(pick(args, &["message"])), LONG),
             "render" => {
                 let (mut result, png) =
                     render::render(dir, args).map_err(|message| Refusal("render", message))?;
-                result["bbox"] = self.bbox(&args["parts"])?;
+                // A script's shapes are not parts: their boxes are in run_script.
+                if args["source"].is_null() {
+                    result["bbox"] = self.bbox(&args["parts"])?;
+                }
                 Ok(Reply::Image(result, png))
             }
             _ => Err(bad_request(format!("the tool {name:?} is not implemented"))),
@@ -398,6 +453,14 @@ impl Server {
     /// sub folder of `parts/` or `checks/` gets a `note` instead.
     fn file_write(&self, path: &str, content: &str) -> Result<Reply, Refusal> {
         let mut result = files::write(self.project.dir(), path, content).map_err(bad_request)?;
+        if path == layout::CONFIG_FILE {
+            // Finding 3.5: an agent restarted the service to apply new limits.
+            result["note"] = json!(
+                "[limits], [mesh] and [cache] apply from the next job; [workers] from the next \
+                 start of the service"
+            );
+            return Ok(Reply::Result(result));
+        }
         let folder = path.split('/').next().unwrap_or_default();
         if !path.ends_with(".rhai") || !["parts", "checks", "lib"].contains(&folder) {
             return Ok(Reply::Result(result));

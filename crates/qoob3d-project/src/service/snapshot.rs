@@ -94,6 +94,11 @@ pub(crate) struct PartSource {
     pub(crate) name: String,
     pub(crate) file: PathBuf,
     pub(crate) depends: Vec<String>,
+    /// How it lies on the bed for printing (AG-PJ-06).
+    pub(crate) print: Option<qoob3d_core::project::PrintPose>,
+    /// `#RRGGBB` and the part it prints with (AG-PJ-07).
+    pub(crate) color: Option<String>,
+    pub(crate) print_with: Option<String>,
     pub(crate) discovered: Discovered,
     source: Vec<u8>,
     modules: Vec<Vec<u8>>,
@@ -141,6 +146,9 @@ impl Snapshot {
                     name: part.name,
                     file: f.file.clone(),
                     depends: part.depends,
+                    print: part.print,
+                    color: part.color,
+                    print_with: part.print_with,
                     discovered: discovered.clone(),
                     source: f.source.clone(),
                     modules: f.modules.clone(),
@@ -182,12 +190,14 @@ impl Snapshot {
             .iter()
             .map(|id| (id.clone(), self.values.get(id).map_or(Value::Null, |v| v.value.clone())))
             .collect();
-        // A module that is gone hashes as empty: the key changes, the part
-        // is outdated and its build reports the missing file.
-        let modules = reads.modules.as_ref().map_or_else(
-            || part.modules.clone(),
-            |files| files.iter().map(|m| std::fs::read(dir.join(m)).unwrap_or_default()).collect(),
-        );
+        // A module or imported file that is gone hashes as empty: the key
+        // changes, the part is outdated and its build reports the missing
+        // file. Imported files follow the modules, as in the worker.
+        let read = |files: &[PathBuf]| -> Vec<Vec<u8>> {
+            files.iter().map(|m| std::fs::read(dir.join(m)).unwrap_or_default()).collect()
+        };
+        let mut modules = reads.modules.as_deref().map_or_else(|| part.modules.clone(), read);
+        modules.extend(read(&reads.files));
         project::cache_key(&KeyInputs {
             program_version: key_version(&self.config.mesh),
             part_file: part.source.clone(),
@@ -256,6 +266,8 @@ pub(crate) struct Reads {
     /// Module files the engine resolved, relative to the project; `None`
     /// before the first build.
     modules: Option<Vec<PathBuf>>,
+    /// Files `import_step` and `import_mesh` read (AG-SC-24).
+    files: Vec<PathBuf>,
 }
 
 impl Record {
@@ -268,10 +280,16 @@ impl Record {
             .as_object()
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default();
-        let modules = meta["modules_read"]
-            .as_array()
-            .map(|files| files.iter().filter_map(Value::as_str).map(PathBuf::from).collect());
-        Reads { values, modules }
+        let paths = |key: &str| {
+            meta[key]
+                .as_array()
+                .map(|files| files.iter().filter_map(Value::as_str).map(PathBuf::from).collect())
+        };
+        Reads {
+            values,
+            modules: paths("modules_read"),
+            files: paths("files_read").unwrap_or_default(),
+        }
     }
 }
 
@@ -344,6 +362,15 @@ pub(crate) struct PartView {
     pub(crate) key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<PartError>,
+    /// The print pose, for parts that declare one (AG-PJ-06).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pose: Option<qoob3d_core::project::PrintPose>,
+    /// `#RRGGBB`, for parts that declare a colour (AG-PJ-07).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) color: Option<String>,
+    /// The part it prints with as one multi-colour object (AG-PJ-07).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) print_with: Option<String>,
 }
 
 /// The record of `name`, completed from the cache folder on first use.
@@ -404,6 +431,9 @@ pub(crate) fn views(
             state,
             key: r.built.as_ref().map(|(k, _)| k.clone()),
             error,
+            pose: part.print.clone(),
+            color: part.color.clone(),
+            print_with: part.print_with.clone(),
         });
         keys.insert(&part.name, expected);
     }
