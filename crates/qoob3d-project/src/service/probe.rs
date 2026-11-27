@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::jobs::Work;
-use super::snapshot::{Snapshot, State, views};
+use super::snapshot::{Hashing, Snapshot, State};
 use super::{Answer, Failure, Service, body, unknown_job};
 use crate::worker::{self, ErrorKind, PartError, Probe, Request};
 
@@ -35,7 +35,7 @@ struct MeasureBody {
 impl Service {
     /// BREP files of the parts of `snapshot` that are built and current.
     pub(crate) fn built(&self, snapshot: &Snapshot) -> BTreeMap<String, PathBuf> {
-        let views = views(&self.dir, snapshot, &mut self.lock().records);
+        let views = self.views(snapshot, Hashing::Wait);
         views
             .into_iter()
             .filter(|v| v.state == State::Current)
@@ -71,7 +71,7 @@ impl Service {
             cache: None,
             probe: Some(probe),
         };
-        match self.pool.run(&request, limits, cancel)? {
+        match self.work(&request, limits, cancel)? {
             worker::Answer { ok: true, meta: Some(meta), .. } => Ok(meta),
             answer => Err(answer.error.unwrap_or_else(|| {
                 PartError::new(ErrorKind::Crash, "the worker answered without a result")
@@ -115,7 +115,7 @@ impl Service {
             cache: None,
             probe: Some(probe),
         };
-        match self.pool.run(&request, &snapshot.config.limits, cancel)? {
+        match self.work(&request, &snapshot.config.limits, cancel)? {
             worker::Answer { ok: true, meta: Some(meta), .. } => Ok(meta),
             answer => Err(answer.error.unwrap_or_else(|| {
                 PartError::new(ErrorKind::Crash, "the worker answered without a result")

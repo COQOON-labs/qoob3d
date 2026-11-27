@@ -54,12 +54,13 @@ layer where OCCT has it.
 - Part declaration is found without running OCCT: the script is evaluated with a stub
   `part()` that only records name, options and the closure; `deps` passed to the closure is
   a map name → shape of the built dependencies.
-- Cache key: SHA-256 (hex) over, in order: program version, part file bytes, bytes of every
-  transitively imported module followed by every file `import_step`/`import_mesh` read in the
-  last build (AG-SC-24), the sorted list of `(value id, canonical value)` read in the
-  last build, and the keys of the dependencies. Before the first build the key is computed
-  without values; after a build the recorded reads are part of the key, so changing a read
-  value invalidates, changing an unread value does not.
+- Cache key: SHA-256 (hex) over, in order: program version (with the kernel fingerprint,
+  WS-PRE-02), the SHA-256 of the part file, the SHA-256 of every transitively imported module
+  followed by that of every file `import_step`/`import_mesh` read in the last build (AG-SC-24;
+  the service remembers these digests per file, WS-PRE-01), the sorted list of `(value id,
+  canonical value)` read in the last build, and the keys of the dependencies. Before the
+  first build the key is computed without values; after a build the recorded reads are part
+  of the key, so changing a read value invalidates, changing an unread value does not.
 - Cache entry files: `<key>.brep` (OCCT BREP), `<key>.qmsh` (tessellated, 0.01 mm linear
   deflection, edges included), `<key>.json` with `volume`, `bbox` `{min,max,size}`,
   `valid`, `watertight` (the mesh is closed and manifold, the print check), `solids`,
@@ -76,14 +77,19 @@ layer where OCCT has it.
 ### 3.1 HTTP details (envelope as in `project-app.md`)
 
 - `GET /status` → `result`: `{"project": name, "parts": [{name, file, state, key, error?}],
-  "jobs": [{id, state}], "workers": {count, busy, recycled},
+  "jobs": [{id, state, kind, reason?}], "workers": {count, busy, recycled, slots: {budget,
+  held, waiting}}, "hashing": [files],
   "load_errors": [{kind, message, file, line?, column?}], "error"?}` (superset of WA-PR-01;
   `recycled` as AG-PF-03). A part or check file that does not load is one entry of
   `load_errors` and never hides the parts of other files (ADR-0055); `error` repeats the
   first one, or is the load error of the whole project (configuration, values, dependency
   graph) with an empty part list. `/status` never waits for discovery: `"discovering":
   [files]` lists the part and check files whose declarations are not known yet (their earlier
-  parts are `outdated`, a new file has no parts yet).
+  parts are `outdated`, a new file has no parts yet). `"hashing": [files]` lists large imported
+  files whose digests are computed in the background (WS-PRE-01; their parts are `outdated`
+  meanwhile, `qoob3d status` waits for them within its 10 s). A job that waits for a slot of the
+  machine-wide worker budget is `queued` with `reason: "waiting for a worker slot"`
+  (WS-PRE-06).
 - `POST /discover {"files": [..]|null, "wait_s": f64}` (ADR-0055) waits up to `wait_s` for
   the discovery of those part and check files (`null` = all) → `{"files": [{file, state:
   "declared"|"failed"|"discovering", parts?: [{name, depends}], checks?: [..], error?}],

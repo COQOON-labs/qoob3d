@@ -15,13 +15,15 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use qoob3d_core::project::layout;
-use qoob3d_core::project::{self, KeyInputs, Mesh, PrintPose, Values};
+use qoob3d_core::project::{self, KeyInputs, Mesh, PrintPose, Values, file_digest};
 use qoob3d_core::qmesh;
 use qoob3d_kernel::script::{self, PartMode, RunOptions, ScriptError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 mod probe;
+#[cfg(test)]
+mod tests;
 
 pub(crate) use self::probe::Probe;
 
@@ -38,11 +40,15 @@ const DECLARE_MAX_OPERATIONS: u64 = 1_000_000;
 /// the exported form.
 const ENTRY_VERSION: u32 = 4;
 
-/// The program part of a cache key: the program and entry versions and the
-/// tessellation settings (AG-PF-05), so changing any of them rebuilds.
+/// SHA-256 of the kernel's sources at build time (WS-PRE-02, `build.rs`).
+pub(crate) const KERNEL_FINGERPRINT: &str = env!("QOOB3D_KERNEL_FINGERPRINT");
+
+/// The program part of a cache key: the program version, the kernel
+/// fingerprint, the entry version and the tessellation settings (AG-PF-05,
+/// WS-PRE-02), so changing any of them rebuilds.
 pub(crate) fn key_version(mesh: &Mesh) -> String {
     format!(
-        "{PROGRAM_VERSION} entry {ENTRY_VERSION} mesh {} {}",
+        "{PROGRAM_VERSION} kernel {KERNEL_FINGERPRINT} entry {ENTRY_VERSION} mesh {} {}",
         mesh.deflection_mm, mesh.angle_deg
     )
 }
@@ -238,11 +244,28 @@ pub(crate) fn declaration_of(dir: &Path, file: &Path) -> Result<Declaration, Par
     declaration(dir, file, &text)
 }
 
+/// How much lower than its service a worker runs (nice): OCCT keeps every
+/// core busy during a build, and the service must still answer at once
+/// (WS-PRE-01, ADR-0055).
+const NICER_BY: i32 = 10;
+
+/// Lowers the priority of this process by [`NICER_BY`], before any thread
+/// starts (on Linux the value is per thread and new threads inherit it).
+fn lower_priority() {
+    use rustix::process::{getpriority_process, setpriority_process};
+    let lowered = getpriority_process(None)
+        .and_then(|now| setpriority_process(None, (now + NICER_BY).min(19)));
+    if let Err(e) = lowered {
+        tracing::warn!("worker keeps the priority of its service: {e}");
+    }
+}
+
 /// Main loop of `qoob3d worker`.
 ///
 /// # Errors
 /// Writing to stdout failed (the service is gone).
 pub fn run() -> anyhow::Result<()> {
+    lower_priority();
     let (tx, requests) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
@@ -347,11 +370,11 @@ fn build(request: &Request, name: &str) -> Result<(String, Value), PartError> {
         .modules_read
         .iter()
         .chain(&output.files_read)
-        .map(|m| std::fs::read(dir.join(m)).map_err(|e| io_error(m, e)))
+        .map(|m| std::fs::read(dir.join(m)).map(|b| file_digest(&b)).map_err(|e| io_error(m, e)))
         .collect::<Result<Vec<_>, _>>()?;
     let key = project::cache_key(&KeyInputs {
         program_version: key_version(&request.mesh),
-        part_file: source,
+        part_file: file_digest(&source),
         modules,
         values_read: output.values_read.clone().into_iter().collect(),
         dependency_keys,

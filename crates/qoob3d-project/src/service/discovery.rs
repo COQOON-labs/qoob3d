@@ -175,7 +175,7 @@ impl Service {
     /// ones.
     fn discover(&self, files: Vec<PathBuf>, wait: Option<Duration>) -> Vec<FileDecl> {
         let mut decls: Vec<FileDecl> =
-            files.into_iter().map(|f| FileDecl::read(&self.dir, f)).collect();
+            files.into_iter().map(|f| FileDecl::read(&self.dir, f, &self.hashes)).collect();
         let deadline = wait.map(|w| Instant::now() + w);
         let mut known = self.discovery.lock();
         let mut new = Vec::new();

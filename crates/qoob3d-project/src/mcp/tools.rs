@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 
 use super::resources::{GUIDE, api_reference};
 use super::{INVALID_PARAMS, RpcError, Server, files, render};
-use crate::client::{Client, START_TIMEOUT, segment, service_command_from_env};
+use crate::client::{self, Client, START_TIMEOUT, segment, service_command_from_env};
 
 /// Requests that do not wait for workers.
 const QUICK: Duration = Duration::from_secs(30);
@@ -431,7 +431,7 @@ impl Server {
         body: Option<Value>,
         timeout: Duration,
     ) -> Result<Reply, Refusal> {
-        let unreachable = |e: anyhow::Error| Refusal("service", format!("{e:#}"));
+        let unreachable = |e: anyhow::Error| Refusal(client::error_kind(&e), format!("{e:#}"));
         let client = Client::connect(&self.project, &service_command_from_env(), START_TIMEOUT)
             .map_err(unreachable)?;
         client.call(method, path, body.as_ref(), timeout).map(Reply::Envelope).map_err(unreachable)
@@ -456,8 +456,8 @@ impl Server {
         if path == layout::CONFIG_FILE {
             // Finding 3.5: an agent restarted the service to apply new limits.
             result["note"] = json!(
-                "[limits], [mesh] and [cache] apply from the next job; [workers] from the next \
-                 start of the service"
+                "[limits], [mesh] and [cache] apply from the next job; [workers] and [service] \
+                 from the next start of the service"
             );
             return Ok(Reply::Result(result));
         }

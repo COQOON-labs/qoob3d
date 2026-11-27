@@ -103,7 +103,7 @@ impl Mcp {
     pub(crate) fn start(command: &mut Command, p: &Project) -> Self {
         let log = p.root.join("mcp.log");
         let err = std::fs::OpenOptions::new().create(true).append(true).open(&log);
-        let mut child = command
+        let mut child = crate::support::isolated(command, &p.dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(err.expect("open mcp.log"))

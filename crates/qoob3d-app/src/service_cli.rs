@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::cli::{ProjectCommand as Command, TaskCommand};
 use qoob3d_project::client::{
-    Client, ProjectDir, START_TIMEOUT, segment, service_command_from_env,
+    Client, ProjectDir, START_TIMEOUT, error_kind, segment, service_command_from_env,
 };
 
 /// Requests that do not wait for builds.
@@ -31,7 +31,7 @@ pub fn run(command: &Command) -> i32 {
             "duration_s": started.elapsed().as_secs_f64(),
             "warnings": [],
             "result": null,
-            "error": {"kind": "service", "message": format!("{e:#}")},
+            "error": {"kind": error_kind(&e), "message": format!("{e:#}")},
         })
     });
     println!("{envelope}");
@@ -66,10 +66,19 @@ fn request(command: &Command) -> anyhow::Result<Value> {
     match command {
         Command::Status => {
             // A settled state for humans: at most `SETTLE_S` for discovery
-            // (ADR-0055), then `/status` whatever it knows.
+            // (ADR-0055) and the hashes of large imports (WS-PRE-01), then
+            // `/status` whatever it knows.
+            let deadline = std::time::Instant::now() + Duration::from_secs_f64(SETTLE_S);
             let body = json!({"files": null, "wait_s": SETTLE_S});
             client.call("POST", "/discover", Some(&body), QUICK)?;
-            client.call("GET", "/status", None, QUICK)
+            loop {
+                let status = client.call("GET", "/status", None, QUICK)?;
+                let hashing = status["result"]["hashing"].as_array().is_some_and(|h| !h.is_empty());
+                if !hashing || std::time::Instant::now() >= deadline {
+                    return Ok(status);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
         Command::Values => client.call("GET", "/values", None, QUICK),
         Command::Build { parts, wait } => {

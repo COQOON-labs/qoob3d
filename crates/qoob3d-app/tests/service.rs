@@ -36,7 +36,7 @@ use qoob3d_project::client;
 use serde_json::{Value, json};
 use support::{
     BIN, Project, START, Service, VOL, alive, assert_rel, assert_rel_f64, cli, exchange, kill,
-    service_json, service_token, wait_until,
+    service_json, service_token, wait_until, workers_of,
 };
 
 const F32_POS: f64 = 1e-4;
@@ -133,7 +133,7 @@ impl Service {
     fn start_capped(p: &Project, kib: u64) -> Self {
         let mut command = Command::new("sh");
         let script = format!("ulimit -v {kib} 2>/dev/null; exec \"$0\" serve \"$1\"");
-        command.arg("-c").arg(script).arg(BIN).arg(&p.dir);
+        support::isolated(&mut command, &p.dir).arg("-c").arg(script).arg(BIN).arg(&p.dir);
         Self::start_with(p, &mut command)
     }
 
@@ -2414,4 +2414,462 @@ fn ag_pj_06_a_wrong_pose_option_is_a_load_error_naming_the_part() {
     let st = s.status();
     let text = st.to_string();
     assert!(text.contains("pose has the unknown key \\\"turn\\\""), "{text}");
+}
+
+// ===========================================================================
+// WS-PRE: service prerequisites of the workbench (docs/requirements/workspace.md §1)
+// ===========================================================================
+
+/// Bytes of padding behind the triangles of [`padded_cube_stl`]: what a
+/// large imported file costs to read and hash (the Damen 5009 project
+/// imports 66 MB of STEP and STL files).
+const STL_PADDING: usize = 16 << 20;
+
+/// A binary STL of the cube 0..10 in x, y and z (12 triangles, wound
+/// counter-clockwise seen from outside, so 1000 mm³), followed by
+/// [`STL_PADDING`] zero bytes. The header counts 12 triangles, and the
+/// reader ignores the bytes behind them (`import/stl.rs`); the header does
+/// not start with "solid", so it is read as binary.
+fn padded_cube_stl() -> Vec<u8> {
+    const L: f32 = 10.0;
+    let quads: [[[f32; 3]; 4]; 6] = [
+        [[0.0, 0.0, 0.0], [0.0, L, 0.0], [L, L, 0.0], [L, 0.0, 0.0]],
+        [[0.0, 0.0, L], [L, 0.0, L], [L, L, L], [0.0, L, L]],
+        [[0.0, 0.0, 0.0], [L, 0.0, 0.0], [L, 0.0, L], [0.0, 0.0, L]],
+        [[0.0, L, 0.0], [0.0, L, L], [L, L, L], [L, L, 0.0]],
+        [[0.0, 0.0, 0.0], [0.0, 0.0, L], [0.0, L, L], [0.0, L, 0.0]],
+        [[L, 0.0, 0.0], [L, L, 0.0], [L, L, L], [L, 0.0, L]],
+    ];
+    let mut bytes = vec![0u8; 80];
+    bytes.extend_from_slice(&12u32.to_le_bytes());
+    for q in quads {
+        for t in [[q[0], q[1], q[2]], [q[0], q[2], q[3]]] {
+            bytes.extend_from_slice(&[0u8; 12]);
+            for corner in t {
+                for c in corner {
+                    bytes.extend_from_slice(&c.to_le_bytes());
+                }
+            }
+            bytes.extend_from_slice(&[0u8; 2]);
+        }
+    }
+    bytes.resize(bytes.len() + STL_PADDING, 0);
+    bytes
+}
+
+/// `S1` … `S4`, each depending on the one before, so they build one after
+/// another; each counts to `n` before it builds a 1 mm cube. 6 000 000
+/// iterations stay below the 50 M operations of AG-SC-02 and take a few
+/// tenths of a second, so the chain keeps a worker busy for about a second.
+fn slow_parts_counting(n: u64) -> String {
+    (1..=4)
+        .map(|i| {
+            let depends =
+                if i == 1 { String::new() } else { format!("depends: [\"S{}\"] ", i - 1) };
+            format!(
+                "part(\"S{i}\", #{{ {depends}}}, |deps| {{\n    let x = 0;\n    \
+                 for i in 0..{n} {{ x += 1; }}\n    box(1, 1, 1)\n}});\n"
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn ws_pre_01_status_answers_within_100_ms_with_120_parts_while_a_build_and_a_check_run() {
+    // WS-PRE-01: "`/status` answers within 100 ms (AG-SV-01) with 120 parts,
+    // while a build and a check run. The file hashes behind the cache keys
+    // are memoised by path, size and modification time and computed outside
+    // the service lock; no request waits for hashing." The finding behind it
+    // (Damen 5009): every `/status` hashed every imported file of every part
+    // while holding the service lock. Here 120 parts import one 16 MiB STL,
+    // so hashing it per part and poll would cost about 2 GB per `/status`.
+    let p = Project::new("ws-pre-01", "[limits]\ntime_s = 60\n[workers]\ncount = 2\n");
+    std::fs::create_dir_all(p.path("lib")).expect("create lib");
+    std::fs::write(p.path("lib/cube.stl"), padded_cube_stl()).expect("write the STL");
+    let names: Vec<String> = (0..120).map(|i| format!("P{i:03}")).collect();
+    for name in &names {
+        let file = format!("parts/{}.rhai", name.to_lowercase());
+        p.write(
+            &file,
+            &format!("part(\"{name}\", #{{}}, |deps| import_mesh(\"lib/cube.stl\"));\n"),
+        );
+    }
+    p.write("parts/slow.rhai", &slow_parts_counting(1)).write(
+        "checks/cube.rhai",
+        "check(\"cube_volume\", || {\n    \
+         expect_near(part(\"P000\").volume(), 1000, 0.001, \"volume\");\n});\n",
+    );
+    let s = Service::start(&p);
+    s.post("/discover", &json!({"files": null, "wait_s": 60})).ok();
+    let first = s.build(None);
+    let failed: Vec<&String> = first["parts"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, r)| r["state"] != "built" && r["state"] != "cached")
+        .map(|(name, _)| name)
+        .collect();
+    assert!(failed.is_empty(), "the first build failed for {failed:?}: {first}");
+
+    // A slow build and a check behind it; `/status` meanwhile.
+    p.write("parts/slow.rhai", &slow_parts_counting(6_000_000));
+    s.post("/build", &json!({"parts": null, "wait_s": 0})).ok();
+    s.post("/check", &json!({"names": null, "wait_s": 0})).ok();
+    let mut busy_polls = 0;
+    let mut slowest = Duration::ZERO;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let t = Instant::now();
+        let r = s
+            .try_request("GET", "/status", None, Duration::from_secs(30))
+            .unwrap_or_else(|e| panic!("poll {busy_polls}: /status: {e}\n{}", s.log()));
+        let took = t.elapsed();
+        slowest = slowest.max(took);
+        let st = r.ok();
+        assert_eq!(status_parts(&st).len(), 124, "every part is listed: {st}");
+        assert!(st["hashing"].is_array(), "large files hashed in the background: {st}");
+        let busy = st["jobs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|j| j["state"] == "running" || j["state"] == "queued");
+        if !busy {
+            break;
+        }
+        assert!(took < Duration::from_millis(100), "poll {busy_polls}: /status took {took:?}");
+        busy_polls += 1;
+        assert!(Instant::now() < deadline, "the jobs did not finish within 60 s: {st}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(busy_polls >= 10, "only {busy_polls} polls saw the jobs running (slowest {slowest:?})");
+    let st = s.status();
+    let not_current: Vec<(String, String)> =
+        states(&st).into_iter().filter(|(_, state)| state != "current").collect();
+    assert!(not_current.is_empty(), "after the jobs: {not_current:?}");
+    let checks = st["checks"].as_array().cloned().unwrap_or_default();
+    assert!(
+        checks.iter().any(|c| c["name"] == "cube_volume" && c["state"] == "passed"),
+        "the check ran: {st}"
+    );
+}
+
+#[test]
+fn ws_pre_03_a_busy_service_is_reported_as_busy_and_never_started_twice() {
+    // WS-PRE-03: "while the process in `service.json` is alive and holds
+    // `service.lock`, the client starts no second service and reports kind
+    // `busy` after its timeout instead of 'did not come up'". The finding
+    // behind it (Damen 5009): a service that did not answer `/status` in
+    // time made the client start another one every 20 s. A stopped process
+    // (SIGSTOP) is alive and keeps its lock, and its port accepts
+    // connections that nobody answers.
+    let p = Project::new("ws-pre-03", "");
+    p.write("parts/normal.rhai", NORMAL);
+    let s = Service::start(&p);
+    let marker = p.root.join("starts.txt");
+    // Every start through this command leaves a line in `marker`.
+    let cmd = vec![
+        "/bin/sh".to_owned(),
+        "-c".to_owned(),
+        format!("echo start >> '{}'; exec '{BIN}' \"$@\"", marker.display()),
+        "sh".to_owned(),
+    ];
+    let project = client::ProjectDir::open(&p.dir).expect("project");
+    kill(s.pid, "STOP");
+    let started = Instant::now();
+    let connected = client::Client::connect(&project, &cmd, Duration::from_secs(3));
+    let waited = started.elapsed();
+    kill(s.pid, "CONT");
+    let error = match connected {
+        Ok(_) => panic!("a stopped service answered"),
+        Err(e) => e,
+    };
+    assert_eq!(client::error_kind(&error), "busy", "{error:#}");
+    let message = format!("{error:#}");
+    assert!(message.contains("busy") && message.contains(&s.pid.to_string()), "{message}");
+    assert!(waited >= Duration::from_secs(3), "reported after its timeout, not before: {waited:?}");
+    assert!(!marker.exists(), "a second service was started for a busy one");
+    // The service goes on as before.
+    assert_eq!(service_json(&p.dir).map(|(_, pid)| pid), Some(s.pid));
+    s.status();
+}
+
+/// `.qoob3d/summary.json` of `p`, if it exists; it must always be complete
+/// JSON (written atomically).
+fn summary(p: &Project) -> Option<Value> {
+    let text = std::fs::read_to_string(p.path(".qoob3d/summary.json")).ok()?;
+    Some(serde_json::from_str(&text).unwrap_or_else(|e| panic!("summary.json: {e}: {text}")))
+}
+
+/// Waits up to 10 s until the summary holds `want` at `path` (a JSON
+/// pointer); the last summary.
+fn summary_until(p: &Project, path: &str, want: &Value) -> Value {
+    let mut last = None;
+    let found = wait_until(Duration::from_secs(10), || {
+        last = summary(p);
+        last.as_ref().and_then(|v| v.pointer(path)) == Some(want)
+    });
+    assert!(found, "summary {path} = {want} not reached: {last:?}");
+    last.unwrap_or_default()
+}
+
+#[test]
+fn ws_pre_04_the_service_keeps_a_summary_file_of_its_states() {
+    // WS-PRE-04: "The service writes `.qoob3d/summary.json` atomically
+    // whenever part, check, job or load-error states change (at most twice
+    // per second): {project, updated, parts: {current, outdated, failed,
+    // never_built}, checks: {passed, failed, stale, never_run},
+    // jobs_running, load_errors}". `load_errors` counts the files that do
+    // not load, like the other counts.
+    let p = Project::new("ws-pre-04", "[workers]\ncount = 2\n");
+    p.write("parts/normal.rhai", NORMAL).write(
+        "checks/normal.rhai",
+        "check(\"normal_volume\", || {\n    \
+         expect_near(part(\"Normal\").volume(), 6000, 0.001, \"volume\");\n});\n",
+    );
+    let s = Service::start(&p);
+    let first = summary_until(&p, "/parts/never_built", &json!(1));
+    assert_eq!(first["project"], json!("ws-pre-04"), "{first}");
+    for (group, keys) in [
+        ("parts", ["current", "outdated", "failed", "never_built"]),
+        ("checks", ["passed", "failed", "stale", "never_run"]),
+    ] {
+        for key in keys {
+            assert!(first[group][key].is_u64(), "{group}.{key} is a count: {first}");
+        }
+    }
+    assert_eq!(first["checks"]["never_run"], json!(1), "{first}");
+    assert_eq!(first["jobs_running"], json!(0), "{first}");
+    assert_eq!(first["load_errors"], json!(0), "{first}");
+    let updated = first["updated"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        updated.len() == 24 && updated.ends_with('Z') && updated.as_bytes()[10] == b'T',
+        "updated as YYYY-MM-DDTHH:MM:SS.mmmZ: {updated:?}"
+    );
+
+    s.post("/check", &json!({"names": null, "wait_s": WAIT_S})).ok();
+    let checked = summary_until(&p, "/checks/passed", &json!(1));
+    assert_eq!(checked["parts"]["current"], json!(1), "{checked}");
+    assert_ne!(checked["updated"], first["updated"], "{checked}");
+
+    // A file change with nobody asking: the part is outdated, its check stale.
+    p.write("parts/normal.rhai", "part(\"Normal\", #{}, |deps| box(10, 20, 31));\n");
+    let changed = summary_until(&p, "/parts/outdated", &json!(1));
+    assert_eq!(changed["checks"]["stale"], json!(0), "the check read the old build: {changed}");
+    p.write("parts/broken.rhai", PART_BROKEN);
+    summary_until(&p, "/load_errors", &json!(1));
+    std::fs::remove_file(p.path("parts/broken.rhai")).expect("remove");
+    summary_until(&p, "/load_errors", &json!(0));
+
+    // A running job, and at most two writes per second meanwhile.
+    p.write("parts/slow.rhai", &slow_parts_counting(6_000_000));
+    s.post("/build", &json!({"parts": null, "wait_s": 0})).ok();
+    let mut seen: Vec<String> = Vec::new();
+    let mut running = false;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let v = summary(&p).unwrap_or_default();
+        running |= v["jobs_running"] == json!(1);
+        let at = v["updated"].as_str().unwrap_or_default().to_owned();
+        if seen.last() != Some(&at) {
+            seen.push(at);
+        }
+        if running && v["jobs_running"] == json!(0) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the build did not end: {v}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(running, "the summary showed the running job");
+    // `updated` is UTC with milliseconds: its seconds of the day.
+    let seconds = |t: &str| -> f64 {
+        let hms = &t[11..23];
+        let h: f64 = hms[0..2].parse().expect("hours");
+        let m: f64 = hms[3..5].parse().expect("minutes");
+        let s: f64 = hms[6..].parse().expect("seconds");
+        h * 3600.0 + m * 60.0 + s
+    };
+    for pair in seen.windows(2) {
+        let gap = seconds(&pair[1]) - seconds(&pair[0]);
+        assert!(gap >= 0.45 || gap < 0.0, "two writes {gap} s apart: {seen:?}");
+    }
+    assert!(seen.len() >= 2, "the running and the finished job were written: {seen:?}");
+    drop(s);
+    let last = summary(&p).expect("summary.json stays after shutdown for the overview");
+    assert_eq!(last["jobs_running"], json!(0), "{last}");
+}
+
+/// Waits up to `within` for the service process of `s` to end.
+fn service_exits(s: &mut Service, within: Duration) -> bool {
+    let child = s.child.as_mut().expect("a spawned service");
+    wait_until(within, || child.try_wait().is_ok_and(|status| status.is_some()))
+}
+
+#[test]
+fn ws_pre_05_an_idle_service_stops_and_a_polling_client_keeps_it_alive() {
+    // WS-PRE-05: "the service exits after `[service] idle_min` minutes
+    // without requests and without jobs; it removes `service.json` as today.
+    // A polling app keeps it alive." 0.01 min = 0.6 s.
+    let p = Project::new("ws-pre-05", "[service]\nidle_min = 0.01\n[workers]\ncount = 1\n");
+    p.write("parts/normal.rhai", NORMAL);
+    let mut s = Service::start(&p);
+    // Polled every 0.3 s for 3 s: alive throughout.
+    let polled = Instant::now();
+    while polled.elapsed() < Duration::from_secs(3) {
+        s.status();
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert!(alive(s.pid), "a polled service stopped");
+    // A job that runs longer than twice the idle time (the watcher looks
+    // every idle time, so a wrong stop would come within two): alive while
+    // it runs. Reading summary.json is no request (WS-PRE-04).
+    p.write("parts/slow.rhai", &slow_parts_counting(15_000_000));
+    s.post("/build", &json!({"parts": null, "wait_s": 0})).ok();
+    let started = Instant::now();
+    let mut seen_running = false;
+    loop {
+        let running = summary(&p).is_some_and(|v| v["jobs_running"] == json!(1));
+        seen_running |= running;
+        if seen_running && !running {
+            break;
+        }
+        if !alive(s.pid) {
+            // summary.json follows its counts up to 0.5 s late (WS-PRE-04),
+            // so it may still show the job after it ended and the idle time
+            // passed: whether the job was cut off, the summary written at
+            // shutdown tells below.
+            assert!(seen_running, "the service stopped before the job ran: {:?}", summary(&p));
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(30), "the build did not end");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let ran = started.elapsed();
+    assert!(
+        ran > Duration::from_millis(1500),
+        "the job ran longer than twice the idle time: {ran:?}"
+    );
+    // Without requests and jobs it stops, and removes service.json.
+    assert!(service_exits(&mut s, Duration::from_secs(10)), "the idle service still runs");
+    assert!(!p.path(".qoob3d/service.json").exists(), "service.json was left behind");
+    // A service that stopped while the job ran cancelled it.
+    let last = summary(&p).expect("summary.json written at shutdown");
+    assert_eq!(last["parts"]["current"], json!(5), "the job was cut off: {last}");
+}
+
+/// `qoob3d serve` of `p` with the runtime folder `runtime` (WS-PRE-06).
+fn service_sharing(p: &Project, runtime: &std::path::Path) -> Service {
+    let mut command = Command::new(BIN);
+    command.arg("serve").arg(&p.dir).env("QOOB3D_RUNTIME_DIR", runtime);
+    Service::start_with(p, &mut command)
+}
+
+/// `(workers busy, slots held, a job waits for a slot)` of a service.
+fn slot_use(s: &Service) -> (u64, u64, bool) {
+    let st = s.status();
+    let waiting = st["jobs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|j| j["state"] == "queued" && j["reason"] == json!("waiting for a worker slot"));
+    let busy = st["workers"]["busy"].as_u64().unwrap_or_default();
+    (busy, st["workers"]["slots"]["held"].as_u64().unwrap_or(u64::MAX), waiting)
+}
+
+/// Polls both services until their jobs are finished; at no poll do they
+/// use more than one worker together. Returns whether `b` was seen waiting.
+fn one_worker_between(a: &Service, b: &Service) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut b_waited = false;
+    loop {
+        let (busy_a, held_a, _) = slot_use(a);
+        let (busy_b, held_b, waiting_b) = slot_use(b);
+        assert!(busy_a + busy_b <= 1, "{busy_a} + {busy_b} busy workers with a budget of 1");
+        assert!(held_a + held_b <= 1, "{held_a} + {held_b} slots held with a budget of 1");
+        b_waited |= waiting_b;
+        let idle = |s: &Service| {
+            let st = s.status();
+            st["jobs"].as_array().into_iter().flatten().all(|j| {
+                ["done", "failed", "cancelled"].contains(&j["state"].as_str().unwrap_or_default())
+            })
+        };
+        if idle(a) && idle(b) {
+            return b_waited;
+        }
+        assert!(Instant::now() < deadline, "the jobs did not finish");
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+#[test]
+fn ws_pre_06_two_services_share_one_worker_slot_and_a_dead_service_frees_its_own() {
+    // WS-PRE-06: "at most `max_busy_workers` workers run jobs at the same
+    // time across all project services of the user, coordinated by slot lock
+    // files in a per-user runtime folder. A job waiting for a slot is
+    // `queued` with the reason `waiting for a worker slot` in `/status`; a
+    // crashed service frees its slots (the OS releases the locks)." The
+    // budget comes from `budget.json` in that folder.
+    let a = Project::new("ws-pre-06-a", "[workers]\ncount = 2\n");
+    let b = Project::new("ws-pre-06-b", "[workers]\ncount = 2\n");
+    let runtime = a.root.join("shared-runtime");
+    std::fs::create_dir_all(&runtime).expect("runtime folder");
+    std::fs::write(runtime.join("budget.json"), r#"{"max_busy_workers": 1}"#).expect("budget");
+    a.write("parts/slow.rhai", &slow_parts_counting(6_000_000));
+    b.write("parts/slow.rhai", &slow_parts_counting(6_000_000));
+    let sa = service_sharing(&a, &runtime);
+    let mut sb = service_sharing(&b, &runtime);
+    for s in [&sa, &sb] {
+        s.post("/discover", &json!({"files": null, "wait_s": 20})).ok();
+        assert_eq!(s.status()["workers"]["slots"]["budget"], json!(1));
+    }
+    // A builds; B's build waits for the slot until A is done.
+    sa.post("/build", &json!({"parts": null, "wait_s": 0})).ok();
+    assert!(wait_until(Duration::from_secs(10), || slot_use(&sa).1 == 1), "A took no slot");
+    sb.post("/build", &json!({"parts": null, "wait_s": 0})).ok();
+    assert!(one_worker_between(&sa, &sb), "B's job was never shown waiting for a slot");
+    for s in [&sa, &sb] {
+        let st = s.status();
+        assert!(states(&st).values().all(|v| v == "current"), "both built: {st}");
+    }
+
+    // A dies holding the slot: B gets it.
+    a.write("parts/slow.rhai", &slow_parts_counting(6_000_001));
+    b.write("parts/slow.rhai", &slow_parts_counting(6_000_001));
+    for s in [&sa, &sb] {
+        s.post("/discover", &json!({"files": null, "wait_s": 20})).ok();
+    }
+    sa.post("/build", &json!({"parts": null, "wait_s": 0})).ok();
+    assert!(wait_until(Duration::from_secs(10), || slot_use(&sa).1 == 1), "A took no slot");
+    sb.post("/build", &json!({"parts": null, "wait_s": 0})).ok();
+    assert!(wait_until(Duration::from_secs(10), || slot_use(&sb).2), "B does not wait");
+    kill(sa.pid, "KILL");
+    let built = wait_until(Duration::from_secs(30), || {
+        states(&sb.status()).values().all(|v| v == "current")
+    });
+    assert!(built, "B never got the slot of the dead service: {}", sb.status());
+    assert!(sb.shutdown(), "B stops");
+}
+
+/// The nice value of process `pid`.
+fn nice_of(pid: u32) -> i32 {
+    let out = Command::new("ps").args(["-o", "ni=", "-p", &pid.to_string()]).output();
+    let text = String::from_utf8_lossy(&out.expect("run ps").stdout).trim().to_owned();
+    text.parse().unwrap_or_else(|e| panic!("nice of {pid}: {text:?} ({e})"))
+}
+
+#[test]
+fn ws_pre_01_workers_run_at_a_lower_priority_than_their_service() {
+    // WS-PRE-01 under load (ADR-0055): OCCT keeps every core busy during a
+    // build; workers at nice 10 leave the CPU to the service, so `/status`
+    // still answers at once.
+    let p = Project::new("ws-pre-01-nice", "[workers]\ncount = 2\n");
+    p.write("parts/normal.rhai", NORMAL);
+    let s = Service::start(&p);
+    let done = s.post("/build", &json!({"parts": null, "wait_s": WAIT_S})).envelope();
+    assert_eq!(done["result"]["parts"]["Normal"]["state"], json!("built"), "{done}");
+    let workers = workers_of(s.pid);
+    assert!(!workers.is_empty(), "no warm workers after the build");
+    assert_eq!(nice_of(s.pid), nice_of(std::process::id()), "the service keeps its priority");
+    for worker in workers {
+        assert_eq!(nice_of(worker), nice_of(std::process::id()) + 10, "worker {worker}");
+    }
 }

@@ -65,6 +65,25 @@ pub struct Config {
     pub workers: Workers,
     pub cache: Cache,
     pub mesh: Mesh,
+    pub service: ServiceSettings,
+}
+
+/// Longest idle time before a service stops: a week (WS-PRE-05).
+const MAX_IDLE_MIN: f64 = 10080.0;
+
+/// The project service (WS-PRE-05).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct ServiceSettings {
+    /// Minutes without requests and without jobs after which the service
+    /// stops; fractions allowed.
+    pub idle_min: f64,
+}
+
+impl Default for ServiceSettings {
+    fn default() -> Self {
+        Self { idle_min: 30.0 }
+    }
 }
 
 /// Per-build limits of a worker (AG-PJ-05).
@@ -141,6 +160,8 @@ struct RawConfig {
     cache: Cache,
     #[serde(default)]
     mesh: Mesh,
+    #[serde(default)]
+    service: ServiceSettings,
 }
 
 #[derive(Deserialize)]
@@ -160,7 +181,8 @@ impl Config {
     /// # Errors
     /// Missing or malformed file, units other than mm, limits that are not
     /// positive or above their maximum (AG-HD-01),
-    /// `[cache] keep = 0`, non-positive mesh settings.
+    /// `[cache] keep = 0`, non-positive mesh settings, an idle time that is
+    /// not positive or above a week.
     pub fn load(root: &Path) -> Result<Self, ProjectError> {
         let file = PathBuf::from(layout::CONFIG_FILE);
         let text = read_text(&root.join(&file))?;
@@ -198,6 +220,9 @@ impl Config {
         if !positive(raw.mesh.angle_deg) {
             return Err(invalid("[mesh] angle_deg must be greater than 0"));
         }
+        if !(positive(raw.service.idle_min) && raw.service.idle_min <= MAX_IDLE_MIN) {
+            return Err(invalid("[service] idle_min must be greater than 0 and at most 10080"));
+        }
         Ok(Self {
             name: raw.project.name,
             units: raw.project.units,
@@ -205,6 +230,7 @@ impl Config {
             workers: raw.workers,
             cache: raw.cache,
             mesh: raw.mesh,
+            service: raw.service,
         })
     }
 }
@@ -254,17 +280,49 @@ fn read_text(path: &Path) -> Result<String, ProjectError> {
         .map_err(|source| ProjectError::Io { path: path.to_owned(), source })
 }
 
+/// SHA-256 of a file's bytes: how a file enters a cache key (§2.1), so the
+/// service can remember it per file instead of reading every file for
+/// every key (WS-PRE-01).
+pub type FileDigest = [u8; 32];
+
+/// The [`FileDigest`] of `bytes`.
+#[must_use]
+pub fn file_digest(bytes: &[u8]) -> FileDigest {
+    Sha256::digest(bytes).into()
+}
+
+/// The [`FileDigest`] of the file `path`, read in chunks, so a large import
+/// is never held in memory as a whole.
+///
+/// # Errors
+/// The file cannot be opened or read.
+pub fn read_digest(path: &Path) -> std::io::Result<FileDigest> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut chunk = vec![0u8; 1 << 16];
+    loop {
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            return Ok(hash.finalize().into());
+        }
+        hash.update(&chunk[..n]);
+    }
+}
+
 /// The inputs of a part's cache key (§2.1).
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyInputs {
     /// Everything about the building program that changes its output: the
-    /// version and the tessellation settings (AG-PF-05), composed by the caller.
+    /// version, the kernel and the tessellation settings (AG-PF-05,
+    /// WS-PRE-02), composed by the caller.
     pub program_version: String,
-    pub part_file: Vec<u8>,
-    /// Bytes of every transitively imported module, in [`resolve_imports`]
-    /// order, followed by the bytes of the files the build imported with
+    /// Digest of the part file.
+    pub part_file: FileDigest,
+    /// Digests of every transitively imported module, in [`resolve_imports`]
+    /// order, followed by those of the files the build imported with
     /// `import_step` and `import_mesh` (AG-SC-24).
-    pub modules: Vec<Vec<u8>>,
+    pub modules: Vec<FileDigest>,
     /// Values read in the last build; empty before the first build. The
     /// order does not matter, the key sorts them.
     pub values_read: Vec<(String, serde_json::Value)>,

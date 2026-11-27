@@ -15,6 +15,9 @@ pub const OUT_DIR: &str = "out";
 pub const SERVICE_JSON: &str = "service.json";
 /// Lock that keeps one service per project, inside [`DATA_DIR`].
 pub const SERVICE_LOCK: &str = "service.lock";
+/// Counts of the part, check, job and load-error states, inside [`DATA_DIR`]:
+/// what an overview reads without asking the service (WS-PRE-04).
+pub const SUMMARY_JSON: &str = "summary.json";
 /// Build results per part, inside [`DATA_DIR`].
 pub const CACHE_DIR: &str = "cache";
 /// Meshes of throwaway scripts for pictures, inside [`DATA_DIR`] (AG-MC-12).
@@ -28,6 +31,11 @@ pub fn data_dir(dir: &Path) -> PathBuf {
 /// `<dir>/.qoob3d/service.json`.
 pub fn service_json(dir: &Path) -> PathBuf {
     data_dir(dir).join(SERVICE_JSON)
+}
+
+/// `<dir>/.qoob3d/summary.json`.
+pub fn summary_json(dir: &Path) -> PathBuf {
+    data_dir(dir).join(SUMMARY_JSON)
 }
 
 /// `<dir>/.qoob3d/run/<job>`: meshes of the shapes a throwaway script showed.

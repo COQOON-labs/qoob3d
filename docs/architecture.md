@@ -56,13 +56,24 @@ flowchart LR
    only records), and in a worker too: the service never evaluates a script (ADR-0055);
    `/status` answers from the last known declarations and lists files that do not load per
    file. Cache entries `.qoob3d/cache/<part>/<key>.{brep,qmsh,json}` are written by the
-   worker and carry whether the mesh is watertight.
+   worker and carry whether the mesh is watertight. Files enter the cache key as their
+   SHA-256, which the service remembers by path, size and modification time and never computes
+   while it holds its lock; large imports are hashed in the background, keys are remembered
+   with their inputs and workers run at nice 10, so `/status` stays within its 100 ms. The key
+   includes a fingerprint of the kernel sources, the OCCT fork, the core code the kernel runs
+   and the kernel's locked dependencies (`qoob3d-project/build.rs`). The service writes `.qoob3d/summary.json` (counts of part,
+   check, job and load-error states) for overviews that read files only, stops after
+   `[service] idle_min` without requests and jobs, and shares a machine-wide budget of busy
+   workers with the services of other projects through slot lock files in the per-user
+   runtime folder (ADR-0055, `docs/requirements/workspace.md` S0).
    The service is for local tools only (ADR-0055): a random token per start in
    `.qoob3d/service.json` is required as `X-Qoob3d-Token`, requests with an `Origin` or a
    foreign `Host` get 403 before routing; clients (`client::Client`: app, CLI, MCP,
    `render-project`) read port and token from that file, again whenever there is no answer,
-   and percent-encode names in paths. A panic in a job thread fails the job with kind
-   `crash`; the worker it held is replaced.
+   and percent-encode names in paths. A service that runs (its process is alive and holds
+   `service.lock`) but does not answer is reported as `busy`; the client starts no second
+   one. A panic in a job thread fails the job with kind `crash`; the worker it held is
+   replaced.
 4. **Tasks, checks, MCP** (ADR-0054, `docs/requirements/agent.md` §4): `tasks/NNNN-slug.md`
    is the task inbox; the service serves it (`/tasks`, `/task/<id>`) and evaluates the review
    gate from its own part and check states (a task needs a part and a check bound, which the
@@ -94,8 +105,8 @@ flowchart LR
 | --- | --- | --- |
 | App main/UI (winit, eframe) | egui context, `Viewport` (Camera, Renderer), `Live` | do HTTP or wait for the service |
 | App `Poller` thread | the service client | touch UI or GPU types |
-| `qoob3d serve`: connection threads, `qoob3d-jobs` runner, one thread per running part | jobs, part records, worker pool | run OCCT, block `/status` behind a build |
-| `qoob3d worker` (process) | the OCCT shapes of one build | outlive its service (exits when stdin closes) |
+| `qoob3d serve`: connection threads, `qoob3d-jobs` runner, one thread per running part, `qoob3d-declare` per discovered file, `qoob3d-hash` (large imports), `qoob3d-summary`, `qoob3d-idle` | jobs, part records, worker pool, digest memo, held worker slots | run OCCT, read or hash files while holding the service lock, block `/status` behind a build |
+| `qoob3d worker` (process, nice 10 below its service) | the OCCT shapes of one build | outlive its service (exits when stdin closes) |
 
 ## Crate dependencies (enforced by `cargo xtask check`, ADR-0036)
 

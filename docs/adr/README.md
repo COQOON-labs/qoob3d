@@ -24,6 +24,7 @@ topic gets a new file: copy `docs/adr/0000-template.md`, take the next free numb
 | [ADR-0053](0053-script-projects.md) | A model is a project folder of Rhai scripts on our own OCCT kernel, built by a local service in worker processes with limits and an exact cache | accepted | 2026-11-23 | qoob3d-core, qoob3d-kernel, qoob3d-project, qoob3d-app |
 | [ADR-0054](0054-project-workspace-tasks-checks-mcp.md) | The project folder is the shared workspace of human and agent, with a task inbox, checks as the review gate and MCP as the agent's main interface | accepted | 2026-11-23 | qoob3d-core, qoob3d-kernel, qoob3d-project, qoob3d-app |
 | [ADR-0055](0055-project-service-internals.md) | The project service runs once per folder under a file lock, talks to its workers in framed JSON lines, never evaluates user scripts itself and accepts only local requests with a per-start token | accepted | 2026-11-23 | qoob3d-core, qoob3d-kernel, qoob3d-project |
+| [ADR-0057](0057-workbench-agents-and-claude-accounts.md) | The app is a workbench over many projects and runs Claude agents through the human's own installed Claude Code, one config folder per account, without ever handling credentials | accepted | 2026-11-27 | qoob3d-project, qoob3d-app |
 <!-- adr-index:end -->
 
 ## Former numbers

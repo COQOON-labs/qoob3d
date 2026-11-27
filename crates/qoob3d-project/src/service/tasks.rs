@@ -50,10 +50,24 @@ impl From<TaskError> for Failure {
     }
 }
 
-/// Today (UTC) as `YYYY-MM-DD`: days since 1970 to a civil date (Howard
-/// Hinnant's `civil_from_days`).
+/// Today (UTC) as `YYYY-MM-DD`.
 fn today() -> String {
     let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    civil_date(seconds)
+}
+
+/// Now (UTC) as `YYYY-MM-DDTHH:MM:SS.mmmZ` (WS-PRE-04).
+pub(crate) fn utc_now() -> String {
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let seconds = since.as_secs();
+    let (h, m, s) = (seconds / 3600 % 24, seconds / 60 % 60, seconds % 60);
+    let millis = since.subsec_millis();
+    format!("{}T{h:02}:{m:02}:{s:02}.{millis:03}Z", civil_date(seconds))
+}
+
+/// The UTC date of `seconds` since 1970 as `YYYY-MM-DD` (Howard Hinnant's
+/// `civil_from_days`).
+fn civil_date(seconds: u64) -> String {
     let z = seconds / 86_400 + 719_468;
     let (era, doe) = (z / 146_097, z % 146_097);
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;

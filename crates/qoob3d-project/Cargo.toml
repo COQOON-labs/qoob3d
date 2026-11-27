@@ -15,6 +15,14 @@ serde_json = "1"
 # Process code (service, worker, MCP server) reports errors with context (ADR-0036).
 anyhow.workspace = true
 tracing.workspace = true
+# Workers lower their own priority (WS-PRE-01, ADR-0055); safe `setpriority`.
+rustix = { version = "1", features = ["process"] }
+
+[build-dependencies]
+# The kernel fingerprint in the cache key (WS-PRE-02): the hash and the `Cargo.lock`
+# reader; both already used by qoob3d-core.
+sha2 = "0.10"
+toml = "1"
 
 [lints]
 workspace = true

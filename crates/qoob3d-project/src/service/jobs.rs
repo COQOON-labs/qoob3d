@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::panic::AssertUnwindSafe;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, PoisonError};
@@ -228,6 +229,22 @@ impl Service {
         state
     }
 
+    /// Waits up to `timeout` until no job runs or waits (shutdown, after
+    /// [`Self::cancel_all`]).
+    pub(crate) fn wait_idle(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        let open: Vec<u64> = self
+            .lock()
+            .jobs
+            .iter()
+            .filter(|(_, j)| !j.state.finished())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in open {
+            self.wait(id, Some(deadline.saturating_duration_since(Instant::now())));
+        }
+    }
+
     /// Cancels every job (shutdown).
     pub(crate) fn cancel_all(&self) {
         let ids: Vec<u64> = self.lock().jobs.keys().copied().collect();
@@ -343,7 +360,10 @@ impl Service {
                     let dependency_keys: Vec<String> =
                         part.depends.iter().map(|d| done[d.as_str()].0.clone()).collect();
                     let reads = record(&mut self.lock().records, &self.dir, &part.name).reads();
-                    let key = snapshot.key(&self.dir, part, &reads, dependency_keys);
+                    let mut digest = |path: &Path| Some(self.hashes.digest(path));
+                    let key = snapshot
+                        .key(&self.dir, part, &reads, dependency_keys, &mut digest, &self.hashes)
+                        .unwrap_or_default();
                     let failed_dependency = part.depends.iter().find(|d| !done[d.as_str()].1);
                     let outcome = if cancel.load(Ordering::SeqCst) {
                         Outcome::Cancelled
@@ -383,7 +403,7 @@ impl Service {
                             // Caught here, so the part fails and the loop
                             // below still gets its message (AG-HD-01).
                             let outcome = caught(|| {
-                                let run = self.pool.run(&request, limits, cancel);
+                                let run = self.work(&request, limits, cancel);
                                 let outcome = Outcome::from_worker(run);
                                 if let Outcome::Built { key, .. } = &outcome {
                                     let keep = snapshot.config.cache.keep;

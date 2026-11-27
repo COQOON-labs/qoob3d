@@ -11,9 +11,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use qoob3d_core::project::layout;
-use qoob3d_core::project::{self, Config, Graph, KeyInputs, PartDecl, Values};
+use qoob3d_core::project::{self, Config, FileDigest, Graph, KeyInputs, PartDecl, Values};
 use serde_json::Value;
 
+use super::Service;
+use super::hashes::Hashes;
 use crate::worker::{Declaration, ErrorKind, PartError, key_version};
 
 /// What a part or check file declares, or why it does not load.
@@ -25,8 +27,11 @@ pub(crate) struct FileDecl {
     /// Hash of the file and its literally imported modules: the key of the
     /// declaration cache.
     pub(crate) fingerprint: String,
-    source: Vec<u8>,
-    modules: Vec<Vec<u8>>,
+    /// Digest of the file.
+    digest: FileDigest,
+    /// The modules it imports literally (AG-HD-06: the cache key before the
+    /// first build).
+    modules: Vec<PathBuf>,
     /// The declarations of these bytes; `None` while discovery runs.
     pub(crate) declared: Option<Declared>,
     /// The last declarations of the file that loaded, from earlier bytes
@@ -35,35 +40,28 @@ pub(crate) struct FileDecl {
 }
 
 impl FileDecl {
-    /// Reads `file` (relative to `dir`) and the modules it imports
-    /// literally; a file that cannot be read is a load error of its own.
-    pub(crate) fn read(dir: &Path, file: PathBuf) -> Self {
-        let read =
-            |f: &Path| std::fs::read(dir.join(f)).map_err(|e| format!("{}: {e}", f.display()));
-        let inputs = read(&file).and_then(|source| {
-            let modules = project::resolve_imports(dir, &file)
-                .map_err(|e| e.to_string())?
-                .iter()
-                .map(|m| read(m))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok((source, modules))
-        });
-        match inputs {
-            Ok((source, modules)) => {
+    /// Finds the digests of `file` (relative to `dir`) and of the modules
+    /// it imports literally, through `hashes` (WS-PRE-01); a file that
+    /// cannot be read is a load error of its own.
+    pub(crate) fn read(dir: &Path, file: PathBuf, hashes: &Hashes) -> Self {
+        // The scan reads the file, so a file that cannot be read fails here.
+        match hashes.imports(dir, &file) {
+            Ok(modules) => {
+                let digest = hashes.digest(&dir.join(&file));
                 let fingerprint = project::cache_key(&KeyInputs {
                     program_version: String::new(),
-                    part_file: source.clone(),
-                    modules: modules.clone(),
+                    part_file: digest,
+                    modules: modules.iter().map(|m| hashes.digest(&dir.join(m))).collect(),
                     values_read: Vec::new(),
                     dependency_keys: Vec::new(),
                 });
-                Self { file, fingerprint, source, modules, declared: None, last: None }
+                Self { file, fingerprint, digest, modules, declared: None, last: None }
             }
-            Err(message) => Self {
-                declared: Some(Err(load_error_of(&file, message))),
+            Err(e) => Self {
+                declared: Some(Err(load_error_of(&file, e.to_string()))),
                 file,
                 fingerprint: String::new(),
-                source: Vec::new(),
+                digest: FileDigest::default(),
                 modules: Vec::new(),
                 last: None,
             },
@@ -100,8 +98,8 @@ pub(crate) struct PartSource {
     pub(crate) color: Option<String>,
     pub(crate) print_with: Option<String>,
     pub(crate) discovered: Discovered,
-    source: Vec<u8>,
-    modules: Vec<Vec<u8>>,
+    digest: FileDigest,
+    modules: Vec<PathBuf>,
 }
 
 pub(crate) struct Snapshot {
@@ -150,7 +148,7 @@ impl Snapshot {
                     color: part.color,
                     print_with: part.print_with,
                     discovered: discovered.clone(),
-                    source: f.source.clone(),
+                    digest: f.digest,
                     modules: f.modules.clone(),
                 });
             }
@@ -177,14 +175,17 @@ impl Snapshot {
     /// Cache key of `part` with the current values and module files that
     /// its last build read (`reads`) and the keys of its dependencies (§2.1).
     /// Before the first build the modules are the literal imports found by
-    /// the scan (AG-HD-06).
+    /// the scan (AG-HD-06). `digest` gives the digest of an absolute path,
+    /// `None` while it is not known yet (WS-PRE-01); then the key is `None`.
     pub(crate) fn key(
         &self,
         dir: &Path,
         part: &PartSource,
         reads: &Reads,
         dependency_keys: Vec<String>,
-    ) -> String {
+        digest: &mut dyn FnMut(&Path) -> Option<FileDigest>,
+        hashes: &Hashes,
+    ) -> Option<String> {
         let values_read = reads
             .values
             .iter()
@@ -193,18 +194,20 @@ impl Snapshot {
         // A module or imported file that is gone hashes as empty: the key
         // changes, the part is outdated and its build reports the missing
         // file. Imported files follow the modules, as in the worker.
-        let read = |files: &[PathBuf]| -> Vec<Vec<u8>> {
-            files.iter().map(|m| std::fs::read(dir.join(m)).unwrap_or_default()).collect()
-        };
-        let mut modules = reads.modules.as_deref().map_or_else(|| part.modules.clone(), read);
-        modules.extend(read(&reads.files));
-        project::cache_key(&KeyInputs {
+        let modules = reads.modules.as_deref().unwrap_or(&part.modules);
+        let modules = modules
+            .iter()
+            .chain(&reads.files)
+            .map(|m| digest(&dir.join(m)))
+            .collect::<Option<Vec<_>>>()?;
+        let inputs = KeyInputs {
             program_version: key_version(&self.config.mesh),
-            part_file: part.source.clone(),
+            part_file: part.digest,
             modules,
             values_read,
             dependency_keys,
-        })
+        };
+        Some(hashes.key(&part.name, &inputs))
     }
 
     /// `names` and all their dependencies in build order; `None` = all parts.
@@ -259,7 +262,7 @@ pub(crate) struct Record {
 
 /// What the last successful build of a part read: the inputs of its cache
 /// key that only a run can know.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct Reads {
     /// Value ids.
     values: Vec<String>,
@@ -389,53 +392,152 @@ pub(crate) fn record<'a>(
     r
 }
 
-/// Expected key and state of every part, in build order.
-pub(crate) fn views(
-    dir: &Path,
-    snapshot: &Snapshot,
-    records: &mut HashMap<String, Record>,
-) -> Vec<PartView> {
-    let mut keys: HashMap<&str, String> = HashMap::new();
-    let mut out = Vec::with_capacity(snapshot.parts.len());
-    for part in &snapshot.parts {
-        let r = record(records, dir, &part.name);
-        let dependency_keys = part
-            .depends
-            .iter()
-            .map(|d| keys.get(d.as_str()).cloned().unwrap_or_default())
-            .collect();
-        let expected = snapshot.key(dir, part, &r.reads(), dependency_keys);
-        let mut error = None;
-        let state = if let Discovered::Failed(e) = &part.discovered {
-            error = Some(e.clone());
-            State::Failed
-        } else if matches!(part.discovered, Discovered::Running) {
-            // ADR-0055: earlier declarations while the file is rediscovered.
-            State::Outdated
-        } else if r.failed.as_ref().is_some_and(|(k, _)| *k == expected) {
-            error = r.failed.as_ref().map(|(_, e)| e.clone());
-            State::Failed
-        } else if r.built.as_ref().is_some_and(|(k, _)| *k == expected) {
-            State::Current
-        } else if let Some(meta) = cached(dir, &part.name, &expected) {
-            r.built = Some((expected.clone(), meta));
-            State::Current
-        } else if r.built.is_some() || r.failed.is_some() {
-            State::Outdated
-        } else {
-            State::NeverBuilt
+/// How [`Service::views`] gets the digests of files.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hashing {
+    /// Hashes what it needs (builds, checks, the review gate).
+    Wait,
+    /// Never waits for a large file (`/status`, `/mesh`): parts whose key
+    /// needs one that is still hashed are `outdated` meanwhile.
+    Background,
+}
+
+/// What [`Service::views`] needs of a part's record, copied out of the lock.
+struct Seen {
+    reads: Reads,
+    built: Option<String>,
+    failed: Option<(String, PartError)>,
+}
+
+impl Service {
+    /// The records of the parts of `snapshot`, completed from their cache
+    /// folders on first use; the folders are read outside the lock.
+    fn seen(&self, snapshot: &Snapshot) -> Vec<Seen> {
+        let dir = &self.dir;
+        let unscanned: Vec<&str> = {
+            let st = self.lock();
+            snapshot
+                .parts
+                .iter()
+                .map(|p| p.name.as_str())
+                .filter(|name| st.records.get(*name).is_none_or(|r| !r.scanned))
+                .collect()
         };
-        out.push(PartView {
-            name: part.name.clone(),
-            file: part.file.display().to_string(),
-            state,
-            key: r.built.as_ref().map(|(k, _)| k.clone()),
-            error,
-            pose: part.print.clone(),
-            color: part.color.clone(),
-            print_with: part.print_with.clone(),
-        });
-        keys.insert(&part.name, expected);
+        let found: Vec<(&str, Option<(String, Value)>)> =
+            unscanned.into_iter().map(|name| (name, newest(dir, name))).collect();
+        let mut st = self.lock();
+        for (name, newest) in found {
+            let r = st.records.entry(name.to_owned()).or_default();
+            if !r.scanned {
+                r.scanned = true;
+                if r.built.is_none() {
+                    r.built = newest;
+                }
+            }
+        }
+        snapshot
+            .parts
+            .iter()
+            .map(|p| {
+                let r = st.records.get(&p.name);
+                Seen {
+                    reads: r.map(Record::reads).unwrap_or_default(),
+                    built: r.and_then(|r| r.built.as_ref()).map(|(k, _)| k.clone()),
+                    failed: r.and_then(|r| r.failed.clone()),
+                }
+            })
+            .collect()
     }
-    out
+
+    /// Expected key and state of every part, in build order. The service
+    /// lock is held only to copy and update records, never while files are
+    /// read or hashed (WS-PRE-01).
+    pub(crate) fn views(&self, snapshot: &Snapshot, hashing: Hashing) -> Vec<PartView> {
+        let dir = &self.dir;
+        let seen = self.seen(snapshot);
+        let hashes = &self.hashes;
+        // Once per call: parts share modules and imported files.
+        let mut asked: HashMap<PathBuf, Option<FileDigest>> = HashMap::new();
+        let mut digest = |path: &Path| {
+            if let Some(known) = asked.get(path) {
+                return *known;
+            }
+            let digest = match hashing {
+                Hashing::Wait => Some(hashes.digest(path)),
+                Hashing::Background => hashes.known(path),
+            };
+            asked.insert(path.to_owned(), digest);
+            digest
+        };
+        // `None`: not known while a file is hashed.
+        let mut keys: HashMap<&str, Option<String>> = HashMap::new();
+        // Complete cache entries found for the expected key: (part, built
+        // key seen, new built entry).
+        let mut entries = Vec::new();
+        let mut out = Vec::with_capacity(snapshot.parts.len());
+        for (part, seen) in snapshot.parts.iter().zip(seen) {
+            let dependency_keys: Option<Vec<String>> = part
+                .depends
+                .iter()
+                .map(|d| keys.get(d.as_str()).cloned().unwrap_or(Some(String::new())))
+                .collect();
+            let expected = dependency_keys
+                .and_then(|deps| snapshot.key(dir, part, &seen.reads, deps, &mut digest, hashes));
+            let mut error = None;
+            let mut built = seen.built.clone();
+            let state = if let Discovered::Failed(e) = &part.discovered {
+                error = Some(e.clone());
+                State::Failed
+            } else if matches!(part.discovered, Discovered::Running) {
+                // ADR-0055: earlier declarations while the file is rediscovered.
+                State::Outdated
+            } else if let Some(expected) = &expected {
+                if seen.failed.as_ref().is_some_and(|(k, _)| k == expected) {
+                    error = seen.failed.as_ref().map(|(_, e)| e.clone());
+                    State::Failed
+                } else if seen.built.as_ref() == Some(expected) {
+                    State::Current
+                } else if let Some(meta) = cached(dir, &part.name, expected) {
+                    entries.push((
+                        part.name.as_str(),
+                        seen.built.clone(),
+                        (expected.clone(), meta),
+                    ));
+                    built = Some(expected.clone());
+                    State::Current
+                } else if seen.built.is_some() || seen.failed.is_some() {
+                    State::Outdated
+                } else {
+                    State::NeverBuilt
+                }
+            } else if seen.built.is_some() || seen.failed.is_some() {
+                State::Outdated
+            } else {
+                State::NeverBuilt
+            };
+            out.push(PartView {
+                name: part.name.clone(),
+                file: part.file.display().to_string(),
+                state,
+                key: built,
+                error,
+                pose: part.print.clone(),
+                color: part.color.clone(),
+                print_with: part.print_with.clone(),
+            });
+            keys.insert(&part.name, expected);
+        }
+        if !entries.is_empty() {
+            let mut st = self.lock();
+            for (name, seen, entry) in entries {
+                // Unless a build recorded another entry meanwhile.
+                if let Some(r) = st.records.get_mut(name)
+                    && r.built.as_ref().map(|(k, _)| k) == seen.as_ref()
+                {
+                    r.built = Some(entry);
+                }
+            }
+        }
+        out
+    }
 }

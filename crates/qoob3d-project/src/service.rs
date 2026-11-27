@@ -10,13 +10,16 @@
 mod bench;
 mod checks;
 mod discovery;
+mod hashes;
 mod http;
 mod jobs;
 mod pool;
 mod probe;
 mod save;
 mod slicer;
+mod slots;
 pub(crate) mod snapshot;
+mod summary;
 mod tasks;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -24,7 +27,7 @@ use std::hash::{BuildHasher as _, RandomState};
 use std::io::Read as _;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -32,17 +35,19 @@ use anyhow::{Context as _, bail};
 use qoob3d_core::export::{self, ExportObject};
 use qoob3d_core::fs::write_atomic;
 use qoob3d_core::project::layout;
-use qoob3d_core::project::{Config, Limits, Mesh, ValueStatus, Values, Workers};
+use qoob3d_core::project::{Config, Limits, Mesh, ServiceSettings, ValueStatus, Values, Workers};
 use qoob3d_core::qmesh;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use self::checks::CheckRecord;
 use self::discovery::{Discovery, discovering};
+use self::hashes::Hashes;
 use self::http::Reply;
 use self::jobs::Job;
 use self::pool::Pool;
-use self::snapshot::{Record, Snapshot, views};
+use self::slots::{Slot, Slots};
+use self::snapshot::{Hashing, Record, Snapshot};
 use crate::client::ProjectDir;
 use crate::worker::{ErrorKind, PartError, Request};
 
@@ -52,6 +57,8 @@ const STOP_WAIT: Duration = Duration::from_secs(3);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Jobs listed by `/status`, the newest ones (AG-HD-10).
 const STATUS_JOBS: usize = 20;
+/// How often the idle time is looked at (WS-PRE-05).
+const IDLE_TICK: Duration = Duration::from_secs(1);
 
 pub(crate) struct Service {
     dir: PathBuf,
@@ -61,6 +68,8 @@ pub(crate) struct Service {
     pool: Arc<Pool>,
     /// Declarations of the part and check files (ADR-0055).
     discovery: Arc<Discovery>,
+    /// Digests of the files behind keys and declarations (WS-PRE-01).
+    hashes: Arc<Hashes>,
     state: Mutex<State>,
     /// Held while a task file is created or changed, so two requests never
     /// pick the same number or lose each other's log line (AG-HD-07).
@@ -70,6 +79,30 @@ pub(crate) struct Service {
     stopping: AtomicBool,
     /// Ids of worker requests.
     requests: AtomicU64,
+    /// When the last allowed request came or ended (WS-PRE-05).
+    last_request: Mutex<Instant>,
+    /// The machine-wide worker budget (WS-PRE-06).
+    slots: Slots,
+    /// Slots this service holds, and requests that wait for one.
+    slots_held: AtomicUsize,
+    slots_waiting: AtomicUsize,
+}
+
+/// The reason of a job that waits for the machine-wide budget (WS-PRE-06).
+const WAITING_FOR_SLOT: &str = "waiting for a worker slot";
+/// How often a request that waits for a slot tries again.
+const SLOT_POLL: Duration = Duration::from_millis(50);
+
+/// A slot of the budget held by a request of this service.
+struct Held<'a> {
+    service: &'a Service,
+    _slot: Option<Slot>,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.service.slots_held.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Default)]
@@ -121,7 +154,9 @@ pub fn serve(dir: &Path) -> anyhow::Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).context("binding a port")?;
     let port = listener.local_addr()?.port();
     // Read once at the start (AG-PF-06); a broken file is reported by `/status`.
-    let workers = Config::load(&dir).map_or_else(|_| Workers::default(), |c| c.workers);
+    let config = Config::load(&dir).ok();
+    let workers = config.as_ref().map_or_else(Workers::default, |c| c.workers.clone());
+    let idle = config.map_or_else(ServiceSettings::default, |c| c.service).idle_min;
     let exe = std::env::current_exe().context("locating the qoob3d executable")?;
     let service = Arc::new(Service {
         pool: Arc::new(Pool::start(exe, workers.count, workers.recycle_mb)),
@@ -130,10 +165,15 @@ pub fn serve(dir: &Path) -> anyhow::Result<()> {
         token: random_token(),
         task_writes: Mutex::new(()),
         discovery: Arc::default(),
+        hashes: Arc::default(),
         state: Mutex::new(State::default()),
         changed: Condvar::new(),
         stopping: AtomicBool::new(false),
         requests: AtomicU64::new(0),
+        last_request: Mutex::new(Instant::now()),
+        slots: Slots::new(),
+        slots_held: AtomicUsize::new(0),
+        slots_waiting: AtomicUsize::new(0),
     });
     let service_json = data.join(layout::SERVICE_JSON);
     let info = json!({"port": port, "pid": std::process::id(), "token": service.token}).to_string();
@@ -144,6 +184,15 @@ pub fn serve(dir: &Path) -> anyhow::Result<()> {
     let _started = service.declarations(Some(Duration::ZERO));
     let runner = Arc::clone(&service);
     std::thread::Builder::new().name("qoob3d-jobs".into()).spawn(move || runner.run_jobs())?;
+    let summariser = Arc::clone(&service);
+    let summary = std::thread::Builder::new()
+        .name("qoob3d-summary".into())
+        .spawn(move || summariser.summarise())?;
+    let watcher = Arc::clone(&service);
+    let idle = Duration::from_secs_f64(idle * 60.0);
+    std::thread::Builder::new()
+        .name("qoob3d-idle".into())
+        .spawn(move || watcher.watch_idle(idle))?;
     for stream in listener.incoming() {
         if service.stopping.load(Ordering::SeqCst) {
             break;
@@ -155,6 +204,10 @@ pub fn serve(dir: &Path) -> anyhow::Result<()> {
     service.cancel_all();
     service.changed.notify_all();
     service.pool.close(STOP_WAIT);
+    // WS-PRE-04: the last state, with the jobs cancelled, stays for the overview.
+    summary.join().ok();
+    service.wait_idle(STOP_WAIT);
+    service.write_summary(None);
     std::fs::remove_file(&service_json).ok();
     drop(lock);
     tracing::info!("project service stopped");
@@ -251,6 +304,98 @@ impl Service {
         same && local && !request.origin
     }
 
+    /// Stops the service from any thread: the accept loop is woken by a
+    /// connection of its own and sees the flag.
+    fn stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        self.changed.notify_all();
+        TcpStream::connect((Ipv4Addr::LOCALHOST, self.port)).ok();
+    }
+
+    /// Stops the service after `idle` without requests and without jobs
+    /// (WS-PRE-05); a job that ends starts the idle time anew.
+    fn watch_idle(&self, idle: Duration) {
+        let mut quiet_since = Instant::now();
+        while !self.stopping.load(Ordering::SeqCst) {
+            std::thread::sleep(IDLE_TICK.min(idle));
+            if self.lock().jobs.values().any(|j| !j.state.finished()) {
+                quiet_since = Instant::now();
+                continue;
+            }
+            let last = *self.last_request.lock().unwrap_or_else(PoisonError::into_inner);
+            if last.max(quiet_since).elapsed() >= idle {
+                tracing::info!(idle_s = idle.as_secs_f64(), "project service idle, stopping");
+                self.stop();
+            }
+        }
+    }
+
+    /// Runs `request` on a worker once a slot of the machine-wide budget is
+    /// free (WS-PRE-06): every worker request but declaration discovery.
+    ///
+    /// # Errors
+    /// As [`Pool::run`]; cancelled while it waits for a slot.
+    pub(crate) fn work(
+        &self,
+        request: &Request,
+        limits: &Limits,
+        cancel: &AtomicBool,
+    ) -> Result<crate::worker::Answer, PartError> {
+        let held = self.slot(cancel)?;
+        let answer = self.pool.run(request, limits, cancel);
+        drop(held);
+        answer
+    }
+
+    fn slot(&self, cancel: &AtomicBool) -> Result<Held<'_>, PartError> {
+        let mut waiting = false;
+        loop {
+            if let Some(slot) = self.slots.try_take() {
+                self.slots_held.fetch_add(1, Ordering::SeqCst);
+                if waiting {
+                    self.slots_waiting.fetch_sub(1, Ordering::SeqCst);
+                }
+                return Ok(Held { service: self, _slot: slot });
+            }
+            if !waiting {
+                waiting = true;
+                self.slots_waiting.fetch_add(1, Ordering::SeqCst);
+            }
+            if cancel.load(Ordering::SeqCst) || self.stopping.load(Ordering::SeqCst) {
+                self.slots_waiting.fetch_sub(1, Ordering::SeqCst);
+                return Err(PartError::new(ErrorKind::Cancelled, "cancelled"));
+            }
+            std::thread::sleep(SLOT_POLL);
+        }
+    }
+
+    /// The state of `job` as clients see it, with its reason: a running
+    /// job that holds no slot while one is waited for is `queued`
+    /// (WS-PRE-06; jobs of one service run one after another).
+    fn shown(&self, job: &Job) -> (jobs::JobState, Option<&'static str>) {
+        let waits = self.slots_held.load(Ordering::SeqCst) == 0
+            && self.slots_waiting.load(Ordering::SeqCst) > 0;
+        if job.state == jobs::JobState::Running && waits {
+            (jobs::JobState::Queued, Some(WAITING_FOR_SLOT))
+        } else {
+            (job.state, None)
+        }
+    }
+
+    /// `{id, state, kind, reason?}` of a job in `/status`.
+    fn job_entry(&self, id: u64, job: &Job) -> Value {
+        let (state, reason) = self.shown(job);
+        let mut entry = json!({"id": id, "state": state, "kind": job.kind()});
+        if let Some(reason) = reason {
+            entry["reason"] = json!(reason);
+        }
+        entry
+    }
+
+    fn touch(&self) {
+        *self.last_request.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
+    }
+
     fn next_request(&self) -> u64 {
         self.requests.fetch_add(1, Ordering::SeqCst) + 1
     }
@@ -259,7 +404,12 @@ impl Service {
         stream.set_read_timeout(Some(CLIENT_TIMEOUT)).ok();
         let start = Instant::now();
         let reply = match http::read_request(&stream) {
-            Ok(request) if self.allowed(&request) => self.route(&request, start),
+            Ok(request) if self.allowed(&request) => {
+                self.touch();
+                let reply = self.route(&request, start);
+                self.touch();
+                reply
+            }
             Ok(_) => {
                 let message = "missing or wrong X-Qoob3d-Token (see .qoob3d/service.json), \
                                a foreign Host or an Origin header";
@@ -331,26 +481,32 @@ impl Service {
             .collect();
         let snapshot = part_files.and_then(|files| Snapshot::load(&self.dir, files));
         let declared = check_files.and_then(checks::load);
-        let mut st = self.lock();
+        let parts = snapshot.as_ref().map(|s| self.views(s, Hashing::Background)).ok();
+        let st = self.lock();
         let first = st.jobs.len().saturating_sub(STATUS_JOBS);
-        let jobs: Vec<Value> = st
-            .jobs
-            .iter()
-            .skip(first)
-            .map(|(id, j)| json!({"id": id, "state": j.state, "kind": j.kind()}))
-            .collect();
+        let jobs: Vec<Value> =
+            st.jobs.iter().skip(first).map(|(id, j)| self.job_entry(*id, j)).collect();
         let mut result = json!({
             "project": Value::Null,
             "parts": [],
             "checks": [],
             "jobs": jobs,
-            "workers": {"count": count, "busy": busy, "recycled": self.pool.recycled()},
+            "workers": {
+                "count": count,
+                "busy": busy,
+                "recycled": self.pool.recycled(),
+                "slots": {
+                    "budget": self.slots.budget(),
+                    "held": self.slots_held.load(Ordering::SeqCst),
+                    "waiting": self.slots_waiting.load(Ordering::SeqCst),
+                },
+            },
         });
         let mut load_errors = Vec::new();
         match snapshot {
             Ok(s) => {
                 result["project"] = json!(s.config.name);
-                result["parts"] = json!(views(&self.dir, &s, &mut st.records));
+                result["parts"] = json!(parts.unwrap_or_default());
                 load_errors.extend(s.load_errors);
             }
             Err(message) => {
@@ -375,6 +531,12 @@ impl Service {
         }
         result["load_errors"] = json!(load_errors);
         result["discovering"] = json!(pending);
+        // WS-PRE-01: large files hashed in the background; their parts are
+        // `outdated` until the digests are known.
+        let hashing: Vec<String> = (self.hashes.pending().iter())
+            .map(|f| f.strip_prefix(&self.dir).unwrap_or(f).display().to_string())
+            .collect();
+        result["hashing"] = json!(hashing);
         result
     }
 
@@ -393,7 +555,12 @@ impl Service {
         let st = self.lock();
         let job = st.jobs.get(&id).ok_or_else(|| unknown_job(id))?;
         if !job.state.finished() {
-            return Ok(json!({"job": id, "state": job.state}));
+            let (state, reason) = self.shown(job);
+            let mut entry = json!({"job": id, "state": state});
+            if let Some(reason) = reason {
+                entry["reason"] = json!(reason);
+            }
+            return Ok(entry);
         }
         match &job.error {
             Some(e) => Err(Failure::from(e.clone())),
@@ -403,21 +570,27 @@ impl Service {
 
     fn job(&self, id: &str) -> Answer {
         let id = job_id(id)?;
-        self.lock().jobs.get(&id).map(|j| j.json(id)).ok_or_else(|| unknown_job(id))
+        let st = self.lock();
+        let job = st.jobs.get(&id).ok_or_else(|| unknown_job(id))?;
+        let mut v = job.json(id);
+        let (state, reason) = self.shown(job);
+        v["state"] = json!(state);
+        if let Some(reason) = reason {
+            v["reason"] = json!(reason);
+        }
+        Ok(v)
     }
 
     /// `GET /mesh/<part>` (WA-PR-02): the qmesh of the last successful build.
     fn mesh(&self, part: &str) -> Result<Reply, Failure> {
         let snapshot = self.snapshot(Some(Duration::ZERO)).map_err(Failure::not_found)?;
-        let key = {
-            let mut st = self.lock();
-            let views = views(&self.dir, &snapshot, &mut st.records);
-            let view = views
-                .into_iter()
-                .find(|v| v.name == part)
-                .ok_or_else(|| Failure::not_found(format!("unknown part {part:?}")))?;
-            view.key.ok_or_else(|| Failure::not_found(format!("part {part:?} was never built")))?
-        };
+        let view = self
+            .views(&snapshot, Hashing::Background)
+            .into_iter()
+            .find(|v| v.name == part)
+            .ok_or_else(|| Failure::not_found(format!("unknown part {part:?}")))?;
+        let key =
+            view.key.ok_or_else(|| Failure::not_found(format!("part {part:?} was never built")))?;
         let path = layout::cache_dir(&self.dir, part).join(&key).with_extension("qmsh");
         let file = std::fs::File::open(&path)
             .map_err(|e| Failure::not_found(format!("{}: {e}", path.display())))?;
@@ -575,7 +748,7 @@ impl Service {
             cache: None,
             probe: None,
         };
-        let answer = self.pool.run(&request, &limits, &AtomicBool::new(false))?;
+        let answer = self.work(&request, &limits, &AtomicBool::new(false))?;
         match answer.error {
             Some(e) => Err(Failure { code: 500, error: Box::new(e), result: Value::Null }),
             None => Ok(()),

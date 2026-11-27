@@ -46,15 +46,17 @@ all other crates.
   checks sizes against the input before allocating.
 - `src/fs.rs`: `write_atomic` (temp file + rename), the one copy for tasks and the service.
 - `src/project/`: script project folder (AG-PJ-01..04, ADR-0053): `qoob3d.toml` (limits, workers
-  with `recycle_mb`, `[cache] keep`, `[mesh]`; AG-PF-03..05; limits are finite and bounded,
-  AG-HD-01), `values/*.toml` with mandatory source/status and optional `unit`, imports (never
-  outside the project), build graph, cache key. `pose.rs` `PrintPose` (part option `pose`,
-  AG-PJ-06: turns, then on the bed, centred; `apply_all` poses the meshes of one object together)
+  with `recycle_mb`, `[cache] keep`, `[mesh]`, `[service] idle_min`; AG-PF-03..05, WS-PRE-05;
+  limits are finite and bounded, AG-HD-01), `values/*.toml` with mandatory source/status and
+  optional `unit`, imports (never outside the project), build graph, cache key (files enter as
+  their `file_digest`, SHA-256; `read_digest` reads in chunks; WS-PRE-01). `pose.rs`
+  `PrintPose` (part option `pose`, AG-PJ-06: turns, then on the bed, centred; `apply_all` poses
+  the meshes of one object together)
   and `arrange` (kits in rows, AG-SV-09). `plates.rs` `parse_color` (`#RRGGBB`, AG-PJ-07) and
   `plates` (footprints on plates in rows, groups never share a plate, an empty corner zone,
   AG-SV-10). `layout.rs` spells the names of the project
-  (`qoob3d.toml`, the agent folders, `.qoob3d/` with `service.json`, the lock and the cache,
-  `out/`); nobody else writes these literals.
+  (`qoob3d.toml`, the agent folders, `.qoob3d/` with `service.json`, the lock, `summary.json`
+  and the cache, `out/`); nobody else writes these literals.
 - `src/tasks/`: task inbox (AG-TK-01..07, ADR-0054): `tasks/NNNN-slug.md` with TOML header, body
   and `## Log`; `create` (holds an OS lock on `tasks/` while it picks the number), `update`,
   `bind` and `apply` (`Change`: lists, state and note in one byte-preserving, atomic write;
