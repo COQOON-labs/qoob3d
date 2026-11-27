@@ -15,8 +15,10 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror.workspace = true
 toml = "1"
-# Glyph outlines and kerning for `text` (AG-SC-38): pure Rust, no dependencies.
-ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
+# Glyph outlines and kerning for `text` (AG-SC-38): pure Rust, maintained (fontations, also
+# egui's font reader); `ttf-parser` is unmaintained (RUSTSEC-2026-0192). At least 0.50:
+# the `read-fonts` of 0.44 panics on a glyph without points (font/tests.rs).
+skrifa = { version = "0.50", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 proptest = "1.12"

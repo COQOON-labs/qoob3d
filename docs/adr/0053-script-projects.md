@@ -92,10 +92,14 @@ Decided 2026-11-26:
 - **The font is a file of the project**, read like an imported STEP or mesh file: confined to
   the project folder, and its bytes enter the cache key. No system fonts (a build would
   depend on the machine) and no font compiled into the kernel.
-- **Outlines are parsed in `qoob3d-core`** with `ttf-parser` (pure Rust, no dependencies,
-  already in the lock file through egui) and flattened to polygons within 0.002 × cap
-  height; holes are found by nesting depth, not by winding. Font bytes are foreign input:
-  sizes are capped (16 MiB, 200 characters, points per glyph).
+- **Outlines are parsed in `qoob3d-core`** with `skrifa` (fontations: pure Rust, maintained,
+  egui's font reader too; the legacy `kern` table through its `read-fonts`; at least 0.50,
+  whose `read-fonts` no longer panics on a glyph without points, which the damaged-font
+  property test found in 0.44)
+  and flattened to polygons within 0.002 × cap height; holes are found by nesting depth, not
+  by winding. Font bytes are foreign input: sizes are capped (16 MiB, 200 characters, points
+  per glyph). `ttf-parser`, used first, is unmaintained (RUSTSEC-2026-0192) and a parser
+  of foreign bytes without fixes is not kept.
 - **New projects get DejaVu Sans Bold** with its licence (`lib/examples/`, 0.7 MB): a free
   face with Latin diacritics, so the reference examples run everywhere.
 

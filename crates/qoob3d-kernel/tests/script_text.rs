@@ -328,8 +328,8 @@ fn ag_sc_38_the_font_must_be_a_font_file_of_the_project() {
     );
     assert_eq!(
         fails(&with("lib/examples/block.step")),
-        "Runtime error: text: lib/examples/block.step: not a TrueType or OpenType font (unknown \
-         magic)"
+        "Runtime error: text: lib/examples/block.step: not a TrueType or OpenType font (Invalid \
+         sfnt version 0x49534F2D)"
     );
     assert_eq!(
         message(None, &with("lib/examples/DejaVuSans-Bold.ttf")),

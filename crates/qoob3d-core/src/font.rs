@@ -23,7 +23,11 @@ mod regions;
 #[cfg(test)]
 mod tests;
 
-use ttf_parser::{Face, GlyphId, OutlineBuilder};
+use skrifa::instance::{LocationRef, Size};
+use skrifa::outline::{DrawSettings, OutlinePen};
+use skrifa::raw::TableProvider as _;
+use skrifa::raw::tables::kern::SubtableKind;
+use skrifa::{FontRef, GlyphId, MetadataProvider as _};
 
 use regions::Glyph;
 
@@ -160,7 +164,7 @@ pub fn lettering(font: &[u8], text: &str, setting: &Setting) -> Result<Lettering
     if font.len() > MAX_FONT_BYTES {
         return Err(FontError::TooLarge(font.len()));
     }
-    let face = Face::parse(font, 0).map_err(|e| FontError::NotAFont(e.to_string()))?;
+    let face = parsed(font)?;
     let cap = cap_units(&face).ok_or(FontError::NoHeight)?;
     let scale = setting.height / cap;
     let glyphs = placed(&face, text, cap, setting.spacing / scale, MIN_EDGE_MM / scale)?;
@@ -185,6 +189,18 @@ pub fn lettering(font: &[u8], text: &str, setting: &Setting) -> Result<Lettering
     Ok(Lettering { regions, overlapping })
 }
 
+/// The first font of a font or collection file. `skrifa` reads tables only
+/// when asked, so the ones every text needs are read here: `head` (units per
+/// em), `hhea` (advances) and `maxp` (glyph count).
+fn parsed(font: &[u8]) -> Result<FontRef<'_>, FontError> {
+    let not_a_font = |e: skrifa::raw::ReadError| FontError::NotAFont(e.to_string());
+    let face = FontRef::from_index(font, 0).map_err(not_a_font)?;
+    face.head().map_err(not_a_font)?;
+    face.hhea().map_err(not_a_font)?;
+    face.maxp().map_err(not_a_font)?;
+    Ok(face)
+}
+
 /// The rules for the string itself.
 fn checked(text: &str) -> Result<(), FontError> {
     if text.is_empty() {
@@ -206,32 +222,43 @@ fn checked(text: &str) -> Result<(), FontError> {
 
 /// The cap height in font units: the top of "H", else the capital height
 /// of the OS/2 table, else the ascender.
-fn cap_units(face: &Face) -> Option<f64> {
+fn cap_units(face: &FontRef) -> Option<f64> {
+    let metrics = face.metrics(Size::unscaled(), LocationRef::default());
     let letter = glyph(face, 'H').and_then(|id| {
-        let mut outline = Flattener::new(FLATNESS * f64::from(face.units_per_em()), 0.0);
-        face.outline_glyph(id, &mut outline)?;
+        let mut outline = Flattener::new(FLATNESS * f64::from(metrics.units_per_em), 0.0);
+        if !draw(face, id, &mut outline) {
+            return None;
+        }
         outline.contours.iter().flatten().map(|p| p[1]).reduce(f64::max)
     });
-    [letter, face.capital_height().map(f64::from), Some(f64::from(face.ascender()))]
+    [letter, metrics.cap_height.map(f64::from), Some(f64::from(metrics.ascent))]
         .into_iter()
         .flatten()
         .find(|units| *units > 0.0 && units.is_finite())
 }
 
 /// The glyph of a character; glyph 0 is the font's "missing" box.
-fn glyph(face: &Face, c: char) -> Option<GlyphId> {
-    face.glyph_index(c).filter(|id| id.0 != 0)
+fn glyph(face: &FontRef, c: char) -> Option<GlyphId> {
+    face.charmap().map(c).filter(|id| *id != GlyphId::NOTDEF)
+}
+
+/// Draws the outline of glyph `id` in font units; false when it has none
+/// or it cannot be read.
+fn draw(face: &FontRef, id: GlyphId, pen: &mut Flattener) -> bool {
+    let settings = DrawSettings::unhinted(Size::unscaled(), LocationRef::default());
+    face.outline_glyphs().get(id).is_some_and(|g| g.draw(settings, pen).is_ok())
 }
 
 /// The flattened glyphs of `text` at their pen positions, in font units.
 /// `spacing` and `min_edge` are in font units too.
 fn placed(
-    face: &Face,
+    face: &FontRef,
     text: &str,
     cap: f64,
     spacing: f64,
     min_edge: f64,
 ) -> Result<Vec<Glyph>, FontError> {
+    let advances = face.glyph_metrics(Size::unscaled(), LocationRef::default());
     let mut glyphs = Vec::new();
     let (mut pen, mut points) = (0.0, 0);
     let mut previous = None;
@@ -243,7 +270,7 @@ fn placed(
         let mut outline = Flattener::new(FLATNESS * cap, pen);
         // A glyph without an outline (a space, a blank Braille cell) only
         // advances.
-        let _ = face.outline_glyph(id, &mut outline);
+        let _ = draw(face, id, &mut outline);
         if outline.overflow {
             return Err(FontError::GlyphTooDetailed(c));
         }
@@ -257,23 +284,31 @@ fn placed(
             return Err(FontError::TooDetailed);
         }
         glyphs.push(Glyph { character: c, contours });
-        pen += f64::from(face.glyph_hor_advance(id).ok_or(FontError::NoAdvance(c))?) + spacing;
+        pen += f64::from(advances.advance_width(id).ok_or(FontError::NoAdvance(c))?) + spacing;
         previous = Some(id);
     }
     Ok(glyphs)
 }
 
 /// The pair kerning of the `kern` table in font units (horizontal subtables
-/// without state machines; their values add up).
-fn kerning(face: &Face, left: GlyphId, right: GlyphId) -> f64 {
-    let Some(table) = face.tables().kern else {
+/// without state machines; their values add up). A subtable that cannot be
+/// read adds nothing.
+fn kerning(face: &FontRef, left: GlyphId, right: GlyphId) -> f64 {
+    let Ok(table) = face.kern() else {
         return 0.0;
     };
     table
-        .subtables
-        .into_iter()
-        .filter(|s| s.horizontal && !s.variable && !s.has_cross_stream && !s.has_state_machine)
-        .filter_map(|s| s.glyphs_kerning(left, right))
+        .subtables()
+        .filter_map(Result::ok)
+        .filter(|s| {
+            s.is_horizontal() && !s.is_variable() && !s.is_cross_stream() && !s.is_state_machine()
+        })
+        .filter_map(|s| match s.kind().ok()? {
+            SubtableKind::Format0(t) => t.kerning(left, right),
+            SubtableKind::Format2(t) => t.kerning(left, right),
+            SubtableKind::Format3(t) => t.kerning(left, right),
+            SubtableKind::Format1(_) => None,
+        })
         .map(f64::from)
         .sum()
 }
@@ -333,7 +368,7 @@ impl Flattener {
     }
 }
 
-impl OutlineBuilder for Flattener {
+impl OutlinePen for Flattener {
     fn move_to(&mut self, x: f32, y: f32) {
         let start = self.at(x, y);
         if !self.overflow {

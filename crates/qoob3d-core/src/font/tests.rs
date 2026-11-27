@@ -443,6 +443,25 @@ fn bytes_that_are_no_font_are_refused() {
     assert!(fails(&[0; 64]).to_string().starts_with("not a TrueType or OpenType font ("));
     let huge = vec![0; MAX_FONT_BYTES + 1];
     assert_eq!(fails(&huge), FontError::TooLarge(MAX_FONT_BYTES + 1));
+    // A TrueType header whose table directory runs past the end, and a
+    // complete directory without tables: no font either.
+    assert!(matches!(fails(b"\x00\x01\x00\x00 no tables"), FontError::NotAFont(_)));
+    assert!(matches!(fails(&[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), FontError::NotAFont(_)));
+}
+
+#[test]
+fn a_font_without_the_tables_for_metrics_is_refused() {
+    // DejaVu with the tag of one required table renamed: `head` (units per
+    // em), `hhea` (advances), `maxp` (glyph count) each make it no font.
+    for tag in [b"head", b"hhea", b"maxp"] {
+        let mut font = dejavu();
+        let tables = usize::from(u16::from_be_bytes([font[4], font[5]]));
+        let record = (0..tables).map(|i| 12 + 16 * i).find(|at| &font[*at..*at + 4] == tag);
+        let at = record.unwrap_or_else(|| panic!("DejaVu has {}", String::from_utf8_lossy(tag)));
+        font[at..at + 4].copy_from_slice(b"zzzz");
+        let e = lettering(&font, "A", &EIGHT).expect_err("a required table is missing");
+        assert!(matches!(e, FontError::NotAFont(_)), "{}: {e}", String::from_utf8_lossy(tag));
+    }
 }
 
 #[test]
@@ -456,6 +475,16 @@ fn a_truncated_font_never_panics() {
     }
     // `glyf` is the largest table and not the last: some prefixes still set.
     assert!(read < 150, "{read} prefixes read");
+}
+
+#[test]
+fn a_glyph_without_points_but_with_flags_never_panics() {
+    // Found by `a_damaged_font_never_panics`: `read-fonts` 0.41 indexed the
+    // flags of a simple glyph with no points out of bounds.
+    let mut font = dejavu();
+    font[256] = 0;
+    font[12 + 16 * 9 + 10] = 106;
+    let _ = lettering(&font, "MAI 0102 ȘgÇ8", &EIGHT);
 }
 
 proptest::proptest! {

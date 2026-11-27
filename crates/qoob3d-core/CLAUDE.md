@@ -36,7 +36,7 @@ all other crates.
   recursion) before anything is expanded; mirror transforms flip the winding.
 - `src/font.rs` + `src/font/`: lettering (AG-SC-38): `lettering(font bytes, text, Setting)` →
   `Lettering` (regions in mm: outline counter-clockwise, holes clockwise, `overlapping`).
-  `ttf-parser` reads the glyphs (advance widths, `kern` pairs, no shaping); the size is the
+  `skrifa` reads the glyphs (advance widths, `kern` pairs via `skrifa::raw`, no shaping); the size is the
   cap height (top of "H", else OS/2 capital height, else ascender); curves are flattened
   within `FLATNESS` × cap height. `regions.rs`: holes by nesting depth inside a glyph (not by
   winding), a sweep finds contours that cross (a contour crossing itself is an error, crossing
