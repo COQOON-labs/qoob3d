@@ -1,10 +1,10 @@
 # Script API reference
 
-As of: 2026-11-22
+As of: 2026-11-26
 
 A QOOB3D model is a Rhai script (an embedded, sandboxed script language similar to Rust and JavaScript). The script is glue: every geometric
 operation below is one call into OpenCascade. Every ```` ```rhai ```` example in this file
-runs as written in a new project; the two files that examples read are in `lib/examples/`,
+runs as written in a new project; the files that examples read are in `lib/examples/`,
 where `qoob3d init` puts them.
 
 ## Conventions
@@ -139,12 +139,54 @@ show(cut(plate, holes), "plate");
 show(box(20, 20, 10) - sphere(8).move(0, 0, 10), "dimple");
 ```
 
-### `a & b`
+### `a & b`, `common(a, b) -> Shape`
 
 Intersection (common part). The result must have volume.
 
 ```rhai
 show(box(20, 20, 10) & cylinder(10, 30).move(0, 0, -10), "common");
+show(common(box(20, 20, 10), sphere(16)), "rounded_cube");
+```
+
+### Options: `union(shapes, #{ fuzzy })`, `cut(a, tools, #{ fuzzy })`, `common(a, b, #{ fuzzy })`
+
+`fuzzy` (mm, ≥ 0) makes geometry closer than this count as touching: two bodies 1 µm apart
+fuse into one. 0 is exact. Without the option the kernel chooses (see below).
+
+```rhai
+let a = box(10, 10, 10);
+let b = box(10, 10, 10).move(10.0001, 0, 0);
+let joined = union([a, b], #{ fuzzy: 0.001 });
+print(joined.solids());   // 1
+show(joined, "joined");
+```
+
+### Freeform bodies
+
+Imported bodies and smooth lofts have freeform faces, and on them OpenCascade is less
+reliable than on boxes and cylinders. The booleans handle that themselves:
+
+- A cut or common with a freeform body uses its own tolerance as `fuzzy` (at least 0.00001
+  mm): an exact cut through edges of such a body can silently lose part of the result.
+- A union is computed exactly; it must keep the extent of every input (a union that drops
+  part of an input is an error) and, if it fails, it is computed again with the tolerance.
+- A failed or implausible result is computed again serially before it counts.
+- A result that BRepCheck calls invalid is repaired at once (see `heal`).
+
+So `s.is_valid()` of a freeform part is normally `true`; if it is not, `defects(s)` names the
+faces and edges and where they lie.
+
+### `group(shapes) -> Shape`
+
+Several shapes as one shape without a boolean: each keeps its volume, overlaps count twice.
+For parts that consist of separate bodies and for pictures of an assembly.
+
+```rhai
+let a = box(10, 10, 10);
+let g = group([a, a.move(5, 0, 0)]);
+print(g.solids());   // 2
+print(g.volume());   // 2000
+show(g, "pair");
 ```
 
 ## Transforms and patterns
@@ -241,6 +283,44 @@ show(extrude(slot(20, 6), 2), "slot");
 show(extrude(rounded_rect(40, 20, 5), 3), "rounded_plate");   // V = (800 − (4 − π) · 25) · 3
 ```
 
+### `text(string, #{ font, height }) -> Profile`
+
+Lettering: one line of `string` as a profile, every letter an outline and its counters (the
+insides of O, A, 8 …) real holes, so `area` is the ink area and `extrude` gives letters to
+raise on a part or to cut into it. The baseline is y = 0 and the text runs along +X; move,
+rotate and place it like any other profile.
+
+- `font` (required): a TrueType or OpenType file (`.ttf`, `.otf`) in the project folder, path
+  relative to it. New projects have `lib/examples/DejaVuSans-Bold.ttf` (free licence beside
+  it, Latin with diacritics, Greek, Cyrillic); copy any other font into the project.
+- `height` (required): the cap height in mm, the height of the capital H above the baseline.
+  Round letters and digits reach a little beyond it, descenders (g, p, a comma below) go
+  under the baseline. A font without an H is scaled by its capital height, else its ascender.
+- `spacing`: extra distance after every character in mm (default 0, negative tightens).
+- `align`: `"left"` (default), `"center"` or `"right"`: the left edge, the centre or the right
+  edge of the lettering's bounding box lies at x = 0.
+
+Every character is one glyph of the font, placed by its advance width and kerned with the
+pairs of the font's `kern` table (kerning stored only in `GPOS` is not applied); there are no
+ligatures and no right-to-left text. Spaces advance and draw nothing. Errors: a character the
+font has no glyph for (named in the message, never replaced by a box), an empty string or one
+of spaces only, a line break (one call sets one line; move a second profile for a second
+line), more than 200 characters, a font file that is missing, outside the project, larger than
+16 MiB or not a font. Curves become polygons within 0.002 × `height` of the true outline (at
+most 24 segments per curve), so the walls of extruded letters are flat facets. Letters that
+touch or overlap, or parts of one letter that do (a cedilla on its C), are united.
+
+```rhai
+let f = #{ font: "lib/examples/DejaVuSans-Bold.ttf", height: 8 };
+let label = text("MAI 0102", f);
+print(label.area());                                         // 216.3 mm² of ink
+let plate = box(70, 14, 2).move(28, 4, 0);
+show(plate + extrude(label, 0.6).move(0, 0, 2), "raised");   // V = 1960 + 216.3 · 0.6
+show(plate - extrude(label, 0.6).move(0, 0, 1.4), "engraved");
+let tag = text("M8 x 1.25", #{ font: f.font, height: 4, spacing: 0.2, align: "center" });
+show(extrude(rounded_rect(36, 8, 2).move(0, 2) - tag, 1), "stencil");
+```
+
 ### `profile.move(x, y) -> Profile`
 
 Shifts a profile by `[x, y]` mm in its own plane (before or after `on`: the shift is in the
@@ -276,6 +356,15 @@ show(extrude(offset(plate, 2), 1), "brim");             // 44 × 24, corner radi
 show(extrude(plate - offset(plate, -3), 5), "frame");   // wall of 3 mm
 let ring = circle(20) - circle(12);
 print(offset(ring, 1).area());                          // π (11² − 5²)
+```
+
+### `outline(profile) -> Profile`
+
+The profile without its holes: every region filled up to its outer outline.
+
+```rhai
+let ring = circle(20) - circle(12);
+print(outline(ring).area());   // π · 10²
 ```
 
 ### `profile.area() -> float`
@@ -337,6 +426,19 @@ show(extrude(on("xz", rect(10, 20)), 5), "front");   // y ∈ [−5, 0], z ∈ [
 show(extrude(on("yz", circle(8)), 2), "side");
 ```
 
+### `on(plane, profile, offset) -> Profile`
+
+The same on the parallel plane at `offset` along the axis the plane name leaves out:
+`"xy"` at z = `offset`, `"xz"` at y = `offset`, `"yz"` at x = `offset` – the plane `section`
+cuts at, so a section and an outline drawn there combine.
+
+```rhai
+show(extrude(on("yz", rect(2, 2), 7), 1), "at_x_7");   // x ∈ [7, 8]
+let hull = box(20, 10, 10);
+let below_deck = section(hull, "yz", 3) & on("yz", rect(20, 6).move(0, 3), 3);
+print(below_deck.area());                               // 60: y ∈ [−5, 5], z ∈ [0, 6]
+```
+
 ### `profile.at_z(z) -> Profile`
 
 Moves a profile by `z` mm along Z (for lofts and raised extrusions).
@@ -366,6 +468,16 @@ profiles (results of the profile algebra) are not accepted.
 ```rhai
 show(loft([rect(20, 20).at_z(0), rect(10, 10).at_z(15)]), "pyramid_frustum");
 show(loft([circle(10).at_z(0), circle(4).at_z(6)]), "cone_frustum");
+```
+
+### `loft(profiles, #{ smooth: true }) -> Shape`
+
+A smooth surface through the profiles instead of ruled pieces between them (freeform faces,
+see Booleans). Through three or more profiles it bulges between them.
+
+```rhai
+let p = [circle(10).at_z(0), circle(20).at_z(20), circle(10).at_z(40)];
+show(loft(p, #{ smooth: true }), "barrel");
 ```
 
 ## Wire and pipe
@@ -473,6 +585,68 @@ print(faces(b).top().area());                   // 600
 print(faces(b).near([10, 15, 40], 0.5).len());  // 3: the faces that meet in that corner
 ```
 
+## Whole solids
+
+### `defects(s) -> [map]`
+
+What OpenCascade's checker finds wrong with `s` (at most 50 elements); empty for a valid
+shape. Each entry has `kind` (`"face"`, `"edge"`, …), `index`, `problem` and the box `min`,
+`max` where it lies.
+
+```rhai
+print(defects(box(10, 10, 10)).len());   // 0
+```
+
+### `heal(s) -> Shape`, `heal(s, tolerance) -> Shape`
+
+Repairs an invalid shape with the precision `tolerance` (mm, default 0.0001): edges whose
+curves disagree with their faces, small gaps. A valid shape comes back as it is. The volume must not change by more than the
+tolerance allows, otherwise it is a `Geometry` error.
+
+```rhai
+let s = heal(box(10, 10, 10));
+print(s.is_valid());   // true
+```
+
+### `fill_voids(s) -> Shape`
+
+Every solid of `s` without its closed inner cavities.
+
+```rhai
+let hollow = box(10, 10, 10) - box(4, 4, 4).move(0, 0, 3);
+print(hollow.volume());               // 936
+print(fill_voids(hollow).volume());   // 1000
+```
+
+### `offset(s, d) -> Shape`
+
+The solid grown (`d` > 0) or shrunk (`d` < 0) by `d` mm; grown edges and corners become
+round.
+
+```rhai
+show(offset(box(10, 10, 10), 1), "grown");     // V = 1000 + 600 + 30 π + 4/3 π
+show(offset(box(10, 10, 10), -1), "shrunk");   // 8³
+```
+
+### `split(s, plane, offset) -> [below, above]`
+
+The two sides of `s` at the plane parallel to an origin plane (`"xy"` at z = `offset`,
+`"xz"` at y, `"yz"` at x). A plane that does not cut `s` is a `Geometry` error.
+
+```rhai
+let halves = split(box(10, 10, 10), "xy", 4);
+print(halves[0].volume());   // 400
+print(halves[1].volume());   // 600
+```
+
+### `on_bed(s) -> Shape`
+
+`s` moved so that it stands on z = 0, centred on the Z axis: the print position.
+
+```rhai
+show(on_bed(sphere(10).move(5, 6, 7)), "ball");   // x, y ∈ [−5, 5], z ∈ [0, 10]
+```
+
 ## Measure
 
 ### `s.volume() -> float`, `s.area() -> float`
@@ -532,6 +706,32 @@ faces of `s`, sorted by distance. Hits behind the origin do not count.
 let b = box(20, 20, 10) - cylinder(4, 10);
 for h in ray(b, [-50, 0, 5], [1, 0, 0]) { print(h[0]); }   // −10, −2, 2, 10
 print(ray(b, [-50, 50, 5], [1, 0, 0]).len());              // 0: missed
+```
+
+### `heights(s, [x0, y0], [x1, y1], step) -> [[z or ()]]`
+
+A height map: the highest z of `s` on vertical lines through a grid from `[x0, y0]` to
+`[x1, y1]` with the spacing `step` (mm), row by row (one row per y); `()` where a line
+misses `s`. Far faster than one `ray` per point; at most 1 000 000 points.
+
+```rhai
+let s = box(10, 10, 5) + box(5, 10, 3).move(2.5, 0, 5);
+let h = heights(s, [-4, -4], [4, 4], 2);
+print(h.len());      // 5 rows (y = −4, −2, 0, 2, 4)
+print(h[0][0]);      // 5
+print(h[0][4]);      // 8
+```
+
+### `mesh_report(s) -> map`
+
+What a slicer finds in the exported mesh of `s`, tessellated like the project's parts:
+`watertight`, `triangles`, `open_edges`, `non_manifold_edges`, `flipped_edges`, `volume`.
+In a check: `expect(mesh_report(part("Hull")).watertight, "the hull prints")`.
+
+```rhai
+let r = mesh_report(box(10, 10, 10));
+print(r.watertight);   // true
+print(r.triangles);    // 12
 ```
 
 ### `s.is_valid() -> bool`, `s.solids() -> int`
@@ -640,12 +840,46 @@ and without a project there is no file access at all.
 
 ### `import_step(path) -> Shape`
 
-Reads a STEP file (path relative to the project folder) as one shape in mm.
+Reads a STEP file (path relative to the project folder) as one shape in mm: all its solids.
+A file is read once per run, however often a script imports from it.
 
 ```rhai
 let block = import_step("lib/examples/block.step");
 print(block.solids());   // 1
 show(block - cylinder(4, 30), "drilled");
+```
+
+### `import_step(path, name) -> Shape`, `step_names(path) -> [string]`
+
+The solids of a STEP file whose STEP name is `name` (a string, or an array of names); CAD
+programs write their body names there. `step_names` lists the name of every solid in the
+file's order. A name the file does not have is an error that lists the names it has.
+
+```rhai
+print(step_names("lib/examples/bracket.step"));            // ["Base", "Post"]
+let post = import_step("lib/examples/bracket.step", "Post");
+print(post.volume());                                       // π · 3² · 16
+show(import_step("lib/examples/bracket.step", ["Base", "Post"]), "bracket");
+```
+
+### `import_mesh(path) -> Shape`
+
+Reads an STL (binary or ASCII) or a 3MF file, chosen by the extension `.stl` or `.3mf` (path
+relative to the project folder), as a shape in mm. A 3MF brings all its build items with their
+placement, as the slicer arranged them. Every closed group of triangles becomes one solid,
+coplanar neighbouring triangles one planar face; vertices closer than 0.0001 mm are merged.
+The result is an ordinary shape for booleans and measures, but curved surfaces stay facets:
+a cylinder from an STL is a prism of many planar faces, so `fillet` on its edges and exact radii
+do not apply. A closed surface inside another one with inward-facing triangles is a cavity of
+that solid. A mesh with open or non-manifold edges is an error that names their count; at
+most 200 000 triangles are read. A union of an imported mesh with a freeform B-rep body can
+fail where their faces lie close together: fuse such bodies in the program that made them.
+
+```rhai
+let angle = import_mesh("lib/examples/angle.3mf");
+print(angle.volume());       // 2760
+print(faces(angle).len());   // 8
+show(angle - cylinder(2, 20).move(17, 2, -1), "drilled");
 ```
 
 ### `import "path" as name;`
@@ -668,7 +902,8 @@ In a project folder the files `parts/*.rhai` declare parts;
 ### `part(name, options, |deps| shape)`
 
 Declares the part `name` (unique in the project). `options` is a map; `depends` lists the
-parts this one needs (other keys such as `material` and `color` are free). The closure gets
+parts this one needs, `pose` how it is printed and `color` and `print_with` in which filament
+(both below; other keys such as `material` are free). The closure gets
 `deps`, a map from each dependency name to its built shape, and returns the part's shape.
 Several parts per file are fine. The service finds the declarations without running the
 closures and without any geometry: code outside the closures must not call CAD functions.
@@ -680,6 +915,38 @@ part("Peg", #{ depends: ["Base"] }, |deps| {
     let top = deps["Base"].bbox().max[2];
     cylinder(6, 10).move(0, 0, top)
 });
+```
+
+Model a part where it belongs in the assembly and give it a print pose: `pose: #{ rotate:
+[axis, degrees], count: n }` turns it (`rotate` may be a list of turns, applied in order),
+stands it on the bed centred, and prints `count` copies (1 to 1000). Export writes STL and 3MF in the
+print pose; render shows the part where it is modelled.
+
+```rhai
+part("Lower_Hull", #{ pose: #{ rotate: ["x", 180] } }, |deps| box(40, 20, 10).move(0, 0, -10));
+part("Propeller", #{ pose: #{ count: 4 } }, |deps| cylinder(8, 3));
+```
+
+Give a part its colour with `color: "#RRGGBB"` (or a basic name: black, silver, gray, white,
+maroon, red, orange, purple, fuchsia, green, lime, olive, yellow, navy, blue, teal, aqua):
+pictures show the part in it, and an export
+as a slicer project (`export` with `project`) prints it in a filament of that colour, one
+filament per distinct colour. There are two ways to print a model in several colours:
+
+- **One colour per plate** (the default of the project export): every part is an object of
+  its own, and parts of different colours never share a plate. No filament changes during a
+  print; the coloured parts are joined after printing, so model them to plug or glue
+  together (pins, sockets with clearance).
+- **Multi-colour objects** (`multicolor`, for printers that change filaments): a part with
+  `print_with: "Host"` prints inside the part `Host` as one object, in its own filament. It
+  is posed together with the host and keeps its place in it, so cut its volume out of the
+  host and leave no clearance. Without `multicolor` the same part is an object of its own.
+  Only the plates of such objects change filaments; all other plates still hold one colour.
+
+```rhai
+part("Walls", #{ color: "#F4F4F4" }, |deps| cut(box(40, 20, 20), [box(2, 12, 8).move(-1, 4, 6)]));
+part("Windows", #{ color: "#202020", print_with: "Walls" }, |deps| box(2, 12, 8).move(-1, 4, 6));
+part("Roof", #{ color: "#C0392B", pose: #{ rotate: ["x", 180] } }, |deps| box(44, 24, 3).move(-2, -2, 20));
 ```
 
 ### `value(id) -> value`
@@ -763,5 +1030,9 @@ A failed run returns one error with line and column of the script position:
 result volume must be > 1e-6 mm³; `cut`/`-` and `shell` must reduce the volume; a union must
 not be smaller than its largest input. A cut that misses the body is therefore an error,
 because it is almost always a placement mistake.
+
+A geometry error caught with `try { … } catch (e) { … }` reads as its message
+(`print(e)` prints "cut failed: removed no material …"). The lines a script printed before an
+error come back with the error.
 
 Scripts have no file, network or process access beyond the functions above.

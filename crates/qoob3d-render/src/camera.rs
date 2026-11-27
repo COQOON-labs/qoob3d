@@ -257,6 +257,33 @@ impl Camera {
         self.distance = (radius / half_fov.sin() * 1.15).clamp(MIN_DISTANCE, MAX_DISTANCE);
     }
 
+    /// Frames the bounding box as tightly as the view allows: its
+    /// corners, projected onto the image plane, fill the image up to the
+    /// margin `1 / FIT_MARGIN` (keeps orientation; for orthographic images).
+    /// [`Camera::fit`] frames the bounding sphere, which leaves a long part
+    /// a quarter of the image wide.
+    pub fn fit_tight(&mut self, bounds: Aabb, aspect: f32) {
+        const FIT_MARGIN: f32 = 1.04;
+        let (right, up) = (self.right(), self.up());
+        let center = Vec3::from(bounds.center());
+        let (mut lo, mut hi) = (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY));
+        for i in 0..8 {
+            let corner = Vec3::new(
+                if i & 1 == 0 { bounds.min[0] } else { bounds.max[0] },
+                if i & 2 == 0 { bounds.min[1] } else { bounds.max[1] },
+                if i & 4 == 0 { bounds.min[2] } else { bounds.max[2] },
+            ) - center;
+            let p = Vec2::new(corner.dot(right), corner.dot(up));
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+        let mid = (lo + hi) * 0.5;
+        let half = ((hi - lo) * 0.5).max(Vec2::splat(1e-3));
+        let half_height = half.y.max(half.x / aspect.max(1e-6)) * FIT_MARGIN;
+        self.target = center + right * mid.x + up * mid.y;
+        self.distance = (half_height / (0.5 * self.fov_y).tan()).clamp(MIN_DISTANCE, MAX_DISTANCE);
+    }
+
     /// Smooth transition from `a` to `b` for `t` in [0, 1] (ViewCube,
     /// Home). Rotation is slerped, distance interpolated logarithmically.
     pub fn interpolate(a: &Camera, b: &Camera, t: f32) -> Camera {

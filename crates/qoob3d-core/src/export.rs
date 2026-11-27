@@ -1,5 +1,9 @@
 //! Mesh export for slicers (ADR-0034): binary STL and 3MF. Pure Rust,
 //! no dependencies; 3MF uses a minimal stored (uncompressed) ZIP writer.
+//! The ZIP reader here is the only one: the 3MF import and `unzip_stored`
+//! share it.
+
+pub mod bambu;
 
 use crate::mesh::TriMesh;
 
@@ -169,54 +173,114 @@ pub fn zip_store(files: &[(&str, &[u8])]) -> Vec<u8> {
     out
 }
 
-/// Reads a stored ZIP back (tests and `cargo xtask models`): (name, data).
-pub fn unzip_stored(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+/// One entry of a ZIP archive as its central directory describes it, with
+/// the bytes as stored (compressed or not).
+pub(crate) struct ZipEntry<'a> {
+    pub(crate) name: String,
+    /// 0 stored, 8 deflate.
+    pub(crate) method: u16,
+    pub(crate) data: &'a [u8],
+    pub(crate) crc: u32,
+    /// Size of the uncompressed data.
+    pub(crate) size: u32,
+}
+
+/// The entries of a ZIP archive, read through the end record and the
+/// central directory (APPNOTE 4.3.12, 4.3.16), each checked against its
+/// local header. Slices only: nothing is allocated for a claimed size.
+pub(crate) fn zip_entries(bytes: &[u8]) -> Result<Vec<ZipEntry<'_>>, String> {
     let u16_at = |i: usize| bytes.get(i..i + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
     let u32_at =
         |i: usize| bytes.get(i..i + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
-    let mut files = Vec::new();
-    let mut i = 0;
-    while u32_at(i) == Some(0x0403_4b50) {
-        let bad = || format!("truncated entry at {i}");
-        if u16_at(i + 8).ok_or_else(bad)? != 0 {
-            return Err("compressed entries are not supported".into());
-        }
-        let crc = u32_at(i + 14).ok_or_else(bad)?;
-        let size = u32_at(i + 18).ok_or_else(bad)? as usize;
-        let name_len = u16_at(i + 26).ok_or_else(bad)? as usize;
-        let extra = u16_at(i + 28).ok_or_else(bad)? as usize;
-        let name_start = i + 30;
-        let data_start = name_start + name_len + extra;
-        let name = bytes.get(name_start..name_start + name_len).ok_or_else(bad)?;
-        let data = bytes.get(data_start..data_start + size).ok_or_else(bad)?;
-        if crc32(data) != crc {
-            return Err(format!("CRC mismatch in {}", String::from_utf8_lossy(name)));
-        }
-        files.push((String::from_utf8_lossy(name).into_owned(), data.to_vec()));
-        i = data_start + size;
-    }
-    // Central directory: one entry per file, pointing at its local header.
-    let mut offset = 0usize;
-    for (n, (name, data)) in files.iter().enumerate() {
+    // The end record is the last 22 bytes plus its comment.
+    let end = (0..bytes.len().saturating_sub(21))
+        .rev()
+        .take(22 + usize::from(u16::MAX))
+        .find(|&i| {
+            u32_at(i) == Some(0x0605_4b50)
+                && u16_at(i + 20).is_some_and(|c| i + 22 + usize::from(c) == bytes.len())
+        })
+        .ok_or("no ZIP end of central directory record")?;
+    let count = u16_at(end + 10).ok_or("broken end record")?;
+    let mut at = u32_at(end + 16).ok_or("broken end record")? as usize;
+    let mut entries = Vec::new();
+    for n in 0..count {
         let bad = || format!("central directory entry {n} is broken");
-        if u32_at(i) != Some(0x0201_4b50) {
+        if u32_at(at) != Some(0x0201_4b50) {
             return Err(bad());
         }
-        let name_len = u16_at(i + 28).ok_or_else(bad)? as usize;
-        let extra = u16_at(i + 30).ok_or_else(bad)? as usize;
-        let comment = u16_at(i + 32).ok_or_else(bad)? as usize;
-        let local = u32_at(i + 42).ok_or_else(bad)? as usize;
-        let central_name = bytes.get(i + 46..i + 46 + name_len).ok_or_else(bad)?;
-        if central_name != name.as_bytes() || local != offset {
-            return Err(bad());
+        let field = |offset: usize| u16_at(at + offset).map(usize::from).ok_or_else(bad);
+        let (flags, method) = (field(8)?, field(10)?);
+        let crc = u32_at(at + 16).ok_or_else(bad)?;
+        let packed = u32_at(at + 20).ok_or_else(bad)?;
+        let size = u32_at(at + 24).ok_or_else(bad)?;
+        let (name_len, extra, comment) = (field(28)?, field(30)?, field(32)?);
+        let local = u32_at(at + 42).ok_or_else(bad)? as usize;
+        let name = bytes.get(at + 46..at + 46 + name_len).ok_or_else(bad)?;
+        let name = String::from_utf8_lossy(name).into_owned();
+        if flags & 1 != 0 {
+            return Err(format!("{name} is encrypted"));
         }
-        offset += 30 + name.len() + data.len();
-        i += 46 + name_len + extra + comment;
+        if packed == u32::MAX || size == u32::MAX {
+            return Err(format!("{name} needs ZIP64, which is not supported"));
+        }
+        let data = local_data(bytes, local, &name, flags & 8 != 0, (crc, packed, size))?;
+        entries.push(ZipEntry {
+            name,
+            method: u16::try_from(method).map_err(|_| bad())?,
+            data,
+            crc,
+            size,
+        });
+        at += 46 + name_len + extra + comment;
     }
-    if u32_at(i) != Some(0x0605_4b50) || u16_at(i + 10) != Some(files.len() as u16) {
-        return Err("end of central directory is broken".into());
+    Ok(entries)
+}
+
+/// The stored bytes of the entry `name` whose local header is at `at`; the
+/// header must repeat name and, without a data descriptor, CRC and sizes.
+fn local_data<'a>(
+    bytes: &'a [u8],
+    at: usize,
+    name: &str,
+    descriptor: bool,
+    (crc, packed, size): (u32, u32, u32),
+) -> Result<&'a [u8], String> {
+    let u16_at =
+        |i: usize| bytes.get(i..i + 2).map(|b| usize::from(u16::from_le_bytes([b[0], b[1]])));
+    let u32_at =
+        |i: usize| bytes.get(i..i + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let bad = || format!("the local header of {name} is broken");
+    if u32_at(at) != Some(0x0403_4b50) {
+        return Err(bad());
     }
-    Ok(files)
+    let name_len = u16_at(at + 26).ok_or_else(bad)?;
+    let extra = u16_at(at + 28).ok_or_else(bad)?;
+    if bytes.get(at + 30..at + 30 + name_len) != Some(name.as_bytes()) {
+        return Err(bad());
+    }
+    let repeated = [u32_at(at + 14), u32_at(at + 18), u32_at(at + 22)];
+    if !descriptor && repeated != [Some(crc), Some(packed), Some(size)] {
+        return Err(bad());
+    }
+    let start = at + 30 + name_len + extra;
+    bytes.get(start..start + packed as usize).ok_or_else(|| format!("{name} is truncated"))
+}
+
+/// Reads a stored ZIP back (tests and `cargo xtask models`): (name, data).
+pub fn unzip_stored(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    zip_entries(bytes)?
+        .into_iter()
+        .map(|e| {
+            if e.method != 0 {
+                return Err(format!("{}: compressed entries are not supported", e.name));
+            }
+            if crc32(e.data) != e.crc {
+                return Err(format!("CRC mismatch in {}", e.name));
+            }
+            Ok((e.name, e.data.to_vec()))
+        })
+        .collect()
 }
 
 #[cfg(test)]

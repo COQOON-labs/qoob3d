@@ -6,6 +6,7 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use qoob3d_core::project::layout;
 use serde_json::{Value, json};
 
 /// The view table (ADR-0006, +Z up): `(view, direction the camera looks
@@ -64,9 +65,55 @@ fn views(args: &Value) -> Result<Vec<&'static (&'static str, &'static str, &'sta
         .collect()
 }
 
-/// `render {view?, views?, parts?, width?, height?}`: the result `{path,
-/// views: [{view, looks_along, up}], width, height}` (and `view` for a single
-/// one) and the PNG as base64. Several views give one contact sheet.
+/// Longest file name of a render before the part list is replaced by its
+/// hash (finding 3.2: 17 part names exceeded the file system's limit).
+const MAX_NAME: usize = 96;
+
+/// `--region` from `region: {min: [x, y, z], max: [x, y, z]}`.
+fn region(args: &Value) -> Result<Option<String>, String> {
+    let region = &args["region"];
+    if region.is_null() {
+        return Ok(None);
+    }
+    let corner = |key: &str| -> Result<Vec<f64>, String> {
+        region[key]
+            .as_array()
+            .filter(|a| a.len() == 3)
+            .and_then(|a| a.iter().map(Value::as_f64).collect::<Option<Vec<_>>>())
+            .ok_or_else(|| format!("region.{key} must be [x, y, z] in mm"))
+    };
+    let (min, max) = (corner("min")?, corner("max")?);
+    if !(min[0] < max[0] && min[1] < max[1] && min[2] <= max[2]) {
+        return Err("region: min must be below max in x and y, not above it in z".to_owned());
+    }
+    let all: Vec<String> = min.iter().chain(&max).map(f64::to_string).collect();
+    Ok(Some(all.join(",")))
+}
+
+/// The file name of a render: the views and parts, or a hash of them when
+/// that would be too long.
+fn file_name(views: &[&str], parts: &[String]) -> String {
+    let safe = |name: &str| -> String {
+        name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect()
+    };
+    let plain: Vec<String> =
+        views.iter().map(|v| (*v).to_owned()).chain(parts.iter().map(|p| safe(p))).collect();
+    let name = plain.join("-");
+    if name.len() <= MAX_NAME {
+        return name;
+    }
+    // FNV-1a: stable across runs, unlike the std hasher.
+    let hash = name
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    format!("{}-{}-parts-{hash:016x}", views.join("-"), parts.len())
+}
+
+/// `render {view?, views?, parts?, source?, region?, width?, height?}`: the
+/// result `{path, views: [{view, looks_along, up}], width, height}` (and
+/// `view` for a single one) and the PNG as base64. Several views give one
+/// contact sheet; `source` renders the shapes a throwaway script shows,
+/// `region` frames a box instead of everything (AG-MC-12).
 pub(super) fn render(dir: &Path, args: &Value) -> Result<(Value, String), String> {
     let views = views(args)?;
     let parts: Vec<&str> = match &args["parts"] {
@@ -86,12 +133,23 @@ pub(super) fn render(dir: &Path, args: &Value) -> Result<(Value, String), String
     };
     let (width, height) = (size("width", SIZE[0])?, size("height", SIZE[1])?);
 
-    let safe = |name: &str| -> String {
-        name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect()
+    let source = match &args["source"] {
+        Value::Null => None,
+        Value::String(_) if !parts.is_empty() => {
+            return Err("render takes parts or source, not both".to_owned());
+        }
+        Value::String(s) => Some(s.clone()),
+        _ => return Err("source must be a Rhai script".to_owned()),
     };
+    let region = region(args)?;
     let names: Vec<&str> = views.iter().map(|v| v.0).collect();
-    let name = names.iter().map(|v| (*v).to_owned()).chain(parts.iter().map(|p| safe(p)));
-    let relative = format!("out/renders/{}.png", name.collect::<Vec<_>>().join("-"));
+    let owned: Vec<String> = parts.iter().map(|p| (*p).to_owned()).collect();
+    let stem = match &source {
+        // A script has no name: its text makes it one.
+        Some(text) => file_name(&names, &[format!("script-{}", text.len()), text.clone()]),
+        None => file_name(&names, &owned),
+    };
+    let relative = format!("out/renders/{stem}.png");
     let out = dir.join(&relative);
     let io = |e: std::io::Error| format!("{relative}: {e}");
     if let Some(folder) = out.parent() {
@@ -104,7 +162,27 @@ pub(super) fn render(dir: &Path, args: &Value) -> Result<(Value, String), String
     if !parts.is_empty() {
         command.arg(format!("--parts={}", parts.join(",")));
     }
-    let done = command.stdin(Stdio::null()).stdout(Stdio::null()).output().map_err(io)?;
+    if let Some(region) = &region {
+        command.arg(format!("--region={region}"));
+    }
+    let script = layout::data_dir(dir)
+        .join(layout::RUN_DIR)
+        .join(format!("render-{}.rhai", std::process::id()));
+    if let Some(text) = &source {
+        if let Some(folder) = script.parent() {
+            std::fs::create_dir_all(folder).map_err(io)?;
+        }
+        std::fs::write(&script, text).map_err(io)?;
+        command.arg("--source").arg(&script);
+    }
+    let done = command.stdin(Stdio::null()).stdout(Stdio::null()).output();
+    if source.is_some() {
+        // The picture is made either way; a script left behind is only noise.
+        if let Err(e) = std::fs::remove_file(&script) {
+            tracing::warn!("removing {}: {e}", script.display());
+        }
+    }
+    let done = done.map_err(io)?;
     if !done.status.success() {
         let stderr = String::from_utf8_lossy(&done.stderr);
         // Log lines come before the error of the process.

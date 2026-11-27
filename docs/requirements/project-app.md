@@ -27,7 +27,7 @@ with `"error": {"kind", "message"}` when `ok` is false.
 | ID | Requirement | Prio |
 | --- | --- | --- |
 | WA-OP-01 | `qoob3d --project <DIR>` opens the project in `<DIR>` (a folder with `qoob3d.toml`). Without `qoob3d.toml`, or if the folder does not exist, the app exits with code 2 and a message naming the folder. | MUST |
-| WA-OP-02 | If `.qoob3d/service.json` is missing or the service does not answer `GET /status` within 1 s, the app starts the service with `<program> serve <DIR>` as a detached child. `<program>` comes from the environment variable `QOOB3D_SERVICE_CMD` (may contain arguments separated by spaces); default is the app's own executable. It then waits up to 20 s for a valid `service.json` and a successful `GET /status`. | MUST |
+| WA-OP-02 | If `.qoob3d/service.json` is missing or the service does not answer `GET /status` within 1 s, the app starts the service with `<program> serve <DIR>` as a detached child. `<program>` comes from the environment variable `QOOB3D_SERVICE_CMD` (may contain arguments separated by spaces); default is the app's own executable. It then waits up to 20 s for a valid `service.json` and a successful `GET /status`. A service whose process is alive and holds `service.lock` is waited for instead of started again, and reported as `busy` after the 20 s (WS-PRE-03). | MUST |
 | WA-OP-03 | The app requests one build of all parts on opening (WA-PR-03). | MUST |
 | WA-OP-04 | Without a project the viewport shows an empty state: what a project is and a button "Open project folder…". The button, the toolbar button "Open" and Cmd/Ctrl+O pick a folder in the system dialog and open it like WA-OP-01; a folder that is no project shows an error dialog and keeps what was open. | MUST |
 | WA-LV-01 | A background thread polls `GET /status` every 0.5 s. HTTP never runs on the UI thread. | MUST |
@@ -35,6 +35,7 @@ with `"error": {"kind", "message"}` when `ok` is false.
 | WA-LV-04 | The browser panel lists the project parts with name and state (English: up to date / outdated / error / never built; German: aktuell / veraltet / Fehler / nie gebaut); a part in state `failed` is marked in the error color; the eye (👁) toggles visibility. All texts via `tr()`. | MUST |
 | WA-LV-05 | If the service stops answering, the panel shows "service not reachable" and the last meshes stay visible; when it answers again, polling continues. The poller reads `service.json` again while there is no answer, so it follows a service restarted on another port; a failed first connection is retried every poll interval (AG-HD-05; the retries look for a running service, they start none). | MUST |
 | WA-LV-06 | The first time meshes arrive, the camera fits all parts. Later updates do not move the camera. | SHOULD |
+| WA-LV-07 | A part that declares a colour (`color` in `/status`, AG-PJ-07) is drawn in it; parts without one keep the theme's body colour. | SHOULD |
 
 ## 3. Mesh transfer format (`qoob3d_core::qmesh`)
 

@@ -136,3 +136,66 @@ proptest::proptest! {
         proptest::prop_assert!((r.volume_mm3 - expected).abs() / expected < 1e-3, "{:?}", r);
     }
 }
+
+/// The cube with one corner of its front face `offset` beside the same
+/// corner of the neighbouring faces: what the kernel produced where two
+/// faces sampled a shared edge slightly differently (a sliver).
+fn cube_with_sliver(s: f32, offset: f32) -> TriMesh {
+    let mut mesh = split_face_cube(s);
+    // Front face (y = 0): [0,0,0] [s,0,0] [s,0,s] [0,0,s]; its corner (s, 0, s).
+    mesh.positions[5 * 4 + 2][0] += offset;
+    mesh
+}
+
+#[test]
+fn a_sliver_along_a_shared_edge_is_closed_in_the_export() {
+    // 0.7 µm beside the edge: the raw mesh is open (more than the weld
+    // tolerance), the exported mesh must be closed (finding 1.5 of the
+    // Damen 5009 project: one such sliver made a 3MF non-manifold).
+    let mesh = cube_with_sliver(20.0, 0.0007);
+    assert!(!mesh.analyze().is_watertight(), "{:?}", mesh.analyze());
+    let r = mesh.export_report();
+    assert!(r.is_watertight(), "{r:?}");
+    assert!((r.volume_mm3 - 8000.0).abs() < 1e-2, "{r:?}");
+}
+
+#[test]
+fn a_real_gap_stays_open_in_the_export() {
+    // 0.1 mm is a hole, not a sliver.
+    let r = cube_with_sliver(20.0, 0.1).export_report();
+    assert!(!r.is_watertight(), "{r:?}");
+}
+
+#[test]
+fn vertices_on_both_sides_of_a_weld_cell_border_are_welded() {
+    // 0.5 · WELD_TOLERANCE rounds up, a hair less rounds down: the two
+    // copies of one corner land in different cells of the quantised weld.
+    let mut mesh = split_face_cube(10.0);
+    let half = (WELD_TOLERANCE_MM / 2.0) as f32;
+    for p in &mut mesh.positions {
+        for c in p.iter_mut() {
+            *c += half;
+        }
+    }
+    // One copy of the corner (0, 0, 0) of the bottom face moves by 2 nm.
+    let i = mesh.positions.iter().position(|p| p[0] < 1.0 && p[1] < 1.0 && p[2] < 1.0).unwrap();
+    mesh.positions[i][0] -= 2e-6;
+    let r = mesh.export_report();
+    assert!(r.is_watertight(), "{r:?}");
+}
+
+#[test]
+fn degenerate_triangles_the_export_drops_do_not_count_against_it() {
+    // Finding 1.6: the build called parts "not watertight" whose exported
+    // files were closed, because the analysis counted triangles the export
+    // drops anyway.
+    let mut mesh = split_face_cube(10.0);
+    let base = mesh.positions.len() as u32;
+    mesh.positions.extend([[0.0, 0.0, 10.0], [0.0, 0.0, 10.0], [10.0, 0.0, 10.0]]);
+    mesh.normals.extend([[0.0; 3]; 3]);
+    mesh.indices.extend([base, base + 1, base + 2]);
+    assert!(!mesh.analyze().is_watertight());
+    let r = mesh.export_report();
+    assert!(r.is_watertight(), "{r:?}");
+    assert_eq!(r.triangles, 12);
+}

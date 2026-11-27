@@ -19,6 +19,9 @@ use qoob3d_core::project::layout;
 use qoob3d_core::{ShapeMesh, qmesh};
 use serde::Deserialize;
 
+#[cfg(test)]
+mod tests;
+
 /// A running service answers `GET /status` within this time (WA-OP-02).
 pub const STATUS_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long to wait for a freshly started service (WA-OP-02).
@@ -68,6 +71,66 @@ impl ProjectDir {
         let text = std::fs::read_to_string(self.service_json()).ok()?;
         serde_json::from_str(&text).ok()
     }
+
+    /// The pid of the service of this folder if it runs (WS-PRE-03): the
+    /// process that `service.json` names is alive and `service.lock` is
+    /// held. Only then is the lock tried, so a service that is starting
+    /// (and writes `service.json` only once it holds the lock) never finds
+    /// it taken by this check.
+    fn running(&self) -> Option<u32> {
+        let pid = self.service()?.pid?;
+        if !alive(pid) {
+            return None;
+        }
+        let lock = std::fs::File::open(layout::data_dir(&self.dir).join(layout::SERVICE_LOCK));
+        match lock.ok()?.try_lock() {
+            Err(std::fs::TryLockError::WouldBlock) => Some(pid),
+            Ok(()) | Err(std::fs::TryLockError::Error(_)) => None,
+        }
+    }
+}
+
+/// The process `pid` exists (`kill(pid, 0)`; a process of another user
+/// exists too, and the lock check after this tells it from a service).
+fn alive(pid: u32) -> bool {
+    let Some(pid) = i32::try_from(pid).ok().and_then(rustix::process::Pid::from_raw) else {
+        return false;
+    };
+    match rustix::process::test_kill_process(pid) {
+        Ok(()) => true,
+        Err(e) => e == rustix::io::Errno::PERM,
+    }
+}
+
+/// The service of a folder runs but did not answer `/status` within the
+/// client's timeout (WS-PRE-03): kind `busy`, and no second service was
+/// started.
+#[derive(Debug)]
+pub struct Busy {
+    pub dir: PathBuf,
+    pub pid: u32,
+    pub waited: Duration,
+}
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the service for {} (pid {}) is busy: it holds .qoob3d/service.lock but did not \
+             answer /status within {} s; no second service was started",
+            self.dir.display(),
+            self.pid,
+            self.waited.as_secs_f32()
+        )
+    }
+}
+
+impl std::error::Error for Busy {}
+
+/// The `kind` of an envelope error for a failed connection: `busy` for a
+/// [`Busy`] service, else `service`.
+pub fn error_kind(error: &anyhow::Error) -> &'static str {
+    if error.downcast_ref::<Busy>().is_some() { "busy" } else { "service" }
 }
 
 /// What the service wrote into `.qoob3d/service.json` (ADR-0055).
@@ -77,6 +140,9 @@ struct ServiceJson {
     /// Sent as `X-Qoob3d-Token` with every request (AG-HD-03).
     #[serde(default)]
     token: Option<String>,
+    /// The service process (WS-PRE-03).
+    #[serde(default)]
+    pid: Option<u32>,
 }
 
 /// `text` as one segment of a request path (AG-HD-04): everything but
@@ -128,6 +194,9 @@ pub struct Part {
     pub state: PartState,
     /// Cache key of the last successful build.
     pub key: Option<String>,
+    /// `#RRGGBB`, if the part declares a colour (AG-PJ-07).
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 /// A part's mesh with the cache key it belongs to (`X-Qoob3d-Key`, WA-PR-02).
@@ -148,17 +217,27 @@ impl Client {
     /// Uses the service of `project` if it answers `GET /status` within
     /// [`STATUS_TIMEOUT`]; otherwise starts `<cmd> serve <DIR>` detached and
     /// waits up to `wait` for `service.json` and a successful status (WA-OP-02).
+    /// A service that runs but does not answer is waited for instead, and
+    /// is a [`Busy`] error after `wait` (WS-PRE-03).
     pub fn connect(project: &ProjectDir, cmd: &[String], wait: Duration) -> anyhow::Result<Self> {
+        let start = Instant::now();
         if let Some(client) = Self::probe(project) {
             return Ok(client);
         }
-        start_service(project, cmd)?;
-        let deadline = Instant::now() + wait;
+        let running = project.running();
+        if running.is_none() {
+            start_service(project, cmd)?;
+        }
+        let deadline = start + wait;
         loop {
             if let Some(client) = Self::probe(project) {
                 return Ok(client);
             }
             if Instant::now() >= deadline {
+                if let Some(pid) = running.or_else(|| project.running()) {
+                    let busy = Busy { dir: project.dir().to_owned(), pid, waited: start.elapsed() };
+                    return Err(busy.into());
+                }
                 bail!(
                     "the service for {} did not come up within {} s",
                     project.dir().display(),

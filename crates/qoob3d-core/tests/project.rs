@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use qoob3d_core::project::{
     Config, Graph, KeyInputs, PartDecl, ProjectError, ValueStatus, Values, cache_key, check_files,
-    part_files, resolve_imports,
+    file_digest, part_files, resolve_imports,
 };
 use serde_json::json;
 
@@ -207,6 +207,24 @@ fn ag_hd_01_the_largest_allowed_limits_load() {
     assert_eq!(c.workers.recycle_mb, 1_048_576);
     let c = config_with("[limits]\ntime_s = 86400.0\n").expect("86400.0 as a float");
     assert!((c.limits.time_s - 86400.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn ws_pre_05_idle_shutdown_defaults_to_30_minutes_and_takes_fractions() {
+    // WS-PRE-05: "`[service] idle_min` (default 30)"; a fraction of a minute
+    // is a valid setting (tests use seconds).
+    let c = config_with("").expect("no [service] table");
+    assert!((c.service.idle_min - 30.0).abs() < f64::EPSILON, "{}", c.service.idle_min);
+    let c = config_with("[service]\nidle_min = 0.02\n").expect("a fraction");
+    assert!((c.service.idle_min - 0.02).abs() < f64::EPSILON, "{}", c.service.idle_min);
+    // At most a week, and never zero, negative or not finite.
+    let c = config_with("[service]\nidle_min = 10080\n").expect("a week");
+    assert!((c.service.idle_min - 10080.0).abs() < f64::EPSILON);
+    for value in ["0", "-1", "nan", "inf", "10081"] {
+        let body = format!("[service]\nidle_min = {value}\n");
+        let e = config_with(&body).expect_err(&body);
+        assert_mentions(&e, &["qoob3d.toml", "idle_min"]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -536,8 +554,8 @@ fn ag_pj_02_empty_project_has_an_empty_graph() {
 fn base() -> KeyInputs {
     KeyInputs {
         program_version: "0.1.0".to_owned(),
-        part_file: b"part(\"A\", #{}, |deps| box(value(\"a\"), 10, 10));\n".to_vec(),
-        modules: vec![b"fn make() { box(4, 4, 4) }\n".to_vec()],
+        part_file: file_digest(b"part(\"A\", #{}, |deps| box(value(\"a\"), 10, 10));\n"),
+        modules: vec![file_digest(b"fn make() { box(4, 4, 4) }\n")],
         values_read: vec![("a".to_owned(), json!(20)), ("b.c".to_owned(), json!(1.5))],
         dependency_keys: vec!["0".repeat(64)],
     }
@@ -560,13 +578,13 @@ fn ag_pj_04_key_changes_with_every_input() {
     i.program_version = "0.1.1".to_owned();
     variants.push(("program version", i));
     let mut i = base();
-    i.part_file.push(b' ');
+    i.part_file = file_digest(b"part(\"A\", #{}, |deps| box(value(\"a\"), 10, 10)); \n");
     variants.push(("part file bytes", i));
     let mut i = base();
-    i.modules[0] = b"fn make() { box(4, 4, 5) }\n".to_vec();
+    i.modules[0] = file_digest(b"fn make() { box(4, 4, 5) }\n");
     variants.push(("module bytes", i));
     let mut i = base();
-    i.modules.push(b"export const X = 1;\n".to_vec());
+    i.modules.push(file_digest(b"export const X = 1;\n"));
     variants.push(("additional module", i));
     let mut i = base();
     i.values_read[0].1 = json!(21);
@@ -586,6 +604,14 @@ fn ag_pj_04_key_changes_with_every_input() {
     for (what, inputs) in variants {
         assert_ne!(cache_key(&inputs), k, "changing the {what} must change the key");
     }
+}
+
+#[test]
+fn ws_pre_01_a_file_enters_the_key_as_its_sha256() {
+    // WS-PRE-01: files enter the key as their digests, which the service
+    // remembers per file. FIPS 180-2, appendix B.1: SHA-256("abc").
+    let hex: String = file_digest(b"abc").iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
 }
 
 #[test]
@@ -612,17 +638,17 @@ fn ag_pj_04_moving_bytes_between_inputs_changes_the_key() {
     // the part file into the module changes both files, so the key must
     // change, which a plain concatenation of the inputs would miss.
     let mut a = base();
-    a.part_file = b"ab".to_vec();
-    a.modules = vec![b"c".to_vec()];
+    a.part_file = file_digest(b"ab");
+    a.modules = vec![file_digest(b"c")];
     let mut b = base();
-    b.part_file = b"a".to_vec();
-    b.modules = vec![b"bc".to_vec()];
+    b.part_file = file_digest(b"a");
+    b.modules = vec![file_digest(b"bc")];
     assert_ne!(cache_key(&a), cache_key(&b));
     // The same for the boundary between two modules.
     let mut c = base();
-    c.modules = vec![b"x".to_vec(), b"yz".to_vec()];
+    c.modules = vec![file_digest(b"x"), file_digest(b"yz")];
     let mut d = base();
-    d.modules = vec![b"xy".to_vec(), b"z".to_vec()];
+    d.modules = vec![file_digest(b"xy"), file_digest(b"z")];
     assert_ne!(cache_key(&c), cache_key(&d));
 }
 

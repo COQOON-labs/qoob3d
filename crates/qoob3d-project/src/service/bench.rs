@@ -28,11 +28,12 @@ pub(super) fn run(dir: &Path) -> Answer {
     let project = ProjectDir::open(dir).map_err(|e| Failure::not_found(format!("{e:#}")))?;
     let dir = project.dir();
     // The bench is no service: it discovers the parts in its own process.
+    let hashes = super::hashes::Hashes::default();
     let files = qoob3d_core::project::part_files(dir)
         .map_err(|e| PartError::new(ErrorKind::Load, e))?
         .into_iter()
         .map(|file| {
-            let mut f = FileDecl::read(dir, file);
+            let mut f = FileDecl::read(dir, file, &hashes);
             if f.declared.is_none() {
                 f.declared = Some(crate::worker::declaration_of(dir, &f.file));
             }

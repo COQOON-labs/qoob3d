@@ -178,6 +178,8 @@ pub struct LivePart {
     /// Mesh of the last successful build; stays while a rebuild fails.
     pub mesh: Option<ShapeMesh>,
     pub visible: bool,
+    /// The part's own colour (AG-PJ-07, WA-LV-07).
+    pub color: Option<[u8; 3]>,
 }
 
 /// What the app shows of a project: parts in status order (WA-LV-02/04/05).
@@ -207,6 +209,7 @@ impl Live {
                             file: p.file,
                             state: p.state,
                             key: p.key,
+                            color: p.color.as_deref().and_then(qoob3d_core::project::parse_color),
                         }
                     })
                     .collect();
@@ -253,6 +256,12 @@ impl Live {
 
     /// The visible meshes merged for the renderer and picking.
     pub fn scene(&self) -> ShapeMesh {
-        ShapeMesh::merge(self.parts.iter().filter(|p| p.visible).filter_map(|p| p.mesh.as_ref()))
+        let tinted: Vec<ShapeMesh> = self
+            .parts
+            .iter()
+            .filter(|p| p.visible)
+            .filter_map(|p| Some(p.mesh.clone()?.tinted(p.color)))
+            .collect();
+        ShapeMesh::merge(&tinted)
     }
 }

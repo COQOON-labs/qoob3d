@@ -16,6 +16,10 @@ const LINE: u32 = 0;
 const CIRCLE: u32 = 1;
 /// Positions within this distance count as equal (mm).
 const TOL_MM: f64 = 1e-6;
+/// `top()` and `bottom()` take what lies within this distance of the
+/// highest or lowest point (mm): freeform faces report extremes a few
+/// nanometres beyond the plane faces next to them (finding 1.9).
+const EXTREME_TOL_MM: f64 = 1e-3;
 
 #[derive(Debug, Clone, Copy)]
 struct Element {
@@ -134,7 +138,7 @@ fn edge_feature(function: &'static str, s: &Shape, sel: &Selection, size: f64) -
     checked(function, s, sel, false)?;
     let chamfer = function == "chamfer";
     match ffi::qoob3d_fillet(s.get(), &sel.indices(), size, chamfer) {
-        Ok(r) => plausible(function, made(function, Ok(r))?, Expect::Material),
+        Ok(r) => plausible(function, made(function, Ok(r))?, &Expect::Material),
         Err(all) => {
             let n = sel.items.len();
             let first = sel.items.iter().enumerate().find_map(|(k, e)| {
@@ -158,7 +162,7 @@ fn edge_feature(function: &'static str, s: &Shape, sel: &Selection, size: f64) -
 fn shell(s: &Shape, thickness: f64, open: &Selection) -> Rr<Shape> {
     checked("shell", s, open, true)?;
     let result = made("shell", ffi::qoob3d_shell(s.get(), &open.indices(), thickness))?;
-    plausible("shell", result, Expect::Less(s.volume()))
+    plausible("shell", result, &Expect::Less(s.volume()))
 }
 
 pub(super) fn register(engine: &mut Engine) {
@@ -182,11 +186,11 @@ pub(super) fn register(engine: &mut Engine) {
     });
     engine.register_fn("top", |sel: Selection| {
         let z = sel.z_range[1];
-        sel.at_z(z, TOL_MM)
+        sel.keep(|e| e.min[2] >= z - EXTREME_TOL_MM && e.max[2] - e.min[2] <= 2.0 * TOL_MM)
     });
     engine.register_fn("bottom", |sel: Selection| {
         let z = sel.z_range[0];
-        sel.at_z(z, TOL_MM)
+        sel.keep(|e| e.max[2] <= z + EXTREME_TOL_MM && e.max[2] - e.min[2] <= 2.0 * TOL_MM)
     });
     engine.register_fn("at_z", |sel: Selection, z: Dynamic, tol: Dynamic| -> Rr<Selection> {
         let z = num(&z, "at_z: z")?;

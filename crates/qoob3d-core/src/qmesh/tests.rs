@@ -78,6 +78,7 @@ fn tiny() -> ShapeMesh {
             points: vec![[0.0, 2.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
             starts: vec![0, 3],
         },
+        tints: Vec::new(),
     }
 }
 
@@ -103,6 +104,7 @@ fn awkward() -> ShapeMesh {
             points: vec![[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [third, 0.5, 0.25], [-1.0, -2.0, -3.0]],
             starts: vec![0, 2, 4],
         },
+        tints: Vec::new(),
     }
 }
 
@@ -214,6 +216,7 @@ fn cube_size_follows_the_layout() {
             face_ids: Vec::new(),
         },
         edges: Polylines { starts: (0..=12).map(|i| i * 2).collect(), points },
+        tints: Vec::new(),
     };
     let bytes = write(&mesh);
     assert_eq!(bytes.len(), 700);

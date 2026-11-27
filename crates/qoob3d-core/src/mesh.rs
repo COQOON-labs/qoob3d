@@ -9,6 +9,17 @@ use std::collections::HashMap;
 pub struct ShapeMesh {
     pub faces: TriMesh,
     pub edges: Polylines,
+    /// Colours of runs of face vertices, for parts that declare one
+    /// (AG-PJ-07). Vertices in no run have the theme's body colour. Not
+    /// part of the mesh file: the viewer sets it from the part's `color`.
+    pub tints: Vec<Tint>,
+}
+
+/// The colour (sRGB) of the face vertices `vertices` of a [`ShapeMesh`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tint {
+    pub vertices: std::ops::Range<u32>,
+    pub color: [u8; 3],
 }
 
 /// An indexed triangle mesh with per-vertex normals.
@@ -69,6 +80,10 @@ impl ShapeMesh {
             out.faces.normals.extend_from_slice(&part.faces.normals);
             out.faces.indices.extend(part.faces.indices.iter().map(|i| i + base));
             out.faces.face_ids.extend(part.faces.face_ids.iter().map(|f| f + face_base));
+            out.tints.extend(part.tints.iter().map(|t| Tint {
+                vertices: t.vertices.start + base..t.vertices.end + base,
+                color: t.color,
+            }));
             let point_base = out.edges.points.len() as u32;
             out.edges.starts.pop();
             out.edges.points.extend_from_slice(&part.edges.points);
@@ -78,6 +93,16 @@ impl ShapeMesh {
             out.edges.starts.push(out.edges.points.len() as u32);
         }
         out
+    }
+
+    /// This mesh with all faces in `color` (sRGB), or as it is for `None`.
+    #[must_use]
+    pub fn tinted(mut self, color: Option<[u8; 3]>) -> ShapeMesh {
+        self.tints = color
+            .map(|color| Tint { vertices: 0..self.faces.positions.len() as u32, color })
+            .into_iter()
+            .collect();
+        self
     }
 }
 
@@ -101,9 +126,30 @@ impl TriMesh {
     }
 
     /// Shared-vertex form for export (3MF needs indexed, manifold meshes):
-    /// vertices within [`WELD_TOLERANCE_MM`] are merged, collapsed triangles
-    /// dropped. Returns (positions, triangles).
+    /// vertices within [`WELD_TOLERANCE_MM`] are merged, then the vertices
+    /// on edges that are still open are merged within
+    /// [`SLIVER_TOLERANCE_MM`] (slivers where two faces sampled their
+    /// shared edge slightly differently, and copies of a vertex that the
+    /// grid of the first pass put into neighbouring cells), and collapsed
+    /// triangles are dropped. Returns (positions, triangles).
     pub fn welded(&self) -> (Vec<[f32; 3]>, Vec<[u32; 3]>) {
+        let (positions, triangles) = self.grid_welded();
+        close_slivers(positions, triangles)
+    }
+
+    /// What a slicer sees: [`TriMesh::analyze`] of the [`TriMesh::welded`]
+    /// form that STL and 3MF export write (ADR-0034).
+    pub fn export_report(&self) -> MeshReport {
+        let (positions, triangles) = self.welded();
+        TriMesh {
+            positions,
+            indices: triangles.into_iter().flatten().collect(),
+            ..TriMesh::default()
+        }
+        .analyze()
+    }
+
+    fn grid_welded(&self) -> (Vec<[f32; 3]>, Vec<[u32; 3]>) {
         let quantize = |p: [f32; 3]| p.map(|c| (f64::from(c) / WELD_TOLERANCE_MM).round() as i64);
         let mut index: HashMap<[i64; 3], u32> = HashMap::new();
         let mut positions = Vec::new();
@@ -237,6 +283,58 @@ fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 
 /// Distance below which two vertices are considered identical by [`TriMesh::analyze`].
 pub const WELD_TOLERANCE_MM: f64 = 1e-4;
+
+/// Vertices on open edges closer than this are one vertex in the export
+/// (finding of the Damen 5009 project: a sliver of 0.7 µm made a 3MF
+/// non-manifold). Far below a nozzle's resolution, far above rounding.
+pub const SLIVER_TOLERANCE_MM: f64 = 2e-3;
+
+/// Merges the vertices of open edges that lie within
+/// [`SLIVER_TOLERANCE_MM`] of each other and drops collapsed triangles.
+/// Vertices of closed edges stay where they are.
+fn close_slivers(
+    positions: Vec<[f32; 3]>,
+    triangles: Vec<[u32; 3]>,
+) -> (Vec<[f32; 3]>, Vec<[u32; 3]>) {
+    let mut uses: HashMap<(u32, u32), i32> = HashMap::new();
+    for t in &triangles {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            *uses.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+    }
+    let mut loose: Vec<u32> =
+        uses.iter().filter(|&(_, &n)| n % 2 == 1).flat_map(|(&(a, b), _)| [a, b]).collect();
+    if loose.is_empty() {
+        return (positions, triangles);
+    }
+    loose.sort_unstable();
+    loose.dedup();
+    // A sweep along x: clusters within the tolerance join their first vertex.
+    loose.sort_by(|&a, &b| positions[a as usize][0].total_cmp(&positions[b as usize][0]));
+    let tol = SLIVER_TOLERANCE_MM as f32;
+    let mut target: HashMap<u32, u32> = HashMap::new();
+    for (i, &a) in loose.iter().enumerate() {
+        if target.contains_key(&a) {
+            continue;
+        }
+        let pa = positions[a as usize];
+        for &b in &loose[i + 1..] {
+            let pb = positions[b as usize];
+            if pb[0] - pa[0] > tol {
+                break;
+            }
+            if !target.contains_key(&b) && (0..3).all(|k| (pa[k] - pb[k]).abs() <= tol) {
+                target.insert(b, a);
+            }
+        }
+    }
+    let triangles = triangles
+        .into_iter()
+        .map(|t| t.map(|v| target.get(&v).copied().unwrap_or(v)))
+        .filter(|t| t[0] != t[1] && t[1] != t[2] && t[2] != t[0])
+        .collect();
+    (positions, triangles)
+}
 
 /// Result of [`TriMesh::analyze`].
 #[derive(Debug, Clone, Copy, Default, PartialEq)]

@@ -20,11 +20,26 @@ fn main() -> anyhow::Result<()> {
         Some(cli::Command::Worker) => return worker::run(),
         Some(cli::Command::Bench { dir }) => std::process::exit(service::bench(dir)),
         Some(cli::Command::Init { dir }) => return init::run(dir),
-        Some(cli::Command::RenderProject { dir, out, view, views, size, parts }) => {
+        Some(cli::Command::RenderProject {
+            dir,
+            out,
+            view,
+            views,
+            size,
+            parts,
+            source,
+            region,
+        }) => {
             let one = [*view];
             let views = if views.is_empty() { &one[..] } else { views };
             let views: Vec<_> = views.iter().map(|v| (*v).into()).collect();
-            return project_render::run(dir, out, &views, *size, parts);
+            let what = match source {
+                Some(file) => project_render::Scene::Script(file.clone()),
+                None => project_render::Scene::Parts(parts.clone()),
+            };
+            let frame = region
+                .map(|r| qoob3d_core::Aabb { min: [r[0], r[1], r[2]], max: [r[3], r[4], r[5]] });
+            return project_render::run(dir, out, &views, *size, &what, frame);
         }
         Some(cli::Command::Mcp { dir }) => return mcp::run(dir.as_deref()),
         Some(cli::Command::Project(command)) => std::process::exit(service_cli::run(command)),

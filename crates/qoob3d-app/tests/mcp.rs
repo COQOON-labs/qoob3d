@@ -224,8 +224,15 @@ const TOOLS: [(&str, &[&str], &[&str]); 19] = [
     ("measure", &["a", "b"], &["a"]),
     ("check", &["names", "wait_s"], &[]),
     // AG-MC-09: `render` accepts `views` (2 to 6 named views, contact sheet).
-    ("render", &["view", "views", "parts", "width", "height"], &[]),
-    ("export", &["parts", "format"], &["parts", "format"]),
+    // AG-MC-12: `render` takes a throwaway script (`source`) and a `region`.
+    ("render", &["view", "views", "parts", "source", "region", "width", "height"], &[]),
+    // AG-SV-09: `export` writes a kit into one file.
+    // AG-SV-10: and a slicer project with plates and filaments.
+    (
+        "export",
+        &["parts", "format", "kit", "bed_mm", "project", "multicolor", "printer"],
+        &["parts", "format"],
+    ),
     ("values", &[], &[]),
     ("save_state", &["message"], &["message"]),
 ];
@@ -1048,6 +1055,59 @@ fn ag_mc_04_render_returns_the_envelope_and_a_png_image() {
     mcp.finish();
 }
 
+#[test]
+fn ag_mc_12_render_shows_a_script_a_region_and_many_parts() {
+    // Findings 3.2 and 3.8 of the Damen 5009 project: 17 parts made the
+    // file name too long, and a throwaway shape needed a part to be seen.
+    let p = small_project("mcp-render-more");
+    let names: Vec<String> =
+        (0..18).map(|i| format!("Part_With_A_Rather_Long_Name_{i:02}")).collect();
+    let many: String = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| format!("part(\"{n}\", #{{}}, |deps| box(4, 4, 4).move({}, 0, 0));\n", 6 * i))
+        .collect();
+    p.write("parts/many.rhai", &many);
+    let mut mcp = Mcp::open(&p);
+    let size = |extra: Value| -> Value {
+        let mut args = json!({"width": 200, "height": 150});
+        for (k, v) in extra.as_object().expect("object") {
+            args[k] = v.clone();
+        }
+        args
+    };
+    let all = rendered(&mut mcp, &p, &size(json!({"parts": names})), (200, 150));
+    let status = mcp.call("project_status", &json!({}));
+    let before = status.ok()["parts"].as_array().map_or(0, Vec::len);
+
+    // A script's shapes, without a part and without writing one.
+    let script =
+        json!({"source": "show(box(10, 10, 10), \"c\");\nshow(sphere(8).move(12, 0, 0), \"s\");"});
+    let shown = rendered(&mut mcp, &p, &size(script.clone()), (200, 150));
+    assert!(shown != all, "the script's shapes are what is rendered");
+    let status = mcp.call("project_status", &json!({}));
+    assert_eq!(status.ok()["parts"].as_array().map_or(0, Vec::len), before, "no part was added");
+    let run = p.path(".qoob3d/run");
+    let left: Vec<_> = std::fs::read_dir(&run)
+        .map(|d| d.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "the meshes and the script file are removed: {left:?}");
+
+    // A region frames a part of the scene: a different image.
+    // A is x ∈ [−10, 10], y ∈ [−5, 5], z ∈ [0, 10]: its corner (10, 5, 10).
+    let zoom = json!({"parts": ["A"], "region": {"min": [8, 3, 8], "max": [12, 7, 12]}});
+    let whole = rendered(&mut mcp, &p, &size(json!({"parts": ["A"]})), (200, 150));
+    assert!(rendered(&mut mcp, &p, &size(zoom), (200, 150)) != whole, "the region zooms in");
+
+    let both = json!({"parts": ["A"], "source": "show(box(1, 1, 1), \"x\");"});
+    mcp.call("render", &both).refused(&["parts or source"], "parts and source together");
+    let bad = json!({"region": {"min": [1, 1, 1], "max": [0, 0, 0]}});
+    mcp.call("render", &bad).refused(&["region"], "a region with min above max");
+    let failing = json!({"source": "let x = box(1, 1, 1) - box(1, 1, 1).move(5, 0, 0);"});
+    mcp.call("render", &failing).refused(&["removed no material"], "a failing script");
+    mcp.finish();
+}
+
 // ===========================================================================
 // AG-MC-05, AG-MC-06: resources and guide
 // ===========================================================================
@@ -1456,4 +1516,120 @@ fn accept_human_sets_done(mcp: &mut Mcp, p: &Project) {
     assert!(
         mcp.call("task_list", &json!({"state": "open"})).ok().as_array().is_some_and(Vec::is_empty)
     );
+}
+
+// ===========================================================================
+// AG-MC-11: importable files are visible to the agent
+// ===========================================================================
+
+/// The Bambu Studio fixture of `qoob3d-core` (24 292 bytes).
+const CLIP_3MF: &[u8] = include_bytes!("../../qoob3d-core/tests/fixtures/bambu_two_objects.3mf");
+
+/// Reference files as a human drops them into the project, with distinct
+/// sizes so that a size cannot match the wrong file: (path, bytes).
+fn reference_files() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        ("lib/clip.3mf", CLIP_3MF.to_vec()),
+        ("lib/ref/Block.STL", vec![7u8; 684]),
+        ("lib/old.Stl", b"solid x\nendsolid x\n".to_vec()),
+        ("parts/bracket.step", b"ISO-10303-21;\nEND-ISO-10303-21;\n".to_vec()),
+        ("values/legacy.STP", b"ISO-10303-21;\n".to_vec()),
+        ("checks/fit.3MF", vec![1u8; 333]),
+    ]
+}
+
+fn put_reference_files(p: &Project) {
+    for (rel, bytes) in reference_files() {
+        let path = p.path(rel);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create folder");
+        std::fs::write(path, bytes).expect("write reference file");
+    }
+}
+
+#[test]
+fn ag_mc_11_file_list_reports_importable_files_with_their_size_in_imports() {
+    let p = small_project("mcp-imports");
+    put_reference_files(&p);
+    // Not importable, or not under the allowed folders: never listed.
+    for (rel, bytes) in [
+        ("lib/photo.png", b"\x89PNG".as_slice()),
+        ("lib/clip.3mf.bak", b"old".as_slice()),
+        ("out/A.stl", b"solid A\nendsolid A\n".as_slice()),
+        (".qoob3d/cache/x.3mf", b"PK".as_slice()),
+    ] {
+        let path = p.path(rel);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create folder");
+        std::fs::write(path, bytes).expect("write");
+    }
+    let mut mcp = Mcp::open(&p);
+    let list = mcp.call("file_list", &json!({}));
+    let result = list.ok().clone();
+
+    // `files` is unchanged: the text files of the project only.
+    let files = string_set(&result["files"]);
+    let expected = [
+        "qoob3d.toml",
+        "parts/a.rhai",
+        "parts/b.rhai",
+        "values/dims.toml",
+        "checks/geometry.rhai",
+        "tasks/0001-first.md",
+    ];
+    assert_eq!(files, set(&expected), "files unchanged: {result}");
+
+    // `imports`: one entry per importable file, its project-relative path
+    // and its size in bytes (the field names are not specified; every entry
+    // must carry the path as a string and the size as a number).
+    let imports =
+        result["imports"].as_array().unwrap_or_else(|| panic!("no imports list: {result}"));
+    let expected = reference_files();
+    assert_eq!(imports.len(), expected.len(), "exactly the importable files: {result}");
+    for (rel, bytes) in &expected {
+        let size = bytes.len() as u64;
+        let found = imports.iter().any(|entry| {
+            let values: Vec<&Value> =
+                entry.as_object().map(|o| o.values().collect()).unwrap_or_default();
+            values.iter().any(|v| v.as_str() == Some(*rel))
+                && values.iter().any(|v| v.as_u64() == Some(size))
+        });
+        assert!(found, "imports lists {rel} with {size} bytes: {result}");
+    }
+    mcp.finish();
+}
+
+#[test]
+fn ag_mc_11_file_read_of_an_importable_file_names_the_import_function() {
+    let p = small_project("mcp-import-read");
+    put_reference_files(&p);
+    let mut mcp = Mcp::open(&p);
+    for (rel, function) in [
+        ("lib/clip.3mf", "import_mesh"),
+        ("lib/ref/Block.STL", "import_mesh"),
+        ("lib/old.Stl", "import_mesh"),
+        ("checks/fit.3MF", "import_mesh"),
+        ("parts/bracket.step", "import_step"),
+        ("values/legacy.STP", "import_step"),
+    ] {
+        let tool = mcp.call("file_read", &json!({"path": rel}));
+        tool.refused(&[function], &format!("file_read {rel}"));
+    }
+    // file_write still refuses them, new or existing, and changes nothing.
+    for rel in ["lib/new.stl", "lib/new.3mf", "parts/new.step", "lib/clip.3mf"] {
+        let args = json!({"path": rel, "content": "solid x\nendsolid x\n"});
+        mcp.call("file_write", &args).refused(&[], &format!("file_write {rel}"));
+    }
+    assert!(!p.path("lib/new.stl").exists() && !p.path("parts/new.step").exists());
+    assert_eq!(std::fs::read(p.path("lib/clip.3mf")).ok().as_deref(), Some(CLIP_3MF));
+    mcp.finish();
+}
+
+#[test]
+fn ag_mc_11_the_guide_says_where_reference_files_go_and_how_to_import_them() {
+    let p = small_project("mcp-import-guide");
+    let mut mcp = Mcp::open(&p);
+    let guide = mcp.call("guide", &json!({})).text();
+    for word in ["lib/", "import_mesh", "import_step"] {
+        assert!(guide.contains(word), "the guide names {word}");
+    }
+    mcp.finish();
 }

@@ -1,6 +1,6 @@
 # Requirements: agent-first modelling with Rhai scripts
 
-As of: 2026-11-22 · Status: **R1–R4 and P1 implemented**, R5 specified · Decision: ADR-0053 · Background: Werft concept
+As of: 2026-11-26 · Status: **R1–R4 and P1 implemented**, R5 specified, 6.6 implemented · Decision: ADR-0053 · Background: Werft concept
 `docs/concept/werft-concept.md`, M0 measurements `docs/concept/m0-report.md`
 
 Goal: an AI agent builds a model completely as code, checks, renders and exports it for FDM
@@ -54,15 +54,17 @@ layer where OCCT has it.
 - Part declaration is found without running OCCT: the script is evaluated with a stub
   `part()` that only records name, options and the closure; `deps` passed to the closure is
   a map name → shape of the built dependencies.
-- Cache key: SHA-256 (hex) over, in order: program version, part file bytes, bytes of every
-  transitively imported module, the sorted list of `(value id, canonical value)` read in the
-  last build, and the keys of the dependencies. Before the first build the key is computed
-  without values; after a build the recorded reads are part of the key, so changing a read
-  value invalidates, changing an unread value does not.
+- Cache key: SHA-256 (hex) over, in order: program version (with the kernel fingerprint,
+  WS-PRE-02), the SHA-256 of the part file, the SHA-256 of every transitively imported module
+  followed by that of every file `import_step`/`import_mesh` read in the last build (AG-SC-24;
+  the service remembers these digests per file, WS-PRE-01), the sorted list of `(value id,
+  canonical value)` read in the last build, and the keys of the dependencies. Before the
+  first build the key is computed without values; after a build the recorded reads are part
+  of the key, so changing a read value invalidates, changing an unread value does not.
 - Cache entry files: `<key>.brep` (OCCT BREP), `<key>.qmsh` (tessellated, 0.01 mm linear
   deflection, edges included), `<key>.json` with `volume`, `bbox` `{min,max,size}`,
   `valid`, `watertight` (the mesh is closed and manifold, the print check), `solids`,
-  `duration_s`, `values_read`, `warnings`.
+  `duration_s`, `values_read`, `modules_read`, `files_read`, `warnings`.
 - Worker protocol: the parent starts `qoob3d worker` with stdin/stdout pipes, sends one JSON
   request per line (`{"job": id, "dir": …, "part": …, "deps": {name: brep_path}}`), the
   worker answers one JSON line per job. Workers stay warm between jobs.
@@ -75,14 +77,19 @@ layer where OCCT has it.
 ### 3.1 HTTP details (envelope as in `project-app.md`)
 
 - `GET /status` → `result`: `{"project": name, "parts": [{name, file, state, key, error?}],
-  "jobs": [{id, state}], "workers": {count, busy, recycled},
+  "jobs": [{id, state, kind, reason?}], "workers": {count, busy, recycled, slots: {budget,
+  held, waiting}}, "hashing": [files],
   "load_errors": [{kind, message, file, line?, column?}], "error"?}` (superset of WA-PR-01;
   `recycled` as AG-PF-03). A part or check file that does not load is one entry of
   `load_errors` and never hides the parts of other files (ADR-0055); `error` repeats the
   first one, or is the load error of the whole project (configuration, values, dependency
   graph) with an empty part list. `/status` never waits for discovery: `"discovering":
   [files]` lists the part and check files whose declarations are not known yet (their earlier
-  parts are `outdated`, a new file has no parts yet).
+  parts are `outdated`, a new file has no parts yet). `"hashing": [files]` lists large imported
+  files whose digests are computed in the background (WS-PRE-01; their parts are `outdated`
+  meanwhile, `qoob3d status` waits for them within its 10 s). A job that waits for a slot of the
+  machine-wide worker budget is `queued` with `reason: "waiting for a worker slot"`
+  (WS-PRE-06).
 - `POST /discover {"files": [..]|null, "wait_s": f64}` (ADR-0055) waits up to `wait_s` for
   the discovery of those part and check files (`null` = all) → `{"files": [{file, state:
   "declared"|"failed"|"discovering", parts?: [{name, depends}], checks?: [..], error?}],
@@ -218,6 +225,47 @@ bind them.
 | AG-SC-21 | `s.mass(density_g_cm3)` in grams; `section(s, plane, offset)` returns the cut profile (`"xy"`, `"xz"`, `"yz"` at the offset) with `.area()`. |
 | AG-SC-22 | Print analysis (first step of concept milestone 4): `overhangs(s, max_angle_deg)` returns the total area in mm^2 of faces whose downward normal is steeper than the limit, excluding faces on the bed plane z = min; `bed_area(s)` returns the area in contact with z = min. Both are exact on planar faces and within 1 % on curved ones. |
 
+### 6.5 Mesh import (second agent run)
+
+Source: the second free-text task (hose guide for a Bambu Lab A1) stopped at the human's
+3MF of the old clip: qoob3d read only STEP, and the agent could not even see the file. STL
+and 3MF are what slicers, MakerWorld and Bambu Studio hand out. Decision: ADR-0034.
+
+| ID | Requirement |
+| --- | --- |
+| AG-SC-23 | `import_mesh(path)` reads an STL (binary or ASCII) or a 3MF (chosen by the extension `.stl` / `.3mf`, case-insensitive; any other extension is a runtime error naming the path and both extensions) from the project folder (same confinement as `import_step`) and returns it as a shape in mm. 3MF: core specification and the production extension (`p:path` components in other model files of the archive, as Bambu Studio writes them), components nested to any depth, the `transform` of every component and build item applied (3MF row-vector convention: `x' = x·m00 + y·m10 + z·m20 + m30`, …), the model's `unit` (`micron`, `millimeter`, `centimeter`, `inch`, `foot`, `meter`) converted to mm, ZIP entries stored or deflated; every build item is imported, resources not referenced from the build are not. A transform with a negative determinant (mirror) flips the winding, so the volume stays positive. The triangle limit counts triangles as read, after expanding components and before dropping collapsed ones. Vertices closer than 1e-4 mm are welded, collapsed triangles dropped. Every closed, edge-manifold group of connected triangles becomes one solid (`s.solids()` counts them); coplanar adjacent triangles become one planar face, so a box mesh of 12 triangles has 6 faces and 12 edges. The volume of a closed mesh equals its signed triangle volume to 1e-6 relative. Errors (runtime, naming the file): unreadable or malformed file (with the reason, e.g. the ZIP entry or XML element; this includes a CRC-32 mismatch, an unknown `unit`, a file without triangles, and an ASCII STL that ends early), a required 3MF extension other than the production extension, more than 200 000 triangles (naming the count), and a mesh with boundary or non-manifold edges (geometry error naming their count). Readers of these bytes never panic and never allocate more than the input justifies; a 3MF whose entries inflate to more than 512 MiB is refused. |
+| AG-SC-24 | Files read by `import_step` and `import_mesh` during a build are inputs of the part like imported modules: the build result lists them per part in `result.parts[<name>].files_read` (project-relative, `[]` when none), their bytes enter the cache key, and changing, replacing or removing one makes the part stale and rebuilds it (and its dependents) on the next build. |
+| AG-MC-11 | `file_list` also reports the importable files (`.step`, `.stp`, `.stl`, `.3mf`, case-insensitive) under the allowed folders in a separate list `imports` of `{path, size}` (project-relative path, size in bytes; filtered by `dir` like `files`); `files` is unchanged. `file_read` on such a file answers an error that names `import_step` or `import_mesh`; `file_write` still refuses them. The guide tells the agent that the human puts reference files into `lib/` and how to import them. |
+
+### 6.6 Findings of a real model (Damen 5009 display kit)
+
+Source: an agent turned a Fusion 360 RC ship model (355 bodies, an imported freeform hull of
+1689 faces, scale 1:40) into an FDM display kit in 1:87 over MCP and wrote down what did not
+work (`FINDINGS.md` of that project). The measurements behind the decisions are in ADR-0053
+(booleans on freeform bodies) and ADR-0034 (meshes, kits).
+
+| ID | Requirement |
+| --- | --- |
+| AG-SC-25 | Booleans on freeform bodies (a face that is not plane, cylinder, cone, sphere or torus): without a `fuzzy` option, `cut`/`-`, `common`/`&` and `section` use twice the largest edge tolerance of the inputs (0.00001–0.001 mm) as fuzzy value, a union is exact; every boolean that fails or is implausible is computed again serially, a union finally with the fuzzy value. A result that BRepCheck calls invalid is repaired (ShapeFix, same-parameter) when the repair is valid. A union must keep the extent of its inputs (bbox within 1e-6 · size + 0.001 mm), else it is a geometry error. Volumes are integrated adaptively to 1e-7 relative. `union`, `cut` and `common` take `#{ fuzzy: mm }`. Analytic shapes stay exact and unchanged. |
+| AG-SC-26 | `defects(s)` lists what BRepCheck finds (at most 50: `kind`, `index`, `problem`, `min`, `max`), empty for a valid shape; `heal(s[, tolerance])` repairs an invalid shape with ShapeFix and same-parameter (default 0.0001 mm), returns a valid one unchanged, and refuses a volume change beyond the tolerance times the area. |
+| AG-SC-27 | `outline(profile)` drops the holes of a profile; `fill_voids(s)` drops the cavities of every solid. |
+| AG-SC-28 | `on(plane, profile, offset)` places a profile on the parallel plane where `section(s, plane, offset)` cuts; `split(s, plane, offset)` returns `[below, above]` (a plane that does not cut is a geometry error); `on_bed(s)` stands `s` on z = 0, centred on the Z axis. |
+| AG-SC-29 | `import_step(path, name)` returns the solids whose STEP name is `name` (or one of an array of names), `step_names(path)` the names in file order; a missing name is a runtime error listing the names; a STEP file is read once per run. |
+| AG-SC-30 | `group(shapes)` is one shape of several without a boolean. |
+| AG-SC-31 | `offset(s, d)` grows (round edges) or shrinks a solid; the volume must change in the direction of `d`. |
+| AG-SC-32 | `heights(s, [x0, y0], [x1, y1], step)` returns the highest z per grid point (row per y, `()` where nothing is hit), at most 1 000 000 points, with one intersector for all lines. |
+| AG-SC-33 | `loft(profiles, #{ smooth: true })` lofts a smooth surface; without the option the loft stays ruled. |
+| AG-SC-34 | `mesh_report(s)` returns `watertight`, `triangles`, `open_edges`, `non_manifold_edges`, `flipped_edges`, `volume` of the exported form of `s`, tessellated with the project's `[mesh]` settings (also in checks). |
+| AG-SC-35 | A geometry error caught with `catch (e)` reads as `"<function> failed: <message>"`; the lines a script printed before an error come back with it (`error.printed` of builds, checks and `run_script`), and a successful build lists them in `printed`. Expression nesting is 128 levels at the top level and 64 in functions in every build. |
+| AG-SC-36 | A face OCCT leaves without triangles is meshed again finer and with relative deflection; if one still has none, a repaired copy of the whole shape (without its triangles) is meshed, and as the last resort the face gets a fan over its boundary points; only when that fails too the build fails with kind `script`, naming the part, the face and its box. Validity is judged before meshing. |
+| AG-SC-37 | `bed_area`, `overhangs`, `top()` and `bottom()` count what lies within 0.001 mm of the lowest (highest) point; a cut face 20 nm above the lowest point of freeform faces is the bed face. Cavities of a mesh (closed inward surfaces inside another) become inner shells of their solid; an inward surface inside nothing is refused. |
+| AG-SC-38 | `text(string, #{ font, height, spacing, align })` sets one line of lettering as a profile: the glyph outlines of a TrueType/OpenType file of the project (read like an import, an input of the cache key), scaled so that the cap height (height of "H", else the capital height metric, else the ascender) is `height` mm, baseline y = 0, running along +x, placed by advance widths and `kern` pairs; curves are polygons within 0.002 × `height` (at most 24 segments each), counters are holes by nesting, ink that touches or overlaps is united. A character without a glyph (named), an empty or blank string, a line break, more than 200 characters and a file that is no font (or larger than 16 MiB) are runtime errors. |
+| AG-PJ-06 | The part option `pose: #{ rotate: [axis, deg] or a list of them, count: n }` declares the print pose (turns in order, then standing on the bed, centred) and the number of copies (1 to 1000: the service copies the mesh per piece when it exports); a wrong `pose` is a load error naming the part. |
+| AG-SV-09 | `/export` writes STL and 3MF in each part's print pose and answers `details` per file (`triangles`, `size`, `watertight`, `warnings`; `count` when > 1). With `kit: name` (stl or 3mf) all parts, each `count` times, go into one file `out/<name>.<format>`, arranged in rows on a bed `bed_mm` wide (default 256, gap 5 mm), with `objects`, `footprint` and `fits_one_bed`. Watertightness is judged on the exported form: vertices on open edges within 0.002 mm are welded, collapsed triangles do not count. |
+| AG-PJ-07 | The part option `color: "#RRGGBB"` (or one of the sixteen basic web colour names, `orange`, `grey`) declares the part's colour, reported as `#RRGGBB`: `/status` reports it, the app and `render` draw the part in it, and a slicer project prints it in the filament of that colour. `print_with: "Host"` names the part it prints with as one multi-colour object. A wrong `color` or `print_with` is a load error naming the part. |
+| AG-SV-10 | `/export` with `project: name` (format 3mf, not with `kit` or `bed_mm`) writes one Bambu Studio project `out/<name>.3mf` for `printer` (an id of the printer database whose presets are known, default `bambu-lab-p1s`): all parts in their print pose and count as objects on plates of that bed, 5 mm apart and from the edge, clear of the bed's exclusion zone; one filament per distinct colour in order of first use (parts without colour share a light grey one). Default: every part is an object and parts of different colours never share a plate. With `multicolor: true` a part with `print_with` is a part of its host's object, posed with the host; a plate holds objects that need the same filaments; a host that is not exported or prints with another part itself is refused. The answer lists `printer`, `presets`, `filaments` (`color`, `parts`), `plates` (`filaments`, `objects`) and `objects` (`plate`, `size`, `fits`, `watertight`, `parts` with `filament`); an object larger than the bed lies alone on a plate, `fits: false`, with a warning. The file names the slicer's printer, process and filament presets and carries none of their values. Where Bambu Studio is installed, a test has it load and slice the projects and compares plates and filaments. CLI: `--project NAME [--multicolor] [--printer ID]`; MCP `export {project, multicolor, printer}`. |
+| AG-MC-12 | `render` takes `source` (a throwaway script whose shown shapes are rendered; nothing is written to the project, the meshes in `.qoob3d/run/` are removed) and `region` (`{min, max}`: the camera frames this box); orthographic images frame the projected box of what they show; a file name longer than 96 characters uses a hash of the part list. `file_write` of `qoob3d.toml` answers when its sections take effect. |
+
 ## 7. Acceptance
 
 - R1: the three M0 probe parts written as scripts reproduce the analytic volumes from
@@ -231,3 +279,9 @@ bind them.
   state `review`; the human sets `done`.
 - R5: the fresh-agent run is repeated with a new free-text task; the task ends in `review`
   with parts and checks bound, and the agent's friction list has no item of sections 6.2–6.3.
+- Real model (6.6): the Damen 5009 kit project builds from an empty cache with every part
+  valid and every printed part watertight, its checks pass, and every exported 3MF loads in
+  Bambu Studio as manifold (opt-in test `crates/qoob3d-app/tests/acceptance.rs`).
+- Mesh import (6.5): a 3MF written by Bambu Studio from two parts of known volume imports
+  with both volumes and sizes; the human's 3MF of a real part, copied into `lib/`, imports in
+  a fresh agent session and the agent can measure it.

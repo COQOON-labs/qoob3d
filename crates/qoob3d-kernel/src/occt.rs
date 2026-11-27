@@ -46,6 +46,41 @@ pub(crate) mod ffi {
         directions: Vec<f64>,
     }
 
+    /// Polyhedral solids (mesh import): points `x y z`; edges as point index
+    /// pairs; loop `l` is the edge references `loops[loop_starts[l]..loop_starts[l + 1]]`
+    /// (`2 edge + 1` runs the edge backwards), the first loop of a face its
+    /// outline; face `f` has the loops `face_starts[f]..face_starts[f + 1]`,
+    /// the plane `planes[6 f..6 f + 6]` (point, outward normal) and the
+    /// tolerance `tolerances[f]` and the triangles (point index triples)
+    /// `triangle_starts[f]..triangle_starts[f + 1]` of `triangles`, counter-clockwise
+    /// about the normal; shell `h` the faces `shell_starts[h]..shell_starts[h + 1]`;
+    /// solid `s` the shells `solid_starts[s]..solid_starts[s + 1]`, its outside
+    /// first, then its cavities. Every `*_starts` ends with a sentinel.
+    struct Qoob3dPolyhedron {
+        points: Vec<f64>,
+        edges: Vec<u32>,
+        loops: Vec<u32>,
+        loop_starts: Vec<u32>,
+        face_starts: Vec<u32>,
+        planes: Vec<f64>,
+        tolerances: Vec<f64>,
+        triangles: Vec<u32>,
+        triangle_starts: Vec<u32>,
+        shell_starts: Vec<u32>,
+        solid_starts: Vec<u32>,
+    }
+
+    /// Defects `BRepCheck_Analyzer` finds (`qoob3d_defects`): element `i` has
+    /// the kind `kinds[i]` (0 vertex, 1 edge, 2 wire, 3 face, 4 shell,
+    /// 5 solid), the 1-based index `indices[i]` among the elements of that
+    /// kind, the statuses `statuses[i]` and the box `bounds[6 i..6 i + 6]`.
+    struct Qoob3dDefects {
+        kinds: Vec<u32>,
+        indices: Vec<u32>,
+        statuses: Vec<String>,
+        bounds: Vec<f64>,
+    }
+
     unsafe extern "C++" {
         include!("qoob3d-kernel/cpp/qoob3d_occt.hxx");
 
@@ -78,11 +113,14 @@ pub(crate) mod ffi {
             faces: &TopoDS_Shape,
             start_point: &[f64],
             end_point: &[f64],
+            ruled: bool,
         ) -> Result<UniquePtr<TopoDS_Shape>>;
         fn qoob3d_boolean(
             a: &TopoDS_Shape,
             b: &TopoDS_Shape,
             op: u32,
+            fuzzy: f64,
+            parallel: bool,
         ) -> Result<UniquePtr<TopoDS_Shape>>;
         fn qoob3d_profile_boolean(
             a: &TopoDS_Shape,
@@ -90,7 +128,7 @@ pub(crate) mod ffi {
             op: u32,
         ) -> Result<UniquePtr<TopoDS_Shape>>;
         fn qoob3d_distance(a: &TopoDS_Shape, b: &TopoDS_Shape, max: f64) -> Result<f64>;
-        fn qoob3d_volume(shape: &TopoDS_Shape) -> Result<f64>;
+        fn qoob3d_volume(shape: &TopoDS_Shape, relative_error: f64) -> Result<f64>;
         fn qoob3d_is_valid(shape: &TopoDS_Shape) -> Result<bool>;
         fn qoob3d_solid_count(shape: &TopoDS_Shape) -> Result<u32>;
 
@@ -143,9 +181,35 @@ pub(crate) mod ffi {
         fn qoob3d_bed_area(shape: &TopoDS_Shape) -> Result<f64>;
         fn qoob3d_overhang_area(shape: &TopoDS_Shape, max_angle: f64) -> Result<f64>;
         fn qoob3d_write_step(shape: &TopoDS_Shape, path: &str) -> Result<()>;
-        fn qoob3d_read_step(path: &str) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_polyhedron(p: &Qoob3dPolyhedron) -> Result<UniquePtr<TopoDS_Shape>>;
         fn qoob3d_write_brep(shape: &TopoDS_Shape, path: &str) -> Result<()>;
         fn qoob3d_read_brep(path: &str) -> Result<UniquePtr<TopoDS_Shape>>;
+
+        fn qoob3d_defects(shape: &TopoDS_Shape, limit: u32) -> Result<Qoob3dDefects>;
+        fn qoob3d_heal(shape: &TopoDS_Shape, tolerance: f64) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_read_step_named(
+            path: &str,
+            names: &mut Vec<String>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_pick_solids(
+            shape: &TopoDS_Shape,
+            indices: &[u32],
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_profile_outline(faces: &TopoDS_Shape) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_fill_voids(shape: &TopoDS_Shape) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_offset_shape(
+            shape: &TopoDS_Shape,
+            distance: f64,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        fn qoob3d_heights(
+            shape: &TopoDS_Shape,
+            x0: f64,
+            y0: f64,
+            dx: f64,
+            dy: f64,
+            nx: u32,
+            ny: u32,
+        ) -> Result<Vec<f64>>;
     }
 }
 

@@ -642,7 +642,13 @@ fn dropping_the_poller_stops_polling() {
 // ================================================================== Live (view model)
 
 fn part(name: &str, state: PartState, key: Option<&str>) -> Part {
-    Part { name: name.into(), file: format!("parts/{name}.rhai"), state, key: key.map(Into::into) }
+    Part {
+        name: name.into(),
+        file: format!("parts/{name}.rhai"),
+        state,
+        key: key.map(Into::into),
+        color: None,
+    }
 }
 
 fn cube_mesh(s: f32) -> qoob3d_core::ShapeMesh {

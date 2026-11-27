@@ -132,6 +132,13 @@ pub(crate) fn workers_of(parent: u32) -> Vec<u32> {
         .collect()
 }
 
+/// Gives `command` the runtime folder of the test project around `dir`
+/// (`<root>/runtime`, `QOOB3D_RUNTIME_DIR`), so the worker slots of a test
+/// (WS-PRE-06) are its own and never those of the user's services.
+pub(crate) fn isolated<'a>(command: &'a mut Command, dir: &Path) -> &'a mut Command {
+    command.env("QOOB3D_RUNTIME_DIR", dir.parent().unwrap_or(dir).join("runtime"))
+}
+
 /// Waits until `cond` holds, polling every 20 ms; false on timeout.
 pub(crate) fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + timeout;
@@ -328,7 +335,7 @@ impl Service {
     /// Spawns `qoob3d serve <DIR>` and waits until it answers `/status`.
     pub(crate) fn start(p: &Project) -> Self {
         let mut command = Command::new(BIN);
-        command.arg("serve").arg(&p.dir);
+        isolated(&mut command, &p.dir).arg("serve").arg(&p.dir);
         Self::start_with(p, &mut command)
     }
 
@@ -485,7 +492,7 @@ fn reader(mut r: impl std::io::Read + Send + 'static) -> Receiver<String> {
 
 /// `qoob3d <args>` with working directory `dir`, killed after `timeout`.
 pub(crate) fn cli(dir: &Path, args: &[&str], timeout: Duration) -> CliOut {
-    let mut child = Command::new(BIN)
+    let mut child = isolated(&mut Command::new(BIN), dir)
         .args(args)
         .current_dir(dir)
         .stdin(Stdio::null())

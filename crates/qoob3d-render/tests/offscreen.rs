@@ -9,8 +9,8 @@ use qoob3d_render::{COLOR_FORMAT, Camera, SceneOptions, ViewportRenderer, wgpu};
 const W: u32 = 320;
 const H: u32 = 200;
 
-#[test]
-fn cube_is_drawn_over_background() {
+/// The scene rendered without grid, fitted; `None` without a GPU.
+fn rendered(scene: &ShapeMesh, name: &str) -> Option<Vec<u8>> {
     let gpu = match HeadlessGpu::new() {
         Ok(gpu) => gpu,
         // `cargo xtask check` sets QOOB3D_REQUIRE_GPU so the test cannot pass
@@ -21,17 +21,16 @@ fn cube_is_drawn_over_background() {
         }
         Err(err) => {
             eprintln!("skipping: {err}");
-            return;
+            return None;
         }
     };
     let (device, queue) = (&gpu.device, &gpu.queue);
     assert_eq!(COLOR_FORMAT, wgpu::TextureFormat::Rgba8UnormSrgb);
 
-    let mesh = cube(20.0);
     let mut renderer = ViewportRenderer::new(device);
-    renderer.set_scene(device, &ShapeMesh { faces: mesh.clone(), ..Default::default() });
+    renderer.set_scene(device, scene);
     let mut camera = Camera::default();
-    camera.fit(mesh.bounds().unwrap(), W as f32 / H as f32);
+    camera.fit(scene.faces.bounds().expect("a scene with faces"), W as f32 / H as f32);
 
     let (view, recreated) = renderer.render(
         device,
@@ -42,17 +41,23 @@ fn cube_is_drawn_over_background() {
     );
     assert!(recreated);
     let pixels = read_rgba8(device, queue, view.texture());
-
     if let Ok(dir) = std::env::var("QOOB3D_TEST_IMAGE_DIR") {
-        write_png(&format!("{dir}/offscreen_cube.png"), &pixels);
+        write_png(&format!("{dir}/{name}.png"), &pixels);
     }
+    Some(pixels)
+}
 
-    let px = |x: u32, y: u32| {
-        let i = ((y * W + x) * 4) as usize;
-        [pixels[i], pixels[i + 1], pixels[i + 2]]
-    };
-    let center = px(W / 2, H / 2);
-    let corner = px(2, 2);
+fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 3] {
+    let i = ((y * W + x) * 4) as usize;
+    [pixels[i], pixels[i + 1], pixels[i + 2]]
+}
+
+#[test]
+fn cube_is_drawn_over_background() {
+    let scene = ShapeMesh { faces: cube(20.0), ..Default::default() };
+    let Some(pixels) = rendered(&scene, "offscreen_cube") else { return };
+    let center = pixel(&pixels, W / 2, H / 2);
+    let corner = pixel(&pixels, 2, 2);
     let luminance = |p: [u8; 3]| p.iter().map(|&c| c as u32).sum::<u32>();
 
     assert!(luminance(corner) < 3 * 80, "background should be dark, got {corner:?}");
@@ -60,6 +65,28 @@ fn cube_is_drawn_over_background() {
         luminance(center) > luminance(corner) + 3 * 40,
         "cube should be clearly brighter than background: center {center:?}, corner {corner:?}"
     );
+}
+
+/// AG-PJ-07: a part that declares a colour is drawn in it; the theme's body
+/// colour stays for the others.
+#[test]
+fn a_tinted_part_is_drawn_in_its_colour() {
+    let plain = ShapeMesh { faces: cube(20.0), ..Default::default() };
+    let red = plain.clone().tinted(Some([0xC0, 0x20, 0x20]));
+    let (Some(plain), Some(red)) =
+        (rendered(&plain, "offscreen_plain"), rendered(&red, "offscreen_red"))
+    else {
+        return;
+    };
+    let [r, g, b] = pixel(&red, W / 2, H / 2).map(i32::from);
+    assert!(r > g + 60 && r > b + 60, "the tinted cube is red: {:?}", [r, g, b]);
+    let [r, g, b] = pixel(&plain, W / 2, H / 2).map(i32::from);
+    assert!(
+        (r - g).abs() < 40 && r < b + 40,
+        "the plain cube keeps the theme colour: {:?}",
+        [r, g, b]
+    );
+    assert_eq!(pixel(&red, 2, 2), pixel(&plain, 2, 2), "the background is the same");
 }
 
 fn write_png(path: &str, rgba: &[u8]) {

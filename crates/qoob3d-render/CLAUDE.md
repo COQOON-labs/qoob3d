@@ -19,12 +19,15 @@ wgpu viewport: camera, pipelines, offscreen targets, headless helpers.
 - Grid, print bed (polygon), exclusion zones, single-nozzle zones and X/Y axes are drawn by the
   analytic full-screen shader `fs_grid` (ADR-0021). The polygons are in the uniform `bed`
   (`MAX_BED_POINTS` = 192, same value in `xtask printers`). The grid is the world XY plane.
+- A part's own colour arrives as `ShapeMesh::tints` (sRGB per run of vertices) and becomes a
+  linear vertex colour with alpha 1; alpha 0 means the theme's body colour (AG-PJ-07).
 - Check visual changes: `cargo xtask screenshot`, then look at the PNGs.
 
 ## Files
 
 - `src/camera.rs`: `Camera` (orbit/orbit around pivot, pan, zoom to the cursor, fit,
-  perspective/ortho, `ray`, `project`, `interpolate`), `ViewPreset`. With unit tests.
+  `fit_tight` for orthographic images (projected box, AG-MC-12), perspective/ortho, `ray`,
+  `project`, `interpolate`), `ViewPreset`. With unit tests.
 - `src/renderer.rs`: `ViewportRenderer` (`set_scene`, `render`), `SceneOptions`, pipelines
   (background, bodies, lines, grid), targets.
 - `src/headless.rs`: headless device and texture readback (tests, CLI).

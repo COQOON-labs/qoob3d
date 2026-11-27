@@ -12,11 +12,12 @@ scripts; an AI agent works on it over MCP, the human gives tasks and accepts res
 | --- | --- |
 | Big picture: layers, threads, data flow, "where do I find what" | `docs/architecture.md` |
 | **All decisions with rationale** (index with status) | `docs/adr/README.md` |
-| **Requirements** per area (IDs `AG-…`, `WA-…`, phases, open decisions) | `docs/requirements/` |
+| **Requirements** per area (IDs `AG-…`, `WA-…`, `WS-…`, phases, open decisions) | `docs/requirements/` |
 | Theme, colors, layout | `docs/design/theme.md` |
 | Mouse, trackpad and key bindings | `docs/design/controls.md` |
 | **Agent workflow**: script API, project folder, service, tasks, checks, MCP (IDs `AG-…`) | `docs/requirements/agent.md`, `docs/script-api.md` |
 | Live project view in the app (IDs `WA-…`) | `docs/requirements/project-app.md` |
+| Workbench: overview of projects, several open, agent sessions, Claude accounts (IDs `WS-…`; S0 done, S1–S3 specified) | `docs/requirements/workspace.md`, ADR-0057 |
 | Background: original concept and M0 measurements | `docs/concept/` |
 | Rules of a crate | `crates/<crate>/CLAUDE.md` (loaded automatically) |
 | **Quality harness for AI agents**: layers, rule → check, voluntary tools | `docs/harness.md` |
@@ -150,6 +151,7 @@ Crate-specific pitfalls are in the respective `crates/<crate>/CLAUDE.md`.
 | R5 | Findings of the first agent run and of the critic: task binding, guide, API helpers, service hardening | implemented, acceptance run open |
 | C1 | Cleanup 2026-11: lean harness, old interactive path removed, topic ADRs | ✅ done (PR #7) |
 | C2 | Own crate `qoob3d-project` for service, worker, client, MCP and `init` | in progress (branch `project-crate`) |
+| S0 | Workbench service prerequisites WS-PRE-01..06: digest memo outside the lock, kernel fingerprint, `busy`, `summary.json`, idle shutdown, machine-wide worker budget (ADR-0055) | ✅ done |
 
 ## Open items
 

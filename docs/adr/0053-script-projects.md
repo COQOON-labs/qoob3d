@@ -49,9 +49,63 @@ mandatory `source` and `status`), `checks/*.rhai`, `tasks/*.md`; `out/` (exports
 - The CAD API (`qoob3d_kernel::script`) is registered into the engine; every call goes
   straight to OCCT through our wrappers (ADR-0004). Geometry never runs in Rhai.
 - Booleans are batched and checked by a plausibility rule on the volume, because OCCT can
-  return "valid" results that are wrong.
+  return "valid" results that are wrong; freeform bodies get the rules below.
 - The API reference `docs/script-api.md` is product surface: every example in it runs in the
   kernel tests, and it is served to agents over MCP.
+
+### Booleans on freeform bodies (AG-SC-25…26, measured on a real model)
+
+An imported hull (1689 faces, mostly B-spline) showed four ways OCCT fails silently or
+loudly; each rule below is the one the measurements supported:
+
+- **Volume**: the fixed Gauss integration was 1.1 % off on the hull (2 091 902 against
+  2 115 980 mm³; Fusion: 2 115.8 cm³), so a cut of 15 pin holes looked like "removed no
+  material". Volumes are integrated adaptively to 1e-7 relative.
+- **Fuzzy for cuts and commons**: an exact common of the hull with a slab whose top lay in a
+  plane through edges of the hull returned 39 270 mm³ and was valid; the integral of 2D
+  sections gave 78 493, the fuzzy common 78 516. Common and cut of the same exact run still
+  added up to the body (the piece was misclassified on both sides), so a bookkeeping check
+  does not find this. Cuts, commons and sections of freeform bodies therefore use twice the
+  inputs' largest edge tolerance (at least 1e-5 mm, which was the smallest value that gave
+  the right result) as fuzzy value.
+- **Exact unions**: the union of the same hull with its deck lid was right exactly
+  (2 615 471 mm³) and destroyed with any fuzzy value (negative or 2.5 % off volume). Unions
+  stay exact; fuzzy is their last retry. A union must also keep the box of all its inputs: an
+  earlier variant dropped the lid while its volume stayed above the largest input.
+- **Repair**: cuts through freeform faces came back invalid (edges whose 3D and 2D curves
+  disagree). ShapeFix plus same-parameter made every one of them valid without changing the
+  volume; ShapeFix_Wireframe changed it by up to 3 % and is not used. Invalid results of
+  booleans on freeform bodies are repaired at once; `heal` and `defects` expose it to scripts.
+- **Retries**: a failed or implausible boolean is run again serially (parallel runs failed
+  where serial ones succeeded); analytic shapes never take the fuzzy or repair path, so their
+  results and costs are unchanged. The cold build of the kit project went from invalid pieces
+  to all valid in 2 min 15 s.
+
+### Lettering from a font file of the project (AG-SC-38)
+
+A model of a real ship needed its name on the hull, and the design it came from had none.
+Decided 2026-11-26:
+
+- **`text(string, #{ font, height })` returns a profile** like `rect` and `polygon`: outlines
+  with the counters as holes, cap height in mm, so everything that takes a profile (extrude,
+  profile algebra, `on`) works on letters.
+- **The font is a file of the project**, read like an imported STEP or mesh file: confined to
+  the project folder, and its bytes enter the cache key. No system fonts (a build would
+  depend on the machine) and no font compiled into the kernel.
+- **Outlines are parsed in `qoob3d-core`** with `skrifa` (fontations: pure Rust, maintained,
+  egui's font reader too; the legacy `kern` table through its `read-fonts`; at least 0.50,
+  whose `read-fonts` no longer panics on a glyph without points, which the damaged-font
+  property test found in 0.44)
+  and flattened to polygons within 0.002 × cap height; holes are found by nesting depth, not
+  by winding. Font bytes are foreign input: sizes are capped (16 MiB, 200 characters, points
+  per glyph). `ttf-parser`, used first, is unmaintained (RUSTSEC-2026-0192) and a parser
+  of foreign bytes without fixes is not kept.
+- **New projects get DejaVu Sans Bold** with its licence (`lib/examples/`, 0.7 MB): a free
+  face with Latin diacritics, so the reference examples run everywhere.
+
+Known gap: glyphs that touch in one point (kerned "R" and "D" of that font) give an edge
+shared by four faces once extruded; the first model works around it with extra spacing.
+Rejected: OCCT's own text builder (needs FreeType in the OCCT build, ADR-0004).
 
 ### Worker processes, the service never runs OCCT
 
@@ -106,6 +160,9 @@ in `qoob3d-core::project`, the script engine in `qoob3d-kernel::script`.
   sandboxed by default.
 - **OCCT in a thread of the service** – a segfault or memory blow-up would take down the
   service.
+- **One fuzzy value for every boolean** – right for the cuts, destroyed the union (see above).
+- **Bookkeeping of cuts (common + cut = body)** – costs a second result and three volumes per
+  cut and did not find the misclassified slab.
 
 ## References
 
@@ -113,6 +170,6 @@ in `qoob3d-core::project`, the script engine in `qoob3d-kernel::script`.
   `crates/qoob3d-core/src/project/`, `crates/qoob3d-core/src/qmesh.rs`,
   `crates/qoob3d-project/src/{service.rs,worker.rs}`, `crates/qoob3d-app/src/{cli.rs,live.rs}`,
   `crates/qoob3d-project/src/service/{pool,jobs,snapshot}.rs`
-- `docs/script-api.md`, `docs/requirements/agent.md`, `docs/requirements/project-app.md`,
+- `docs/script-api.md`, `docs/requirements/agent.md` (§6.6), `docs/requirements/project-app.md`,
   `docs/concept/werft-concept.md`, `docs/concept/m0-report.md`
 - Related: ADR-0004, ADR-0036, ADR-0054, ADR-0055

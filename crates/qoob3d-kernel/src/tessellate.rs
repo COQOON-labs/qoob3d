@@ -36,6 +36,7 @@ pub(crate) fn tessellate_angle(
             face_ids: raw.face_ids,
         },
         edges: Polylines { points: triples(&raw.edge_points), starts: raw.edge_starts },
+        tints: Vec::new(),
     };
     validate(&mesh)?;
     Ok(mesh)

@@ -15,13 +15,15 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use qoob3d_core::project::layout;
-use qoob3d_core::project::{self, KeyInputs, Mesh, Values};
+use qoob3d_core::project::{self, KeyInputs, Mesh, PrintPose, Values, file_digest};
 use qoob3d_core::qmesh;
 use qoob3d_kernel::script::{self, PartMode, RunOptions, ScriptError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 mod probe;
+#[cfg(test)]
+mod tests;
 
 pub(crate) use self::probe::Probe;
 
@@ -33,14 +35,20 @@ pub(crate) const ANSWER_MARK: &str = "{\"job\":";
 /// code is meant to be declarations, not computations (AG-HD-02).
 const DECLARE_MAX_OPERATIONS: u64 = 1_000_000;
 
-/// Version of what a cache entry holds; 2: the `.json` has `watertight`.
-const ENTRY_VERSION: u32 = 2;
+/// Version of what a cache entry holds; 2: the `.json` has `watertight`,
+/// 3: `files_read` (AG-SC-24), 4: `mesh`, `printed`, watertight judged on
+/// the exported form.
+const ENTRY_VERSION: u32 = 4;
 
-/// The program part of a cache key: the program and entry versions and the
-/// tessellation settings (AG-PF-05), so changing any of them rebuilds.
+/// SHA-256 of the kernel's sources at build time (WS-PRE-02, `build.rs`).
+pub(crate) const KERNEL_FINGERPRINT: &str = env!("QOOB3D_KERNEL_FINGERPRINT");
+
+/// The program part of a cache key: the program version, the kernel
+/// fingerprint, the entry version and the tessellation settings (AG-PF-05,
+/// WS-PRE-02), so changing any of them rebuilds.
 pub(crate) fn key_version(mesh: &Mesh) -> String {
     format!(
-        "{PROGRAM_VERSION} entry {ENTRY_VERSION} mesh {} {}",
+        "{PROGRAM_VERSION} kernel {KERNEL_FINGERPRINT} entry {ENTRY_VERSION} mesh {} {}",
         mesh.deflection_mm, mesh.angle_deg
     )
 }
@@ -128,11 +136,26 @@ pub(crate) struct PartError {
     pub(crate) line: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) column: Option<usize>,
+    /// Lines the script printed before it failed (AG-SC-03): often the clue.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) printed: Vec<String>,
 }
 
 impl PartError {
     pub(crate) fn new(kind: ErrorKind, message: impl ToString) -> Self {
-        Self { kind, message: message.to_string(), file: None, line: None, column: None }
+        Self {
+            kind,
+            message: message.to_string(),
+            file: None,
+            line: None,
+            column: None,
+            printed: Vec::new(),
+        }
+    }
+
+    /// A script error with the lines printed before it.
+    pub(crate) fn failed_run(file: Option<&Path>, failure: script::RunFailure) -> Self {
+        Self { printed: failure.printed, ..Self::script(file, &failure.error) }
     }
 
     /// A script error in `file` (`None`: a throwaway script).
@@ -147,6 +170,7 @@ impl PartError {
             file: file.map(|f| f.display().to_string()),
             line: Some(*line),
             column: Some(*column),
+            printed: Vec::new(),
         }
     }
 }
@@ -165,6 +189,15 @@ pub(crate) struct PartDeclaration {
     pub(crate) name: String,
     #[serde(default)]
     pub(crate) depends: Vec<String>,
+    /// How it lies on the bed for printing (AG-PJ-06).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) print: Option<PrintPose>,
+    /// `#RRGGBB` (AG-PJ-07).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) color: Option<String>,
+    /// The part it prints with as one object (AG-PJ-07).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) print_with: Option<String>,
 }
 
 /// What `text` (the part or check file `file`) declares, in
@@ -189,7 +222,13 @@ pub(crate) fn declaration(dir: &Path, file: &Path, text: &str) -> Result<Declara
         parts: output
             .parts
             .into_iter()
-            .map(|p| PartDeclaration { name: p.name, depends: p.depends })
+            .map(|p| PartDeclaration {
+                name: p.name,
+                depends: p.depends,
+                print: p.print,
+                color: p.color,
+                print_with: p.print_with,
+            })
             .collect(),
         checks: output.checks.into_iter().map(|c| c.name).collect(),
     })
@@ -205,11 +244,28 @@ pub(crate) fn declaration_of(dir: &Path, file: &Path) -> Result<Declaration, Par
     declaration(dir, file, &text)
 }
 
+/// How much lower than its service a worker runs (nice): OCCT keeps every
+/// core busy during a build, and the service must still answer at once
+/// (WS-PRE-01, ADR-0055).
+const NICER_BY: i32 = 10;
+
+/// Lowers the priority of this process by [`NICER_BY`], before any thread
+/// starts (on Linux the value is per thread and new threads inherit it).
+fn lower_priority() {
+    use rustix::process::{getpriority_process, setpriority_process};
+    let lowered = getpriority_process(None)
+        .and_then(|now| setpriority_process(None, (now + NICER_BY).min(19)));
+    if let Err(e) = lowered {
+        tracing::warn!("worker keeps the priority of its service: {e}");
+    }
+}
+
 /// Main loop of `qoob3d worker`.
 ///
 /// # Errors
 /// Writing to stdout failed (the service is gone).
 pub fn run() -> anyhow::Result<()> {
+    lower_priority();
     let (tx, requests) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
@@ -299,22 +355,26 @@ fn build(request: &Request, name: &str) -> Result<(String, Value), PartError> {
         project_dir: Some(dir.clone()),
         values: values.iter().map(|v| (v.id.clone(), v.value.clone())).collect(),
         parts: PartMode::One { name: name.to_owned(), deps },
+        mesh: request.mesh,
         ..RunOptions::default()
     };
-    let output = script::run(&text, &options).map_err(|e| PartError::script(Some(&file), &e))?;
+    let output = script::run_keeping_prints(&text, &options)
+        .map_err(|f| PartError::failed_run(Some(&file), f))?;
     let Some((_, shape)) = output.shapes.iter().find(|(n, _)| n == name) else {
         return Err(load_error(format!("{}: part {name:?} was not built", file.display())));
     };
     // AG-HD-06: the key hashes the modules the engine resolved in this run,
-    // not what a scan of the source guesses.
+    // not what a scan of the source guesses; AG-SC-24: and the files that
+    // `import_step` and `import_mesh` read, after the modules.
     let modules = output
         .modules_read
         .iter()
-        .map(|m| std::fs::read(dir.join(m)).map_err(|e| io_error(m, e)))
+        .chain(&output.files_read)
+        .map(|m| project::read_digest(&dir.join(m)).map_err(|e| io_error(m, e)))
         .collect::<Result<Vec<_>, _>>()?;
     let key = project::cache_key(&KeyInputs {
         program_version: key_version(&request.mesh),
-        part_file: source,
+        part_file: file_digest(&source),
         modules,
         values_read: output.values_read.clone().into_iter().collect(),
         dependency_keys,
@@ -326,33 +386,54 @@ fn build(request: &Request, name: &str) -> Result<(String, Value), PartError> {
     let base = folder.join(&key);
     let brep = base.with_extension("brep");
     shape.write_brep(&brep).map_err(|e| io_error(&brep, e))?;
-    let mesh = shape
-        .mesh_with_angle(request.mesh.deflection_mm, request.mesh.angle_deg)
-        .map_err(|e| io_error(&base, e))?;
+    // Validity of the shape as cached, before meshing touches it.
+    let valid = shape.is_valid();
+    // A face OCCT cannot triangulate is a problem of the geometry, not of
+    // the cache folder (finding 1.4 of the Damen 5009 project).
+    let mesh =
+        shape.mesh_with_angle(request.mesh.deflection_mm, request.mesh.angle_deg).map_err(|e| {
+            let mut error =
+                PartError::new(ErrorKind::Script, format!("part {name}: meshing failed: {e}"));
+            error.file = Some(file.display().to_string());
+            error
+        })?;
     let qmsh = base.with_extension("qmsh");
     std::fs::write(&qmsh, qmesh::write(&mesh)).map_err(|e| io_error(&qmsh, e))?;
     // The FDM gate (ADR-0002): STL and 3MF are written from this mesh, and a
     // slicer needs it closed.
-    let watertight = mesh.faces.analyze().is_watertight();
+    // Judged on the welded form STL and 3MF are written in (findings of
+    // the Damen 5009 project: the raw mesh flagged closed exports).
+    let report = mesh.faces.export_report();
+    let watertight = report.is_watertight();
     drop(mesh);
 
-    let valid = shape.is_valid();
     let mut warnings = Vec::new();
     if !valid {
-        warnings.push("the shape is not valid (BRepCheck)");
+        warnings.push("the shape is not valid (BRepCheck); defects(shape) names the faces and edges, heal(shape) repairs most".to_owned());
     }
     if !watertight {
-        warnings.push("the mesh is not watertight, a slicer may reject it");
+        warnings.push(format!(
+            "the mesh is not watertight ({} open, {} non-manifold, {} flipped edges), a slicer may reject it",
+            report.open_edges, report.non_manifold_edges, report.inconsistent_edges
+        ));
     }
     let meta = json!({
         "volume": shape.volume(),
         "bbox": probe::bbox(shape),
         "valid": valid,
         "watertight": watertight,
+        "mesh": {
+            "triangles": report.triangles,
+            "open_edges": report.open_edges,
+            "non_manifold_edges": report.non_manifold_edges,
+            "flipped_edges": report.inconsistent_edges,
+        },
         "solids": shape.solid_count(),
         "duration_s": start.elapsed().as_secs_f64(),
         "values_read": output.values_read,
         "modules_read": output.modules_read,
+        "files_read": output.files_read,
+        "printed": output.printed,
         "warnings": warnings,
     });
     // The `.json` comes last and atomically: it marks the entry complete.

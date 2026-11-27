@@ -9,11 +9,15 @@
 
 mod api;
 mod check;
+mod imports;
 mod limits;
 mod measure;
+mod polyhedron;
 mod profile;
 mod project;
 mod select;
+mod solid_ops;
+mod text;
 
 use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeMap;
@@ -38,13 +42,25 @@ pub use project::{DeclaredPart, PartMode};
 /// and release builds; scripts must behave the same in both.
 const MAX_CALL_LEVELS: usize = 64;
 
+/// Relative error of every volume (AG-SC-12): OCCT's default integration is
+/// exact on analytic faces but off by 0.1 % and more on freeform faces of
+/// imported bodies, so a cut of small holes looked like "removed nothing".
+pub(crate) const VOLUME_RELATIVE_ERROR: f64 = 1e-7;
+
+/// Nesting depth of expressions at the top level and inside functions
+/// (AG-SC-02). Rhai's defaults are 32 and 16 in debug builds and twice that
+/// in release builds: `tools.push(pin([p[0] * f, p[1] * f, zw]))` in a loop
+/// of a function failed in the debug build only.
+const MAX_EXPR_DEPTH: usize = 128;
+const MAX_FUNCTION_EXPR_DEPTH: usize = 64;
+
 /// Bounding boxes are reported in steps of 1e-9 mm (AG-HD-11): OCCT's box of
 /// a shape read back from a BREP file differs from the built one in the last
 /// bits, and every place that reports a box must show the same numbers.
 const BBOX_STEPS_PER_MM: f64 = 1e9;
 
 /// How a script runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RunOptions {
     /// Rhai operations before the script stops with [`ScriptError::Limit`].
     pub max_operations: u64,
@@ -57,6 +73,8 @@ pub struct RunOptions {
     pub parts: PartMode,
     /// Built parts for `part("Name")` and the selection of checks (AG-CK-01).
     pub check: CheckOptions,
+    /// Tessellation of `mesh_report` (AG-SC-34): the project's `[mesh]`.
+    pub mesh: qoob3d_core::project::Mesh,
 }
 
 impl Default for RunOptions {
@@ -67,6 +85,7 @@ impl Default for RunOptions {
             values: BTreeMap::new(),
             parts: PartMode::All,
             check: CheckOptions::default(),
+            mesh: qoob3d_core::project::Mesh::default(),
         }
     }
 }
@@ -87,6 +106,10 @@ pub struct RunOutput {
     /// Module files the engine resolved for `import`, relative to the
     /// project folder, each once in the order of first use (AG-HD-06).
     pub modules_read: Vec<PathBuf>,
+    /// Files `import_step`, `import_mesh` and `text` (its font) read,
+    /// relative to the project folder, each once in the order of first use:
+    /// inputs of the cache key like the modules (AG-SC-24).
+    pub files_read: Vec<PathBuf>,
 }
 
 /// A failed script run (AG-SC-03). Lines and columns are 1-based; 0 means
@@ -150,7 +173,9 @@ impl Shape {
 
     /// Volume in mm³ (NaN if OCCT cannot compute it). Computed once.
     pub fn volume(&self) -> f64 {
-        *self.0.volume.get_or_init(|| occ(ffi::qoob3d_volume(self.get())).unwrap_or(f64::NAN))
+        *self.0.volume.get_or_init(|| {
+            occ(ffi::qoob3d_volume(self.get(), VOLUME_RELATIVE_ERROR)).unwrap_or(f64::NAN)
+        })
     }
 
     /// `BRepCheck_Analyzer` finds no defect.
@@ -225,14 +250,35 @@ fn compound<'a>(parts: impl IntoIterator<Item = &'a Shape>) -> Result<Shape, Ker
     occt::shape(Ok(c)).map(Shape::new)
 }
 
+/// A failed run with the lines the script printed before the error
+/// (AG-SC-03): what it printed is often the clue to why it failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunFailure {
+    pub error: ScriptError,
+    pub printed: Vec<String>,
+}
+
+/// [`run`] that keeps the printed lines of a failed run.
+///
+/// # Errors
+/// The script fails: the error and the lines printed before it.
+pub fn run_keeping_prints(source: &str, options: &RunOptions) -> Result<RunOutput, RunFailure> {
+    if options.parts == PartMode::Declare {
+        return run(source, options).map_err(|error| RunFailure { error, printed: Vec::new() });
+    }
+    let (outcome, output, _) = evaluate(source, options, options.max_operations);
+    match outcome {
+        Ok(()) => Ok(output),
+        Err(e) => Err(RunFailure { error: script_error(*e), printed: output.printed }),
+    }
+}
+
 /// Evaluates a script (AG-SC-01). Declaration discovery
 /// (`PartMode::Declare`) runs with at most 1 000 000 operations and with size
 /// limits for strings, arrays and maps (AG-HD-02).
 pub fn run(source: &str, options: &RunOptions) -> Result<RunOutput, ScriptError> {
     if options.parts != PartMode::Declare {
-        let (outcome, output, _) = evaluate(source, options, options.max_operations);
-        outcome.map_err(|e| script_error(*e))?;
-        return Ok(output);
+        return run_keeping_prints(source, options).map_err(|f| f.error);
     }
     // 0 means no limit to Rhai.
     let operations = match options.max_operations {
@@ -275,6 +321,7 @@ fn evaluate(
     let mut engine = Engine::new();
     engine.set_max_operations(operations);
     engine.set_max_call_levels(MAX_CALL_LEVELS);
+    engine.set_max_expr_depths(MAX_EXPR_DEPTH, MAX_FUNCTION_EXPR_DEPTH);
     match &project {
         Some(root) => engine.set_module_resolver(ProjectModules {
             root: root.clone(),
@@ -293,6 +340,7 @@ fn evaluate(
         Some(limits::apply(&mut engine))
     } else {
         api::register(&mut engine, &output, project);
+        solid_ops::register_mesh_report(&mut engine, options.mesh);
         None
     };
     project::register(&mut engine, &output, options);
@@ -367,6 +415,23 @@ fn inside_project(root: &Path, relative: &str) -> Result<PathBuf, String> {
     } else {
         Err(format!("{relative:?} leads outside the project"))
     }
+}
+
+/// The project file `relative` for `import_step`, `import_mesh` and the
+/// font of `text` (inside the project like modules), recorded in
+/// `files_read` (AG-SC-24).
+fn project_file(
+    root: &Path,
+    relative: &str,
+    output: &RefCell<RunOutput>,
+) -> Result<PathBuf, String> {
+    let full = inside_project(root, relative)?;
+    let read = full.strip_prefix(root).map_or_else(|_| relative.into(), Path::to_path_buf);
+    let files = &mut output.borrow_mut().files_read;
+    if !files.contains(&read) {
+        files.push(read);
+    }
+    Ok(full)
 }
 
 /// `import "lib/x"` resolves to `<project>/lib/x.rhai`, also inside modules.

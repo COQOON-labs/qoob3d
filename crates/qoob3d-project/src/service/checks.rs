@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::jobs::Work;
-use super::snapshot::{FileDecl, Record, Snapshot, views};
+use super::snapshot::{FileDecl, Hashing, Record, Snapshot};
 use super::{Answer, Failure, Service, State, body};
 use crate::worker::{ErrorKind, PartError, Probe};
 
@@ -215,10 +215,9 @@ impl Service {
         let file_errors = file_errors.chain(set.iter().flat_map(|c| &c.load_errors));
         load_errors.extend(file_errors.map(|e| e.message.clone()));
         let sources = set.map(|c| c.sources).unwrap_or_default();
-        let mut st = self.lock();
-        let parts = snapshot
-            .map(|s| views(&self.dir, &s, &mut st.records))
-            .unwrap_or_default()
+        let views = snapshot.map(|s| self.views(&s, Hashing::Wait)).unwrap_or_default();
+        let st = self.lock();
+        let parts = views
             .into_iter()
             .map(|v| (v.name, json!(v.state).as_str().unwrap_or_default().to_owned()))
             .collect();

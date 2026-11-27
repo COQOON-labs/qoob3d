@@ -6,12 +6,12 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
 use qoob3d_core::project::layout;
-use qoob3d_core::project::{Limits, Mesh};
+use qoob3d_core::project::{Config, Limits, Mesh};
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::jobs::Work;
-use super::snapshot::{Snapshot, State, views};
+use super::snapshot::{Hashing, Snapshot, State};
 use super::{Answer, Failure, Service, body, unknown_job};
 use crate::worker::{self, ErrorKind, PartError, Probe, Request};
 
@@ -20,6 +20,9 @@ struct RunBody {
     source: String,
     #[serde(default)]
     wait_s: f64,
+    /// Write the meshes of the shown shapes (AG-MC-12).
+    #[serde(default)]
+    meshes: bool,
 }
 
 #[derive(Deserialize)]
@@ -32,7 +35,7 @@ struct MeasureBody {
 impl Service {
     /// BREP files of the parts of `snapshot` that are built and current.
     pub(crate) fn built(&self, snapshot: &Snapshot) -> BTreeMap<String, PathBuf> {
-        let views = views(&self.dir, snapshot, &mut self.lock().records);
+        let views = self.views(snapshot, Hashing::Wait);
         views
             .into_iter()
             .filter(|v| v.state == State::Current)
@@ -63,11 +66,12 @@ impl Service {
             file,
             deps,
             step: None,
-            mesh: Mesh::default(),
+            // `mesh_report` in checks tessellates like the parts (AG-SC-34).
+            mesh: Config::load(&self.dir).map_or_else(|_| Mesh::default(), |c| c.mesh),
             cache: None,
             probe: Some(probe),
         };
-        match self.pool.run(&request, limits, cancel)? {
+        match self.work(&request, limits, cancel)? {
             worker::Answer { ok: true, meta: Some(meta), .. } => Ok(meta),
             answer => Err(answer.error.unwrap_or_else(|| {
                 PartError::new(ErrorKind::Crash, "the worker answered without a result")
@@ -78,18 +82,45 @@ impl Service {
     /// `POST /run` (AG-SV-05).
     pub(super) fn run(&self, bytes: &[u8]) -> Answer {
         let request: RunBody = body(bytes)?;
-        let id = self.enqueue(Work::Run(request.source), 0);
+        let id = self.enqueue(Work::Run { source: request.source, meshes: request.meshes }, 0);
         self.answer_job(id, request.wait_s)
     }
 
-    /// The job behind `/run`: `{shapes, printed}`.
+    /// The job behind `/run`: `{shapes, printed}`; with `meshes` (the job
+    /// id) the shapes' meshes go to `.qoob3d/run/<job>/` (AG-MC-12), in the
+    /// project's `[mesh]` quality.
     ///
     /// # Errors
     /// The project does not load, a limit, or the script error.
-    pub(crate) fn run_script(&self, source: &str, cancel: &AtomicBool) -> Result<Value, PartError> {
+    pub(crate) fn run_script(
+        &self,
+        source: &str,
+        meshes: Option<u64>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, PartError> {
         let snapshot = self.snapshot(None).map_err(|m| PartError::new(ErrorKind::Load, m))?;
-        let probe = Probe::Run { source: source.to_owned() };
-        self.probe(probe, None, self.built(&snapshot), &snapshot.config.limits, cancel)
+        let folder = meshes.map(|job| {
+            let full = layout::run_dir(&self.dir, job);
+            full.strip_prefix(&self.dir).map_or(full.clone(), std::path::Path::to_path_buf)
+        });
+        let probe = Probe::Run { source: source.to_owned(), meshes: folder };
+        let request = Request {
+            job: self.next_request(),
+            dir: self.dir.clone(),
+            part: None,
+            file: None,
+            deps: self.built(&snapshot),
+            step: None,
+            mesh: snapshot.config.mesh,
+            cache: None,
+            probe: Some(probe),
+        };
+        match self.work(&request, &snapshot.config.limits, cancel)? {
+            worker::Answer { ok: true, meta: Some(meta), .. } => Ok(meta),
+            answer => Err(answer.error.unwrap_or_else(|| {
+                PartError::new(ErrorKind::Crash, "the worker answered without a result")
+            })),
+        }
     }
 
     /// `POST /measure` (AG-SV-06): builds the parts if needed, then measures

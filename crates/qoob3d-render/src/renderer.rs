@@ -122,6 +122,14 @@ struct Globals {
 struct Vertex {
     position: [f32; 3],
     normal: [f32; 3],
+    /// Linear colour of the part; alpha 0 means the theme's body colour.
+    color: [f32; 4],
+}
+
+/// An sRGB byte as a linear value (the shaders compute linearly, ADR-0019).
+fn linear(byte: u8) -> f32 {
+    let c = f32::from(byte) / 255.0;
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
 
 /// One line segment, expanded to a screen-space quad in the vertex shader.
@@ -283,7 +291,7 @@ impl ViewportRenderer {
             &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4],
             })],
             true,
             Greater, // reverse-Z
@@ -339,12 +347,19 @@ impl ViewportRenderer {
     pub fn set_scene(&mut self, device: &wgpu::Device, scene: &ShapeMesh) {
         let faces = &scene.faces;
         self.mesh = (!faces.is_empty()).then(|| {
-            let vertices: Vec<Vertex> = faces
+            let mut vertices: Vec<Vertex> = faces
                 .positions
                 .iter()
                 .zip(&faces.normals)
-                .map(|(&position, &normal)| Vertex { position, normal })
+                .map(|(&position, &normal)| Vertex { position, normal, color: [0.0; 4] })
                 .collect();
+            for tint in &scene.tints {
+                let [r, g, b] = tint.color.map(linear);
+                let run = tint.vertices.start as usize..tint.vertices.end as usize;
+                for vertex in vertices.get_mut(run).into_iter().flatten() {
+                    vertex.color = [r, g, b, 1.0];
+                }
+            }
             GpuMesh {
                 vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("qoob3d mesh vertices"),
